@@ -37,7 +37,7 @@ snapshot. Corrupt or stale data cannot partially mutate a replica.
 - fixed-step movement, gravity, jump, voxel collision, ray targeting, and crosshair;
 - rifle and explosive actions crossing the same server command, 1,200-byte fragmentation,
   out-of-order reassembly, fingerprint validation, and client-replica path covered by tests;
-- boundary-aware chunk invalidation after destruction;
+- boundary-aware chunk invalidation and bounded background remeshing after destruction;
 - procedural lighting, roughness, surface variation, fog, and filmic tone mapping;
 - auto-terminating real-GPU smoke mode.
 
@@ -49,7 +49,7 @@ cleanly. This is point-in-time developer-machine evidence, not a portable FPS gu
 
 - Linux and Windows window/input abstraction;
 - bindless material tables and physically based shading;
-- chunk meshing off the render thread;
+- initial chunk meshing and streaming off the render thread;
 - GPU frustum and occlusion culling;
 - HDR output, temporal anti-aliasing, and measured dynamic resolution;
 - a benchmark capture for the RTX 4050 Laptop at 1,920×1,080.

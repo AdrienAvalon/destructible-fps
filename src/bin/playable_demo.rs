@@ -1,7 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use destructible_fps::{
-    DemoSession, FireMode,
+    DemoSession, FireMode, IVec3,
+    mesh_scheduler::{MAX_CHUNKS_PER_MESH_JOB, MeshScheduler},
     player::{MovementInput, Player},
     render::{RenderOutcome, Renderer},
 };
@@ -17,6 +18,7 @@ use winit::{
 };
 
 const FIXED_STEP_SECONDS: f32 = 1.0 / 120.0;
+const MAX_PENDING_MESH_CHUNKS: usize = 512;
 
 struct Game {
     window: Arc<Window>,
@@ -32,6 +34,10 @@ struct Game {
     accumulator: f32,
     last_action: String,
     showcase: bool,
+    mesh_scheduler: MeshScheduler,
+    pending_mesh_chunks: HashSet<IVec3>,
+    mesh_job_in_flight: bool,
+    mesh_started: Option<Instant>,
 }
 
 impl Game {
@@ -78,6 +84,10 @@ impl Game {
             accumulator: 0.0,
             last_action,
             showcase,
+            mesh_scheduler: MeshScheduler::new(),
+            pending_mesh_chunks: HashSet::new(),
+            mesh_job_in_flight: false,
+            mesh_started: None,
         })
     }
 
@@ -125,16 +135,17 @@ impl Game {
             mode,
         ) {
             Ok(Some(result)) => {
-                self.renderer
-                    .rebuild_chunks(self.session.world(), &result.dirty_chunks);
+                let dirty_count = result.dirty_chunks.len();
+                self.queue_dirty_chunks(result.dirty_chunks);
                 self.last_action = format!(
-                    "{:?}: {} fractures + {} endommages, {} datagrammes/{:.1} KiB, remesh {:.1} ms",
+                    "{:?}: {} fractures + {} endommages, {} datagrammes/{:.1} KiB, autorite {:.2} ms, {} chunks planifies",
                     mode,
                     result.report.fractured_voxels,
                     result.report.damaged_voxels,
                     result.datagrams,
                     result.encoded_bytes as f64 / 1_024.0,
-                    before.elapsed().as_secs_f64() * 1_000.0
+                    before.elapsed().as_secs_f64() * 1_000.0,
+                    dirty_count
                 );
                 println!("{}", self.last_action);
             }
@@ -143,6 +154,74 @@ impl Game {
                 self.last_action = format!("erreur d autorite: {error}");
                 eprintln!("{}", self.last_action);
             }
+        }
+    }
+
+    fn queue_dirty_chunks(&mut self, chunks: Vec<IVec3>) {
+        for chunk in chunks {
+            if self.pending_mesh_chunks.contains(&chunk) {
+                continue;
+            }
+            if self.pending_mesh_chunks.len() >= MAX_PENDING_MESH_CHUNKS {
+                "file de remeshing saturee; rendu volontairement bloque"
+                    .clone_into(&mut self.last_action);
+                break;
+            }
+            self.pending_mesh_chunks.insert(chunk);
+        }
+    }
+
+    fn pump_meshing(&mut self) {
+        match self.mesh_scheduler.poll() {
+            Ok(Some(completed)) => {
+                self.mesh_job_in_flight = false;
+                let elapsed_ms = self
+                    .mesh_started
+                    .take()
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1_000.0);
+                if completed.world_fingerprint == self.session.world().fingerprint() {
+                    let count = completed.meshes.len();
+                    self.renderer.upload_chunk_meshes(completed.meshes);
+                    self.last_action =
+                        format!("remeshing asynchrone: {count} chunks en {elapsed_ms:.2} ms");
+                } else {
+                    let stale_chunks = completed
+                        .meshes
+                        .into_iter()
+                        .map(|(chunk, _mesh)| chunk)
+                        .collect();
+                    self.queue_dirty_chunks(stale_chunks);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.mesh_job_in_flight = true;
+                self.last_action = format!("worker de remeshing arrete: {error}");
+            }
+        }
+
+        if self.mesh_job_in_flight || self.pending_mesh_chunks.is_empty() {
+            return;
+        }
+        let mut chunks: Vec<_> = self
+            .pending_mesh_chunks
+            .iter()
+            .copied()
+            .take(MAX_CHUNKS_PER_MESH_JOB)
+            .collect();
+        chunks.sort_unstable();
+        match self
+            .mesh_scheduler
+            .submit(self.session.world().clone(), chunks.clone())
+        {
+            Ok(()) => {
+                for chunk in chunks {
+                    self.pending_mesh_chunks.remove(&chunk);
+                }
+                self.mesh_job_in_flight = true;
+                self.mesh_started = Some(Instant::now());
+            }
+            Err(error) => self.last_action = format!("remeshing non planifie: {error}"),
         }
     }
 
@@ -163,6 +242,7 @@ impl Game {
                 steps += 1;
             }
         }
+        self.pump_meshing();
 
         let elapsed_seconds = now.duration_since(self.started).as_secs_f32();
         let (camera_position, view_direction) = if self.showcase {

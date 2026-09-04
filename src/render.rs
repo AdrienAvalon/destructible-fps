@@ -2,7 +2,10 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use crate::{IVec3, World, mesh::Vertex, mesh::mesh_chunk};
+use crate::{
+    IVec3, World,
+    mesh::{CpuMesh, Vertex, mesh_chunk},
+};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use std::{collections::HashMap, sync::Arc};
@@ -275,8 +278,18 @@ impl Renderer {
         self.refresh_stats();
     }
 
+    pub fn upload_chunk_meshes(&mut self, meshes: Vec<(IVec3, CpuMesh)>) {
+        for (chunk, mesh) in meshes {
+            self.upload_mesh(chunk, &mesh);
+        }
+        self.refresh_stats();
+    }
+
     fn upload_chunk(&mut self, world: &World, chunk: IVec3) {
-        let mesh = mesh_chunk(world, chunk);
+        self.upload_mesh(chunk, &mesh_chunk(world, chunk));
+    }
+
+    fn upload_mesh(&mut self, chunk: IVec3, mesh: &CpuMesh) {
         if mesh.indices.is_empty() {
             self.chunks.remove(&chunk);
             return;

@@ -7,6 +7,7 @@ pub mod destruction;
 pub mod generator;
 pub mod material;
 pub mod mesh;
+pub mod mesh_scheduler;
 pub mod player;
 pub mod render;
 pub mod replication;

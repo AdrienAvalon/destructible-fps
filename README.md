@@ -23,7 +23,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
   boundary changed;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
-- procedural material shading, directional light, distance fog, tone mapping, and a crosshair.
+- per-vertex voxel ambient occlusion, a 2,048² directional shadow map, procedural material
+  shading, distance fog, single-transfer tone mapping, and a crosshair.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
 game. Structural collapse, detached rigid bodies, remote sessions, audio, asset-quality PBR,
@@ -90,5 +91,6 @@ replication, meshing, controller, and shaders remain repository-owned.
 - periodic snapshots only for joining or repairing a detected gap;
 - scalable interest management rather than broadcasting the whole world.
 
-The architecture and staged acceptance gates are documented in
-[`docs/architecture.md`](docs/architecture.md).
+The runtime architecture is documented in [`docs/architecture.md`](docs/architecture.md). The
+complete path from this engineering slice to a distributable game, including measurable promotion
+gates and performance budgets, lives in [`docs/production-roadmap.md`](docs/production-roadmap.md).

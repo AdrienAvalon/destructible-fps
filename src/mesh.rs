@@ -12,6 +12,7 @@ pub struct Vertex {
     pub normal: [f32; 3],
     /// Linear-ish RGB and perceptual roughness.
     pub albedo_roughness: [f32; 4],
+    pub ambient_occlusion: f32,
 }
 
 #[derive(Debug, Default)]
@@ -29,6 +30,8 @@ impl CpuMesh {
 
 struct Face {
     neighbor: IVec3,
+    tangent_u: IVec3,
+    tangent_v: IVec3,
     normal: [f32; 3],
     corners: [[f32; 3]; 4],
 }
@@ -36,6 +39,8 @@ struct Face {
 const FACES: [Face; 6] = [
     Face {
         neighbor: IVec3::new(1, 0, 0),
+        tangent_u: IVec3::new(0, 1, 0),
+        tangent_v: IVec3::new(0, 0, 1),
         normal: [1.0, 0.0, 0.0],
         corners: [
             [1.0, 0.0, 0.0],
@@ -46,6 +51,8 @@ const FACES: [Face; 6] = [
     },
     Face {
         neighbor: IVec3::new(-1, 0, 0),
+        tangent_u: IVec3::new(0, 1, 0),
+        tangent_v: IVec3::new(0, 0, 1),
         normal: [-1.0, 0.0, 0.0],
         corners: [
             [0.0, 0.0, 1.0],
@@ -56,6 +63,8 @@ const FACES: [Face; 6] = [
     },
     Face {
         neighbor: IVec3::new(0, 1, 0),
+        tangent_u: IVec3::new(1, 0, 0),
+        tangent_v: IVec3::new(0, 0, 1),
         normal: [0.0, 1.0, 0.0],
         corners: [
             [0.0, 1.0, 1.0],
@@ -66,6 +75,8 @@ const FACES: [Face; 6] = [
     },
     Face {
         neighbor: IVec3::new(0, -1, 0),
+        tangent_u: IVec3::new(1, 0, 0),
+        tangent_v: IVec3::new(0, 0, 1),
         normal: [0.0, -1.0, 0.0],
         corners: [
             [0.0, 0.0, 0.0],
@@ -76,6 +87,8 @@ const FACES: [Face; 6] = [
     },
     Face {
         neighbor: IVec3::new(0, 0, 1),
+        tangent_u: IVec3::new(1, 0, 0),
+        tangent_v: IVec3::new(0, 1, 0),
         normal: [0.0, 0.0, 1.0],
         corners: [
             [1.0, 0.0, 1.0],
@@ -86,6 +99,8 @@ const FACES: [Face; 6] = [
     },
     Face {
         neighbor: IVec3::new(0, 0, -1),
+        tangent_u: IVec3::new(1, 0, 0),
+        tangent_v: IVec3::new(0, 1, 0),
         normal: [0.0, 0.0, -1.0],
         corners: [
             [0.0, 0.0, 0.0],
@@ -143,6 +158,9 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
                             ],
                             normal: face.normal,
                             albedo_roughness: surface,
+                            ambient_occlusion: vertex_ambient_occlusion(
+                                world, position, face, corner,
+                            ),
                         });
                     }
                     mesh.indices.extend_from_slice(&[
@@ -158,6 +176,42 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
         }
     }
     mesh
+}
+
+fn vertex_ambient_occlusion(world: &World, position: IVec3, face: &Face, corner: [f32; 3]) -> f32 {
+    let outside = add(position, face.neighbor);
+    let side_u = signed_tangent(face.tangent_u, corner);
+    let side_v = signed_tangent(face.tangent_v, corner);
+    let occupied_u = world.voxel(add(outside, side_u)).is_solid();
+    let occupied_v = world.voxel(add(outside, side_v)).is_solid();
+    let occupied_corner = world.voxel(add(add(outside, side_u), side_v)).is_solid();
+    let level = if occupied_u && occupied_v {
+        0
+    } else {
+        3 - u8::from(occupied_u) - u8::from(occupied_v) - u8::from(occupied_corner)
+    };
+    match level {
+        0 => 0.42,
+        1 => 0.60,
+        2 => 0.79,
+        _ => 1.0,
+    }
+}
+
+fn signed_tangent(tangent: IVec3, corner: [f32; 3]) -> IVec3 {
+    let coordinate = if tangent.x != 0 {
+        corner[0]
+    } else if tangent.y != 0 {
+        corner[1]
+    } else {
+        corner[2]
+    };
+    let sign = if coordinate < 0.5 { -1 } else { 1 };
+    IVec3::new(tangent.x * sign, tangent.y * sign, tangent.z * sign)
+}
+
+const fn add(left: IVec3, right: IVec3) -> IVec3 {
+    IVec3::new(left.x + right.x, left.y + right.y, left.z + right.z)
 }
 
 const fn material_surface(material: Material) -> [f32; 4] {
@@ -195,5 +249,16 @@ mod tests {
         world.set_voxel(IVec3::new(16, 0, 0), Voxel::new(Material::Stone));
         assert_eq!(mesh_chunk(&world, IVec3::new(0, 0, 0)).exposed_faces(), 5);
         assert_eq!(mesh_chunk(&world, IVec3::new(1, 0, 0)).exposed_faces(), 5);
+    }
+
+    #[test]
+    fn concave_neighbors_darkens_only_the_shared_vertex() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
+        world.set_voxel(IVec3::new(1, -1, 0), Voxel::new(Material::Stone));
+        world.set_voxel(IVec3::new(1, 0, -1), Voxel::new(Material::Stone));
+        let mesh = mesh_chunk(&world, IVec3::new(0, 0, 0));
+        assert!((mesh.vertices[0].ambient_occlusion - 0.42).abs() < f32::EPSILON);
+        assert!((mesh.vertices[2].ambient_occlusion - 1.0).abs() < f32::EPSILON);
     }
 }

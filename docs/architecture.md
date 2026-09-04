@@ -38,7 +38,8 @@ snapshot. Corrupt or stale data cannot partially mutate a replica.
 - rifle and explosive actions crossing the same server command, 1,200-byte fragmentation,
   out-of-order reassembly, fingerprint validation, and client-replica path covered by tests;
 - boundary-aware chunk invalidation and bounded background remeshing after destruction;
-- procedural lighting, roughness, surface variation, fog, and filmic tone mapping;
+- per-vertex voxel ambient occlusion, a 2,048² comparison shadow map, procedural lighting,
+  roughness, surface variation, fog, and filmic tone mapping with exactly one display transfer;
 - auto-terminating real-GPU smoke mode.
 
 Gate evidence: the release smoke test created a Vulkan surface on the RTX 4050 Laptop GPU, validated

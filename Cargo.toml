@@ -1,0 +1,30 @@
+[package]
+name = "destructible-fps-prototype"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Technical spike for a server-authoritative, fully destructible multiplayer FPS"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "destructible_fps"
+path = "src/lib.rs"
+
+[[bin]]
+name = "destruction-benchmark"
+path = "src/bin/destruction_benchmark.rs"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
+nursery = "deny"

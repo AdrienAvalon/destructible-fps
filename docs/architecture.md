@@ -29,18 +29,33 @@ snapshot. Corrupt or stale data cannot partially mutate a replica.
 
 ## Planned engine layers
 
-### Milestone 1 — Vulkan visual slice
+### First playable slice — delivered
+
+- Linux window and raw first-person input through `winit`;
+- discrete-GPU preference with a safe `wgpu` Vulkan backend;
+- deterministic multi-material test range rendered as face-culled chunk meshes;
+- fixed-step movement, gravity, jump, voxel collision, ray targeting, and crosshair;
+- rifle and explosive actions crossing the same server command, 1,200-byte fragmentation,
+  out-of-order reassembly, fingerprint validation, and client-replica path covered by tests;
+- boundary-aware chunk invalidation after destruction;
+- procedural lighting, roughness, surface variation, fog, and filmic tone mapping;
+- auto-terminating real-GPU smoke mode.
+
+Gate evidence: the release smoke test created a Vulkan surface on the RTX 4050 Laptop GPU, validated
+the WGSL pipelines, uploaded the complete representative world, presented continuously, and exited
+cleanly. This is point-in-time developer-machine evidence, not a portable FPS guarantee.
+
+### Milestone 1 — production-grade Vulkan visual slice
 
 - Linux and Windows window/input abstraction;
-- Vulkan device selection that prefers the discrete GPU;
 - bindless material tables and physically based shading;
 - chunk meshing off the render thread;
 - GPU frustum and occlusion culling;
 - HDR output, temporal anti-aliasing, and measured dynamic resolution;
 - a benchmark capture for the RTX 4050 Laptop at 1,920×1,080.
 
-Gate: a controllable camera renders the test range at a stable frame pace, reports CPU/GPU timings,
-and regenerates only chunks touched by destruction.
+Gate: the playable scene reports separate CPU/GPU frame-time p50/p95/p99, avoids render-thread
+meshing stalls under the agreed destruction load, and holds its frame budget at 1,920×1,080.
 
 ### Milestone 2 — structural physics
 

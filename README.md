@@ -4,9 +4,9 @@ Technical spike for a photorealistic, server-authoritative multiplayer FPS whose
 structures can ultimately be destroyed. This repository starts with the correctness and
 performance foundations instead of presenting a scripted visual demo as if it were a game engine.
 
-## Milestone 0: authoritative destruction core
+## First playable demo
 
-The current executable proves:
+The Linux demo now combines the authoritative core with a real-time first-person client:
 
 - compact 16³ voxel chunks (2 bytes per voxel);
 - material-dependent damage using deterministic integer arithmetic;
@@ -17,21 +17,53 @@ The current executable proves:
 - real UDP loopback transport coverage for fragmented deltas;
 - a strict cap on incomplete packets to prevent reassembly-memory exhaustion;
 - immediate detection of packet gaps and replica divergence;
-- a repeatable end-to-end benchmark using a multi-material test building.
+- a repeatable end-to-end benchmark using a multi-material test building;
+- a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
+- face-culled chunk meshes and remeshing limited to chunks whose visible boundary changed;
+- a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
+- server-authorized rifle and explosive impacts rendered from the replicated world;
+- procedural material shading, directional light, distance fog, tone mapping, and a crosshair.
 
-It does **not** claim photorealism yet. Rendering before the server model is trustworthy would make
-an attractive demo with no viable multiplayer foundation.
+This is a **first playable engineering slice**, not a photorealistic or production multiplayer
+game. Structural collapse, detached rigid bodies, remote sessions, audio, asset-quality PBR,
+temporal anti-aliasing, and asynchronous meshing remain explicit later gates.
 
 ## Run
 
 ```bash
 cargo test --all-targets
 cargo run --release --bin destruction-benchmark -- --events 500
+cargo run --release --bin playable-demo
 ```
 
 The benchmark includes server-side destruction, encoding, deliberate frame reordering, decoding,
 reassembly, client application, and final server/client verification. It is not a renderer-only
 microbenchmark.
+
+### Controls
+
+- click the window to capture the pointer;
+- `ZQSD` or `WASD` to move, `Shift` to sprint, and `Space` to jump;
+- left click for a localized rifle impact;
+- right click for a larger explosive blast;
+- `Escape` releases the pointer; press it again to quit.
+
+For a non-interactive graphics check that exits automatically:
+
+```bash
+cargo run --release --bin playable-demo -- --smoke-seconds 5
+```
+
+The window title reports FPS, frame time, solid voxel count, cursor state, and the most recent
+authoritative destruction result. It is a lightweight live HUD, not a captured performance report.
+
+## Runtime dependencies
+
+All versions are pinned in `Cargo.toml`. `wgpu` provides a safe Vulkan abstraction, `winit` owns
+Linux window/input integration, `glam` supplies SIMD-friendly camera math, `bytemuck` performs
+checked POD uploads, and `pollster` bridges one-time GPU initialization. They are permissively
+licensed upstream and replace fragile platform-specific boilerplate; game rules, destruction,
+replication, meshing, controller, and shaders remain repository-owned.
 
 ## Engineering targets
 

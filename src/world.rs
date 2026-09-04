@@ -221,6 +221,14 @@ impl World {
         self.fingerprint
     }
 
+    /// Returns occupied chunk coordinates in a stable order for deterministic meshing.
+    #[must_use]
+    pub fn chunk_positions(&self) -> Vec<IVec3> {
+        let mut positions: Vec<_> = self.chunks.keys().copied().collect();
+        positions.sort_unstable();
+        positions
+    }
+
     #[must_use]
     pub fn stats(&self) -> WorldStats {
         WorldStats {
@@ -258,13 +266,19 @@ impl World {
     }
 }
 
+/// Maps a world voxel coordinate to its chunk, including across negative axes.
+#[must_use]
+pub const fn chunk_position(position: IVec3) -> IVec3 {
+    IVec3::new(
+        position.x.div_euclid(CHUNK_EDGE),
+        position.y.div_euclid(CHUNK_EDGE),
+        position.z.div_euclid(CHUNK_EDGE),
+    )
+}
+
 const fn split_position(position: IVec3) -> (IVec3, IVec3) {
     (
-        IVec3::new(
-            position.x.div_euclid(CHUNK_EDGE),
-            position.y.div_euclid(CHUNK_EDGE),
-            position.z.div_euclid(CHUNK_EDGE),
-        ),
+        chunk_position(position),
         IVec3::new(
             position.x.rem_euclid(CHUNK_EDGE),
             position.y.rem_euclid(CHUNK_EDGE),

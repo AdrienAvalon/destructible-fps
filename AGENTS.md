@@ -51,7 +51,11 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo test --release --all-targets
 cargo run --release --bin destruction-benchmark -- --events 500
+cargo run --release --bin playable-demo -- --smoke-seconds 5
 ```
+
+The graphical smoke check requires an active Linux Wayland or X11 session with a Vulkan-capable
+adapter. Treat a headless skip as missing coverage, not success.
 
 Add a regression test near every corrected parser, synchronization, determinism, or bounds defect.
 Use explicit fixed seeds for reproducible simulation tests. Do not commit `target/`, captures, or

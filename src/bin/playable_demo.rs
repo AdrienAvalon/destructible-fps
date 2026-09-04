@@ -5,6 +5,7 @@ use destructible_fps::{
     player::{MovementInput, Player},
     render::{RenderOutcome, Renderer},
 };
+use glam::Vec3;
 use std::{collections::HashSet, error::Error, sync::Arc, time::Duration, time::Instant};
 use winit::{
     application::ApplicationHandler,
@@ -30,11 +31,24 @@ struct Game {
     frames_since_stats: u32,
     accumulator: f32,
     last_action: String,
+    showcase: bool,
 }
 
 impl Game {
-    fn new(window: Arc<Window>) -> Result<Self, String> {
-        let session = DemoSession::default();
+    fn new(window: Arc<Window>, showcase: bool) -> Result<Self, String> {
+        let mut session = DemoSession::default();
+        let last_action = if showcase {
+            let result = session
+                .fire(Vec3::new(0.5, 3.1, 40.0), -Vec3::Z, FireMode::Explosive)
+                .map_err(|error| format!("preparation showcase: {error}"))?
+                .ok_or_else(|| "preparation showcase: la facade n a pas ete atteinte".to_owned())?;
+            format!(
+                "showcase: {} voxels fractures, {} datagrammes",
+                result.report.fractured_voxels, result.datagrams
+            )
+        } else {
+            "pret".to_owned()
+        };
         let before = Instant::now();
         let renderer = pollster::block_on(Renderer::new(Arc::clone(&window), session.world()))?;
         let now = Instant::now();
@@ -62,7 +76,8 @@ impl Game {
             stats_since: now,
             frames_since_stats: 0,
             accumulator: 0.0,
-            last_action: "pret".to_owned(),
+            last_action,
+            showcase,
         })
     }
 
@@ -138,20 +153,27 @@ impl Game {
             .as_secs_f32()
             .min(0.1);
         self.previous_frame = now;
-        let input = self.movement_input();
-        let mut steps = 0;
-        while self.accumulator >= FIXED_STEP_SECONDS && steps < 12 {
-            self.player
-                .step(self.session.world(), input, FIXED_STEP_SECONDS);
-            self.accumulator -= FIXED_STEP_SECONDS;
-            steps += 1;
+        if !self.showcase {
+            let input = self.movement_input();
+            let mut steps = 0;
+            while self.accumulator >= FIXED_STEP_SECONDS && steps < 12 {
+                self.player
+                    .step(self.session.world(), input, FIXED_STEP_SECONDS);
+                self.accumulator -= FIXED_STEP_SECONDS;
+                steps += 1;
+            }
         }
 
-        match self.renderer.render(
-            self.player.camera_position(),
-            self.player.view_direction(),
-            now.duration_since(self.started).as_secs_f32(),
-        ) {
+        let elapsed_seconds = now.duration_since(self.started).as_secs_f32();
+        let (camera_position, view_direction) = if self.showcase {
+            showcase_camera(elapsed_seconds)
+        } else {
+            (self.player.camera_position(), self.player.view_direction())
+        };
+        match self
+            .renderer
+            .render(camera_position, view_direction, elapsed_seconds)
+        {
             RenderOutcome::Presented | RenderOutcome::Skipped => {}
             RenderOutcome::Reconfigure => {
                 self.renderer.resize(self.window.inner_size());
@@ -193,6 +215,7 @@ impl Game {
 struct App {
     game: Option<Game>,
     exit_after: Option<Duration>,
+    showcase: bool,
 }
 
 impl ApplicationHandler for App {
@@ -209,7 +232,7 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         };
-        match Game::new(Arc::new(window)) {
+        match Game::new(Arc::new(window), self.showcase) {
             Ok(game) => self.game = Some(game),
             Err(error) => {
                 eprintln!("initialisation impossible: {error}");
@@ -296,30 +319,51 @@ fn axis(positive: bool, negative: bool) -> f32 {
     f32::from(u8::from(positive)) - f32::from(u8::from(negative))
 }
 
-fn smoke_duration() -> Result<Option<Duration>, Box<dyn Error>> {
+struct LaunchOptions {
+    exit_after: Option<Duration>,
+    showcase: bool,
+}
+
+fn launch_options() -> Result<LaunchOptions, Box<dyn Error>> {
     let mut arguments = std::env::args().skip(1);
-    let Some(argument) = arguments.next() else {
-        return Ok(None);
+    let mut options = LaunchOptions {
+        exit_after: None,
+        showcase: false,
     };
-    if argument != "--smoke-seconds" {
-        return Err(format!("argument inconnu: {argument}").into());
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--showcase" => options.showcase = true,
+            "--smoke-seconds" => {
+                let seconds: f64 = arguments
+                    .next()
+                    .ok_or("--smoke-seconds exige une duree")?
+                    .parse()?;
+                if !seconds.is_finite() || seconds <= 0.0 {
+                    return Err("duree de smoke test invalide".into());
+                }
+                options.exit_after = Some(Duration::from_secs_f64(seconds));
+            }
+            _ => return Err(format!("argument inconnu: {argument}").into()),
+        }
     }
-    let seconds: f64 = arguments
-        .next()
-        .ok_or("--smoke-seconds exige une duree")?
-        .parse()?;
-    if arguments.next().is_some() || !seconds.is_finite() || seconds <= 0.0 {
-        return Err("duree de smoke test invalide".into());
-    }
-    Ok(Some(Duration::from_secs_f64(seconds)))
+    Ok(options)
+}
+
+fn showcase_camera(elapsed_seconds: f32) -> (Vec3, Vec3) {
+    let angle = elapsed_seconds.mul_add(0.105, -0.20);
+    let position = Vec3::new(angle.sin() * 41.0, 11.5, angle.cos() * 41.0);
+    let direction = (Vec3::new(0.0, 7.0, 0.0) - position).normalize();
+    (position, direction)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
+    let options = launch_options()?;
     let mut app = App {
         game: None,
-        exit_after: smoke_duration()?,
+        exit_after: options.exit_after,
+        showcase: options.showcase,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

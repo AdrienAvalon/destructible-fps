@@ -28,6 +28,14 @@ This is a **first playable engineering slice**, not a photorealistic or producti
 game. Structural collapse, detached rigid bodies, remote sessions, audio, asset-quality PBR,
 temporal anti-aliasing, and asynchronous meshing remain explicit later gates.
 
+## Screenshots
+
+![First-person approach to the intact test building](docs/screenshots/01-approach.png)
+
+![Server-authoritative explosive breach](docs/screenshots/02-authoritative-destruction.png)
+
+![Showcase orbit around the multi-material building](docs/screenshots/03-orbit-interior.png)
+
 ## Run
 
 ```bash
@@ -52,6 +60,12 @@ For a non-interactive graphics check that exits automatically:
 
 ```bash
 cargo run --release --bin playable-demo -- --smoke-seconds 5
+```
+
+For a reproducible orbit around an already damaged authoritative world (useful for screenshots):
+
+```bash
+cargo run --release --bin playable-demo -- --showcase
 ```
 
 The window title reports FPS, frame time, solid voxel count, cursor state, and the most recent

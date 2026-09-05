@@ -103,6 +103,15 @@ draw. The placeholder dimensions exactly match the authoritative 0.6 m by 1.8 m 
 This deliberately proves the data/GPU path before committing to a skinned character asset and
 animation graph.
 
+The first graphical network harness deliberately uses only the legacy loopback adapter. It starts
+from the identical deterministic demo world, performs the source-bound development handshake, sends
+camera-relative inputs at 60 Hz, predicts the local collider, reconciles every newer authority view,
+samples remote players through the delayed interpolation history, and uploads those transforms to
+the instanced renderer. The loopback authority now emits the same player-state packets as QUIC so
+the transport-independent simulation and client presentation can be exercised in two real windows.
+This does not relax exposure: both binaries refuse non-loopback addresses, and the production client
+must use authenticated QUIC/OIDC before any remote deployment.
+
 The dedicated-authority sessions described above are deliberately loopback-only and unauthenticated;
 the snapshot hash is an integrity check, not a MAC, and that legacy transport provides no
 confidentiality, identity, packet authenticity, or congestion control. It must not be exposed beyond

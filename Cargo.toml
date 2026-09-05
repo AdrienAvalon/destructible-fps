@@ -20,6 +20,10 @@ name = "playable-demo"
 path = "src/bin/playable_demo.rs"
 
 [[bin]]
+name = "multiplayer-demo"
+path = "src/bin/multiplayer_demo.rs"
+
+[[bin]]
 name = "structural-benchmark"
 path = "src/bin/structural_benchmark.rs"
 

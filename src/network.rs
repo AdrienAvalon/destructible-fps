@@ -1014,11 +1014,6 @@ where
         let players = self
             .players
             .iter()
-            .filter(|(session_id, _player)| {
-                self.peers
-                    .values()
-                    .any(|peer| peer.principal.is_some() && peer.session_id == **session_id)
-            })
             .map(|(session_id, player)| {
                 ReplicatedPlayerState::from_authoritative(*session_id, player.state())
             })
@@ -1027,11 +1022,7 @@ where
             return Ok(());
         }
         let packet = encode_player_state_packet(self.tick, &players)?;
-        for (destination, _peer) in self
-            .peers
-            .iter()
-            .filter(|(_destination, peer)| peer.principal.is_some())
-        {
+        for destination in self.peers.keys() {
             if report.outbound_attempts >= MAX_OUTBOUND_DATAGRAMS_PER_TICK {
                 report.outbound_drops += 1;
                 report.player_state_drops += 1;

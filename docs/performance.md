@@ -3,6 +3,26 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — two-client graphical loopback increment
+
+Source state: parent `9752e28` plus the graphical loopback increment documented here. The legacy
+development authority broadcasts player state through the same transport-independent core while
+remaining restricted to loopback. `multiplayer-demo` loads the deterministic world, sends
+camera-relative 60 Hz inputs, predicts locally, reconciles compact v2 states, advances the 100 ms
+remote interpolation clock from packet receipt, and uploads all other sessions to the fixed avatar
+instance arena. It refuses non-loopback targets and does not claim production transport security.
+
+Two release clients were run simultaneously against the real release server for eight seconds with
+different automatic sprint trajectories. They established distinct sessions 1 and 2, each rendered
+one remote player, reached authority ticks 990 and 993, retained only two and zero inputs respectively,
+and measured maximum horizontal displacements of 79,760,414 um and 22,700,000 um. Both Vulkan clients
+exited successfully. A separate headless process regression starts the actual server binary, admits
+two independent UDP sockets, moves one player, and requires both clients to observe both sessions,
+the input acknowledgement, and positive authoritative displacement.
+
+The complete promotion passed 115 library tests, six binary tests, and 42 integration tests in both
+debug and release profiles; strict Clippy was clean.
+
 ## 2026-09-05 — instanced remote-player presentation increment
 
 Source state: parent `cb4d7bc` plus the avatar presentation increment documented here. The renderer

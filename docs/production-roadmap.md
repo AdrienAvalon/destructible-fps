@@ -110,8 +110,10 @@ streaming, with no synchronous world meshing on the presentation thread.
   an eight-view integer interpolation history renders remote state at a bounded 100 ms delay with
   coherent joins and leaves; local prediction retains 128 contiguous inputs and atomically replays
   the unacknowledged suffix from exact server state; a shared instanced placeholder mesh renders up
-  to 16 remote character bounds in one world and one shadow draw (slices delivered; live graphical
-  network wiring, correction smoothing, view authority and dynamic-body contact remain).
+  to 16 remote character bounds in one world and one shadow draw; a two-window loopback client wires
+  input, prediction, reconciliation and interpolation to the real development process (slices
+  delivered; secure graphical transport, correction smoothing, view authority and dynamic-body
+  contact remain).
 
 Exit gate: removing a load-bearing member causes a repeatable progressive collapse; the worst-case
 fixture remains inside the 60 Hz server budget and converges bit-for-bit on replicas.
@@ -143,7 +145,8 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   broadcast, input acknowledgement, stale/replay rejection, disconnect removal, and real two-client
   QUIC convergence, plus a 100 ms bounded deterministic remote interpolation buffer and exact
   128-input local reconciliation and a fixed-capacity instanced remote-player GPU path (delivered;
-  live graphical wiring, correction smoothing and spatial delta baselines remain);
+  live loopback graphical wiring (delivered; secure QUIC graphical wiring, correction smoothing and
+  spatial delta baselines remain);
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
   Unix permission checks, static-JWKS expiry, signal-aware shutdown, and a four-case external-process
   matrix (delivered for loopback; online refresh and remote policy remain);

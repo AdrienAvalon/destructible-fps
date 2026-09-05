@@ -59,6 +59,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   reconciliation, and deterministic replay of every input newer than the server acknowledgement;
 - a fixed-capacity instanced remote-player GPU path: one shared avatar mesh, at most one world draw
   and one shadow draw for all remote players, with the local session excluded;
+- a two-window loopback multiplayer demo connecting to the real 60 Hz development server, with
+  camera-relative input, prediction/reconciliation, interpolated remote avatars, reconnect attempts,
+  automatic smoke trajectories, and a real two-client process regression test;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
@@ -128,6 +131,19 @@ cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 1000 --scen
 cargo run --release --bin snapshot-benchmark -- --iterations 20
 cargo run --release --bin playable-demo
 ```
+
+For the first real graphical multiplayer movement demo, start the loopback development server and
+then one or more clients in separate terminals:
+
+```bash
+cargo run --release --bin dedicated-server -- --bind 127.0.0.1:40000
+cargo run --release --bin multiplayer-demo -- --server 127.0.0.1:40000
+```
+
+This first networked graphical slice synchronizes character movement and displays remote players.
+Destruction/build replication, recovery UI and the production QUIC/OIDC connection are not yet wired
+into `multiplayer-demo`. Both this client and the unauthenticated UDP server reject non-loopback
+addresses; they are a local development harness, not a LAN/Internet deployment path.
 
 The legacy dedicated-server process is intentionally restricted to loopback. Its socket has been
 separated from the reusable authority core and its real two-client path is exercised by

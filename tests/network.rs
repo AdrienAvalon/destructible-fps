@@ -1,9 +1,10 @@
 use destructible_fps::{
     AuthoritativeServer, ClientReplica, ExplosionCommand, IVec3, OrderedDeltaInbox,
-    ServerControlMessage, SnapshotAssembler, World, decode_frame, decode_server_control,
-    demo_world, encode_client_hello, encode_explosion_request, encode_repair_request,
-    encode_snapshot_ack, encode_snapshot_fragments_request, encode_snapshot_request,
-    is_delta_datagram, is_snapshot_datagram,
+    PlayerInputCommand, ServerControlMessage, SnapshotAssembler, World, decode_frame,
+    decode_player_state_packet, decode_server_control, demo_world, encode_client_hello,
+    encode_explosion_request, encode_player_input, encode_repair_request, encode_snapshot_ack,
+    encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
+    is_player_state_datagram, is_snapshot_datagram,
 };
 use std::{
     io,
@@ -539,6 +540,74 @@ fn dedicated_process_synchronizes_two_real_udp_clients() {
         );
         assert_eq!(endpoint.replica.next_body_id(), expected.next_body_id());
     }
+}
+
+#[test]
+fn dedicated_process_replicates_moving_players_to_two_real_udp_clients() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
+    let server_address = reservation.local_addr().expect("reserved address");
+    drop(reservation);
+    let mut child = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
+            .args(["--bind", &server_address.to_string(), "--max-ticks", "300"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start dedicated server process"),
+    );
+    let sockets = [client_socket(), client_socket()];
+    let first_session = handshake(&sockets[0], server_address, 0x3333, &mut child);
+    let second_session = handshake(&sockets[1], server_address, 0x4444, &mut child);
+    for socket in &sockets {
+        socket.set_nonblocking(true).expect("nonblocking client");
+    }
+    sockets[0]
+        .send_to(
+            &encode_player_input(
+                first_session,
+                PlayerInputCommand {
+                    input_sequence: 1,
+                    movement_x_per_mille: 1_000,
+                    ..PlayerInputCommand::default()
+                },
+            ),
+            server_address,
+        )
+        .expect("send player input");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut converged = [false; 2];
+    let mut buffer = [0_u8; 1_201];
+    while Instant::now() < deadline && !converged.into_iter().all(|ready| ready) {
+        for (index, socket) in sockets.iter().enumerate() {
+            loop {
+                match socket.recv_from(&mut buffer) {
+                    Ok((length, source))
+                        if source == server_address
+                            && is_player_state_datagram(&buffer[..length]) =>
+                    {
+                        let packet = decode_player_state_packet(&buffer[..length])
+                            .expect("valid process player state");
+                        converged[index] = packet.players.len() == 2
+                            && packet.players.iter().any(|player| {
+                                player.session_id == first_session
+                                    && player.last_input_sequence == 1
+                                    && player.position_um.x > 0
+                            })
+                            && packet
+                                .players
+                                .iter()
+                                .any(|player| player.session_id == second_session);
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("receive process player state: {error}"),
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(converged.into_iter().all(|ready| ready));
 }
 
 #[test]

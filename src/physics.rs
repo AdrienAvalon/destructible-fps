@@ -12,10 +12,13 @@ const SQUARE_MILLIMETERS_PER_VOXEL: u128 = 1_000_000;
 pub const MICROMETERS_PER_VOXEL: i64 = 1_000_000;
 pub const SERVER_PHYSICS_HZ: i64 = 60;
 pub const MAX_BODY_SOLVER_PASSES: usize = 4;
+pub const FIXED_QUATERNION_SCALE: i32 = 1_000_000;
 const GRAVITY_UM_PER_SECOND_SQUARED: i64 = -9_810_000;
 const MAX_LINEAR_SPEED_UM_PER_SECOND: i64 = 250_000_000;
+pub const MAX_ANGULAR_SPEED_MRAD_PER_SECOND: i64 = 12_000;
 const MAX_WORLD_TRANSLATION_UM: i64 = 3_000_000_000_000_000;
 const RESPONSE_SCALE: i64 = 1_000;
+const QUATERNION_NORMALIZATION_TOLERANCE: u128 = 8_000_000;
 const MIN_BOUNCE_SPEED_UM_PER_SECOND: i64 = 500_000;
 const SLEEP_TICKS: u16 = 30;
 pub const MAX_BROAD_PHASE_PAIRS: usize = 8_192;
@@ -61,13 +64,48 @@ pub struct FixedImpulseMilliNewtonSeconds3 {
     pub z: i64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FixedMilliradians3 {
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixedQuaternion {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub w: i32,
+}
+
+impl FixedQuaternion {
+    pub const IDENTITY: Self = Self {
+        x: 0,
+        y: 0,
+        z: 0,
+        w: FIXED_QUATERNION_SCALE,
+    };
+}
+
+impl Default for FixedQuaternion {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RigidBodyState {
     /// Absolute world translation of the body's local-space minimum corner.
     pub translation_um: FixedMicrometers3,
     pub linear_velocity_um_per_second: FixedMicrometers3,
+    /// Canonical local-to-world unit quaternion scaled by [`FIXED_QUATERNION_SCALE`].
+    pub orientation: FixedQuaternion,
+    /// World-space angular velocity in milliradians per second.
+    pub angular_velocity_mrad_per_second: FixedMilliradians3,
     /// Euclidean remainders retained when velocity is divided by the fixed 60 Hz rate.
     pub integration_remainder: [u8; 3],
+    pub angular_integration_remainder: [u8; 3],
     pub sleep_ticks: u16,
     pub sleeping: bool,
 }
@@ -352,7 +390,10 @@ impl RigidBodyState {
                 z: i64::from(body.minimum.z) * MICROMETERS_PER_VOXEL,
             },
             linear_velocity_um_per_second: FixedMicrometers3::default(),
+            orientation: FixedQuaternion::IDENTITY,
+            angular_velocity_mrad_per_second: FixedMilliradians3::default(),
             integration_remainder: [0; 3],
+            angular_integration_remainder: [0; 3],
             sleep_ticks: 0,
             sleeping: false,
         }
@@ -371,10 +412,17 @@ pub fn valid_rigid_body_state(state: RigidBodyState) -> bool {
         state.linear_velocity_um_per_second.y,
         state.linear_velocity_um_per_second.z,
     ];
+    let angular_velocities = [
+        state.angular_velocity_mrad_per_second.x,
+        state.angular_velocity_mrad_per_second.y,
+        state.angular_velocity_mrad_per_second.z,
+    ];
     let valid_sleep = if state.sleeping {
         state.sleep_ticks == SLEEP_TICKS
             && state.linear_velocity_um_per_second == FixedMicrometers3::default()
+            && state.angular_velocity_mrad_per_second == FixedMilliradians3::default()
             && state.integration_remainder == [0; 3]
+            && state.angular_integration_remainder == [0; 3]
     } else {
         state.sleep_ticks < SLEEP_TICKS
     };
@@ -384,11 +432,36 @@ pub fn valid_rigid_body_state(state: RigidBodyState) -> bool {
         && velocities
             .iter()
             .all(|value| value.unsigned_abs() <= MAX_LINEAR_SPEED_UM_PER_SECOND.cast_unsigned())
+        && angular_velocities
+            .iter()
+            .all(|value| value.unsigned_abs() <= MAX_ANGULAR_SPEED_MRAD_PER_SECOND.cast_unsigned())
+        && valid_fixed_quaternion(state.orientation)
         && state
             .integration_remainder
             .iter()
             .all(|&remainder| i64::from(remainder) < SERVER_PHYSICS_HZ)
+        && state
+            .angular_integration_remainder
+            .iter()
+            .all(|&remainder| i64::from(remainder) < SERVER_PHYSICS_HZ)
         && valid_sleep
+}
+
+#[must_use]
+pub fn valid_fixed_quaternion(orientation: FixedQuaternion) -> bool {
+    let values = [orientation.x, orientation.y, orientation.z, orientation.w];
+    if values
+        .iter()
+        .any(|value| value.unsigned_abs() > FIXED_QUATERNION_SCALE.cast_unsigned())
+        || !quaternion_is_canonical(orientation)
+    {
+        return false;
+    }
+    let norm_squared = values.iter().fold(0_u128, |sum, value| {
+        sum.saturating_add(u128::from(value.unsigned_abs()).pow(2))
+    });
+    let expected = u128::from(FIXED_QUATERNION_SCALE.cast_unsigned()).pow(2);
+    norm_squared.abs_diff(expected) <= QUATERNION_NORMALIZATION_TOLERANCE
 }
 
 /// Applies a world-space linear impulse using integer milli-newton seconds and wakes the body.
@@ -428,6 +501,265 @@ pub fn apply_linear_impulse(
     *state != before
 }
 
+/// Applies one impulse at a body-local point and derives angular velocity from the inertia tensor.
+///
+/// The application point is expressed in millimetres from the minimum corner of the immutable body
+/// mesh. The lever arm is rotated into world space, while the diagonal inertia response is evaluated
+/// in body space. This keeps the authoritative calculation integer-only and deterministic.
+#[must_use]
+pub fn apply_impulse_at_local_point(
+    body: &RigidBodyDescriptor,
+    state: &mut RigidBodyState,
+    impulse: FixedImpulseMilliNewtonSeconds3,
+    application_point_mm: FixedMillimeters3,
+) -> bool {
+    let before = *state;
+    let _ = apply_linear_impulse(body, state, impulse);
+    let local_center = [
+        i128::from(body.center_of_mass_mm.x)
+            .saturating_sub(i128::from(body.minimum.x) * i128::from(MILLIMETERS_PER_VOXEL)),
+        i128::from(body.center_of_mass_mm.y)
+            .saturating_sub(i128::from(body.minimum.y) * i128::from(MILLIMETERS_PER_VOXEL)),
+        i128::from(body.center_of_mass_mm.z)
+            .saturating_sub(i128::from(body.minimum.z) * i128::from(MILLIMETERS_PER_VOXEL)),
+    ];
+    let local_lever = [
+        i128::from(application_point_mm.x).saturating_sub(local_center[0]),
+        i128::from(application_point_mm.y).saturating_sub(local_center[1]),
+        i128::from(application_point_mm.z).saturating_sub(local_center[2]),
+    ];
+    let world_lever = rotate_fixed_vector(state.orientation, local_lever);
+    let world_impulse = [
+        i128::from(impulse.x),
+        i128::from(impulse.y),
+        i128::from(impulse.z),
+    ];
+    let world_angular_impulse = cross_i128(world_lever, world_impulse);
+    let body_angular_impulse =
+        rotate_fixed_vector(conjugate(state.orientation), world_angular_impulse);
+    let inertia = [
+        body.inertia_diagonal_kg_mm2.x,
+        body.inertia_diagonal_kg_mm2.y,
+        body.inertia_diagonal_kg_mm2.z,
+    ];
+    let mut body_delta = [0_i128; 3];
+    for index in 0..3 {
+        let denominator = i128::try_from(inertia[index]).unwrap_or(i128::MAX).max(1);
+        body_delta[index] = body_angular_impulse[index].saturating_mul(1_000) / denominator;
+    }
+    let world_delta = rotate_fixed_vector(state.orientation, body_delta);
+    for (velocity, delta) in [
+        (
+            &mut state.angular_velocity_mrad_per_second.x,
+            world_delta[0],
+        ),
+        (
+            &mut state.angular_velocity_mrad_per_second.y,
+            world_delta[1],
+        ),
+        (
+            &mut state.angular_velocity_mrad_per_second.z,
+            world_delta[2],
+        ),
+    ] {
+        let delta = bounded_i64(delta, MAX_ANGULAR_SPEED_MRAD_PER_SECOND);
+        *velocity = velocity.saturating_add(delta).clamp(
+            -MAX_ANGULAR_SPEED_MRAD_PER_SECOND,
+            MAX_ANGULAR_SPEED_MRAD_PER_SECOND,
+        );
+    }
+    if state.angular_velocity_mrad_per_second != FixedMilliradians3::default() {
+        state.sleep_ticks = 0;
+        state.sleeping = false;
+    }
+    *state != before
+}
+
+const fn quaternion_is_canonical(orientation: FixedQuaternion) -> bool {
+    orientation.w > 0
+        || orientation.w == 0
+            && (orientation.x > 0
+                || orientation.x == 0
+                    && (orientation.y > 0 || orientation.y == 0 && orientation.z >= 0))
+}
+
+const fn conjugate(orientation: FixedQuaternion) -> FixedQuaternion {
+    FixedQuaternion {
+        x: -orientation.x,
+        y: -orientation.y,
+        z: -orientation.z,
+        w: orientation.w,
+    }
+}
+
+fn integrate_orientation(state: &mut RigidBodyState) {
+    let mut delta_mrad = [0_i64; 3];
+    for (index, velocity) in [
+        state.angular_velocity_mrad_per_second.x,
+        state.angular_velocity_mrad_per_second.y,
+        state.angular_velocity_mrad_per_second.z,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (delta, remainder) =
+            integrate_axis(velocity, state.angular_integration_remainder[index]);
+        delta_mrad[index] = delta;
+        state.angular_integration_remainder[index] = remainder;
+    }
+    if delta_mrad == [0; 3] {
+        return;
+    }
+    let scale = i128::from(FIXED_QUATERNION_SCALE);
+    let delta = [
+        i128::from(delta_mrad[0]).saturating_mul(scale) / 2_000,
+        i128::from(delta_mrad[1]).saturating_mul(scale) / 2_000,
+        i128::from(delta_mrad[2]).saturating_mul(scale) / 2_000,
+        scale,
+    ];
+    let orientation = [
+        i128::from(state.orientation.x),
+        i128::from(state.orientation.y),
+        i128::from(state.orientation.z),
+        i128::from(state.orientation.w),
+    ];
+    state.orientation = normalize_quaternion(quaternion_product(delta, orientation));
+}
+
+const fn quaternion_product(first: [i128; 4], second: [i128; 4]) -> [i128; 4] {
+    let [ax, ay, az, aw] = first;
+    let [bx, by, bz, bw] = second;
+    [
+        aw.saturating_mul(bx)
+            .saturating_add(ax.saturating_mul(bw))
+            .saturating_add(ay.saturating_mul(bz))
+            .saturating_sub(az.saturating_mul(by)),
+        aw.saturating_mul(by)
+            .saturating_sub(ax.saturating_mul(bz))
+            .saturating_add(ay.saturating_mul(bw))
+            .saturating_add(az.saturating_mul(bx)),
+        aw.saturating_mul(bz)
+            .saturating_add(ax.saturating_mul(by))
+            .saturating_sub(ay.saturating_mul(bx))
+            .saturating_add(az.saturating_mul(bw)),
+        aw.saturating_mul(bw)
+            .saturating_sub(ax.saturating_mul(bx))
+            .saturating_sub(ay.saturating_mul(by))
+            .saturating_sub(az.saturating_mul(bz)),
+    ]
+}
+
+fn normalize_quaternion(raw: [i128; 4]) -> FixedQuaternion {
+    let norm_squared = raw.iter().fold(0_u128, |sum, value| {
+        sum.saturating_add(value.unsigned_abs().saturating_mul(value.unsigned_abs()))
+    });
+    if norm_squared == 0 {
+        return FixedQuaternion::IDENTITY;
+    }
+    let norm = i128::try_from(norm_squared.isqrt())
+        .unwrap_or(i128::MAX)
+        .max(1);
+    let scale = i128::from(FIXED_QUATERNION_SCALE);
+    let mut normalized = raw.map(|value| {
+        let scaled = value.saturating_mul(scale);
+        let rounded = if scaled >= 0 {
+            scaled.saturating_add(norm / 2)
+        } else {
+            scaled.saturating_sub(norm / 2)
+        } / norm;
+        i32::try_from(rounded)
+            .unwrap_or_else(|_| rounded.signum() as i32 * FIXED_QUATERNION_SCALE)
+            .clamp(-FIXED_QUATERNION_SCALE, FIXED_QUATERNION_SCALE)
+    });
+    let candidate = FixedQuaternion {
+        x: normalized[0],
+        y: normalized[1],
+        z: normalized[2],
+        w: normalized[3],
+    };
+    if quaternion_is_canonical(candidate) {
+        candidate
+    } else {
+        for value in &mut normalized {
+            *value = -*value;
+        }
+        FixedQuaternion {
+            x: normalized[0],
+            y: normalized[1],
+            z: normalized[2],
+            w: normalized[3],
+        }
+    }
+}
+
+fn rotate_fixed_vector(orientation: FixedQuaternion, vector: [i128; 3]) -> [i128; 3] {
+    let q = [
+        i128::from(orientation.x),
+        i128::from(orientation.y),
+        i128::from(orientation.z),
+    ];
+    let first_cross = cross_i128(q, vector);
+    let second_cross = cross_i128(q, first_cross);
+    let denominator = i128::from(FIXED_QUATERNION_SCALE).pow(2);
+    let w = i128::from(orientation.w);
+    std::array::from_fn(|index| {
+        let correction = w
+            .saturating_mul(first_cross[index])
+            .saturating_add(second_cross[index])
+            .saturating_mul(2);
+        vector[index].saturating_add(correction / denominator)
+    })
+}
+
+const fn cross_i128(first: [i128; 3], second: [i128; 3]) -> [i128; 3] {
+    [
+        first[1]
+            .saturating_mul(second[2])
+            .saturating_sub(first[2].saturating_mul(second[1])),
+        first[2]
+            .saturating_mul(second[0])
+            .saturating_sub(first[0].saturating_mul(second[2])),
+        first[0]
+            .saturating_mul(second[1])
+            .saturating_sub(first[1].saturating_mul(second[0])),
+    ]
+}
+
+fn bounded_i64(value: i128, limit: i64) -> i64 {
+    i64::try_from(value)
+        .unwrap_or_else(|_| value.signum() as i64 * limit)
+        .clamp(-limit, limit)
+}
+
+fn clamp_angular_velocity(state: &mut RigidBodyState) {
+    for velocity in [
+        &mut state.angular_velocity_mrad_per_second.x,
+        &mut state.angular_velocity_mrad_per_second.y,
+        &mut state.angular_velocity_mrad_per_second.z,
+    ] {
+        *velocity = (*velocity).clamp(
+            -MAX_ANGULAR_SPEED_MRAD_PER_SECOND,
+            MAX_ANGULAR_SPEED_MRAD_PER_SECOND,
+        );
+    }
+}
+
+fn damp_supported_angular_motion(state: &mut RigidBodyState) {
+    for velocity in [
+        &mut state.angular_velocity_mrad_per_second.x,
+        &mut state.angular_velocity_mrad_per_second.y,
+        &mut state.angular_velocity_mrad_per_second.z,
+    ] {
+        let reduction = i64::try_from(velocity.unsigned_abs() / 20)
+            .unwrap_or(i64::MAX)
+            .max(1);
+        *velocity = approach_zero(*velocity, reduction);
+    }
+    if state.angular_velocity_mrad_per_second == FixedMilliradians3::default() {
+        state.angular_integration_remainder = [0; 3];
+    }
+}
+
 /// Advances one axis-aligned body with integer semi-implicit Euler integration and three-axis
 /// swept collision queries against static voxels.
 #[must_use]
@@ -456,6 +788,8 @@ pub fn step_rigid_body(
         -MAX_LINEAR_SPEED_UM_PER_SECOND,
         MAX_LINEAR_SPEED_UM_PER_SECOND,
     );
+    clamp_angular_velocity(state);
+    integrate_orientation(state);
     let mut collided_with_static = false;
     for axis in [Axis::X, Axis::Z, Axis::Y] {
         let velocity = axis.component(state.linear_velocity_um_per_second);
@@ -495,8 +829,15 @@ pub fn step_rigid_body(
         state.translation_um.y.saturating_sub(1),
     )
     .is_some();
-    if supported && state.linear_velocity_um_per_second == FixedMicrometers3::default() {
+    if supported {
+        damp_supported_angular_motion(state);
+    }
+    if supported
+        && state.linear_velocity_um_per_second == FixedMicrometers3::default()
+        && state.angular_velocity_mrad_per_second == FixedMilliradians3::default()
+    {
         state.integration_remainder = [0; 3];
+        state.angular_integration_remainder = [0; 3];
         state.sleep_ticks = state.sleep_ticks.saturating_add(1).min(SLEEP_TICKS);
         state.sleeping = state.sleep_ticks == SLEEP_TICKS;
     } else {
@@ -1788,6 +2129,18 @@ mod tests {
     use super::*;
     use crate::{Material, StructuralAnchors, StructuralLimits, Voxel, VoxelChange};
 
+    fn one_voxel_body(id: BodyId, material: Material) -> RigidBodyDescriptor {
+        RigidBodyDescriptor::from_replicated_voxels(
+            id,
+            vec![BodyVoxel {
+                position: IVec3::new(0, 5, 0),
+                voxel: Voxel::new(material),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("one-voxel body")
+    }
+
     fn detached_island(world: &mut World, voxels: &[IVec3]) -> DetachedIsland {
         world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Wood));
         world.set_voxel(IVec3::new(0, 1, 0), Voxel::new(Material::Wood));
@@ -2490,7 +2843,10 @@ mod tests {
         let mut state = RigidBodyState {
             translation_um: FixedMicrometers3::default(),
             linear_velocity_um_per_second: FixedMicrometers3::default(),
+            orientation: FixedQuaternion::IDENTITY,
+            angular_velocity_mrad_per_second: FixedMilliradians3::default(),
             integration_remainder: [0; 3],
+            angular_integration_remainder: [0; 3],
             sleep_ticks: 0,
             sleeping: false,
         };
@@ -2507,5 +2863,86 @@ mod tests {
         state.sleep_ticks = 0;
         state.linear_velocity_um_per_second.x = MAX_LINEAR_SPEED_UM_PER_SECOND + 1;
         assert!(!valid_rigid_body_state(state));
+    }
+
+    #[test]
+    fn quaternion_and_angular_integration_are_canonical_and_repeatable() {
+        let mut first = RigidBodyState {
+            angular_velocity_mrad_per_second: FixedMilliradians3 {
+                x: 1_200,
+                y: -2_400,
+                z: 3_600,
+            },
+            ..RigidBodyState::at_spawn(&one_voxel_body(1, Material::Wood))
+        };
+        let mut second = first;
+
+        for _ in 0..120 {
+            integrate_orientation(&mut first);
+            integrate_orientation(&mut second);
+            assert!(valid_fixed_quaternion(first.orientation));
+        }
+
+        assert_eq!(first, second);
+        assert_ne!(first.orientation, FixedQuaternion::IDENTITY);
+        first.orientation.w = -first.orientation.w;
+        assert!(!valid_fixed_quaternion(first.orientation));
+    }
+
+    #[test]
+    fn fixed_quaternion_rotates_vectors_and_its_conjugate_reverses_the_rotation() {
+        let scale = i128::from(FIXED_QUATERNION_SCALE);
+        let quarter_turn = normalize_quaternion([0, 0, scale, scale]);
+        let rotated = rotate_fixed_vector(quarter_turn, [1_000, 0, 0]);
+        let restored = rotate_fixed_vector(conjugate(quarter_turn), rotated);
+
+        assert!(rotated[0].unsigned_abs() <= 1);
+        assert!(rotated[1].abs_diff(1_000) <= 1);
+        assert_eq!(rotated[2], 0);
+        assert!(restored[0].abs_diff(1_000) <= 2);
+        assert!(restored[1].unsigned_abs() <= 2);
+        assert_eq!(restored[2], 0);
+    }
+
+    #[test]
+    fn off_center_impulse_uses_inertia_and_wakes_angular_motion() {
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![
+                BodyVoxel {
+                    position: IVec3::new(0, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                BodyVoxel {
+                    position: IVec3::new(1, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )
+        .expect("two-voxel body");
+        let mut state = RigidBodyState::at_spawn(&body);
+
+        assert!(apply_impulse_at_local_point(
+            &body,
+            &mut state,
+            FixedImpulseMilliNewtonSeconds3 {
+                x: 0,
+                y: 10_000,
+                z: 0,
+            },
+            FixedMillimeters3 {
+                x: 1_500,
+                y: 500,
+                z: 500,
+            },
+        ));
+
+        assert!(state.linear_velocity_um_per_second.y > 0);
+        assert!(state.angular_velocity_mrad_per_second.z > 0);
+        assert_eq!(state.angular_velocity_mrad_per_second.x, 0);
+        assert_eq!(state.angular_velocity_mrad_per_second.y, 0);
+        assert!(valid_rigid_body_state(state));
+        assert!(!state.sleeping);
     }
 }

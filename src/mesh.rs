@@ -27,6 +27,8 @@ pub struct CpuBodyMesh {
     pub body_id: BodyId,
     pub origin: IVec3,
     pub maximum: IVec3,
+    /// Local-space mass centre in voxel units, used as the authoritative rotation pivot.
+    pub rotation_pivot: [f32; 3],
     pub mesh: CpuMesh,
 }
 
@@ -179,6 +181,11 @@ pub fn mesh_body(body: &RigidBodyDescriptor) -> CpuBodyMesh {
         body_id: body.id,
         origin: body.minimum,
         maximum: body.maximum,
+        rotation_pivot: [
+            (body.center_of_mass_mm.x - i64::from(body.minimum.x) * 1_000) as f32 / 1_000.0,
+            (body.center_of_mass_mm.y - i64::from(body.minimum.y) * 1_000) as f32 / 1_000.0,
+            (body.center_of_mass_mm.z - i64::from(body.minimum.z) * 1_000) as f32 / 1_000.0,
+        ],
         mesh,
     }
 }
@@ -339,6 +346,13 @@ mod tests {
         let body_mesh = mesh_body(&body);
         assert_eq!(body_mesh.origin, IVec3::new(10, 20, -4));
         assert_eq!(body_mesh.maximum, IVec3::new(11, 20, -4));
+        assert!(
+            body_mesh
+                .rotation_pivot
+                .iter()
+                .zip([1.0, 0.5, 0.5])
+                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+        );
         assert_eq!(body_mesh.mesh.exposed_faces(), 10);
         assert!(
             body_mesh

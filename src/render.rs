@@ -5,11 +5,11 @@
 use crate::{
     BodyId, CHUNK_EDGE, IVec3,
     mesh::{CpuBodyMesh, CpuMesh, Vertex},
-    physics::{MICROMETERS_PER_VOXEL, RigidBodyState},
+    physics::{FIXED_QUATERNION_SCALE, MICROMETERS_PER_VOXEL, RigidBodyState},
     replication::MAX_ACTIVE_BODIES,
 };
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, mpsc},
@@ -46,6 +46,7 @@ struct GpuBody {
     mesh: GpuMesh,
     instance_slot: u32,
     extent: Vec3,
+    rotation_pivot: Vec3,
     world_minimum: Vec3,
     world_maximum: Vec3,
 }
@@ -725,6 +726,7 @@ impl Renderer {
                     .saturating_sub(body.origin.z)
                     .saturating_add(1) as f32,
             );
+            let rotation_pivot = Vec3::from_array(body.rotation_pivot);
             let instance = BodyInstance {
                 model: Mat4::from_translation(origin).to_cols_array_2d(),
             };
@@ -740,6 +742,7 @@ impl Renderer {
                     mesh: self.create_gpu_mesh(&body.mesh, "rigid body"),
                     instance_slot,
                     extent,
+                    rotation_pivot,
                     world_minimum: origin,
                     world_maximum: origin + extent,
                 },
@@ -761,15 +764,25 @@ impl Renderer {
                 state.translation_um.y as f32 / scale,
                 state.translation_um.z as f32 / scale,
             );
+            let quaternion_scale = FIXED_QUATERNION_SCALE as f32;
+            let rotation = Quat::from_xyzw(
+                state.orientation.x as f32 / quaternion_scale,
+                state.orientation.y as f32 / quaternion_scale,
+                state.orientation.z as f32 / quaternion_scale,
+                state.orientation.w as f32 / quaternion_scale,
+            )
+            .normalize();
+            let (model, world_minimum, world_maximum) =
+                body_transform_and_bounds(translation, rotation, body.rotation_pivot, body.extent);
             let instance = BodyInstance {
-                model: Mat4::from_translation(translation).to_cols_array_2d(),
+                model: model.to_cols_array_2d(),
             };
             let index = usize::try_from(body.instance_slot).unwrap_or(usize::MAX);
             if let Some(slot) = self.body_instances.get_mut(index) {
                 *slot = instance;
             }
-            body.world_minimum = translation;
-            body.world_maximum = translation + body.extent;
+            body.world_minimum = world_minimum;
+            body.world_maximum = world_maximum;
         }
         self.write_body_instances();
     }
@@ -1069,6 +1082,34 @@ fn body_instance_slice(buffer: &wgpu::Buffer, instance_slot: u32) -> wgpu::Buffe
     buffer.slice(start..start + BODY_INSTANCE_BYTES)
 }
 
+fn body_transform_and_bounds(
+    translation: Vec3,
+    rotation: Quat,
+    pivot: Vec3,
+    extent: Vec3,
+) -> (Mat4, Vec3, Vec3) {
+    let model = Mat4::from_translation(translation + pivot)
+        * Mat4::from_quat(rotation)
+        * Mat4::from_translation(-pivot);
+    let mut minimum = Vec3::splat(f32::INFINITY);
+    let mut maximum = Vec3::splat(f32::NEG_INFINITY);
+    for corner in [
+        Vec3::ZERO,
+        Vec3::new(extent.x, 0.0, 0.0),
+        Vec3::new(0.0, extent.y, 0.0),
+        Vec3::new(0.0, 0.0, extent.z),
+        Vec3::new(extent.x, extent.y, 0.0),
+        Vec3::new(extent.x, 0.0, extent.z),
+        Vec3::new(0.0, extent.y, extent.z),
+        extent,
+    ] {
+        let transformed = model.transform_point3(corner);
+        minimum = minimum.min(transformed);
+        maximum = maximum.max(transformed);
+    }
+    (model, minimum, maximum)
+}
+
 fn non_zero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
 }
@@ -1180,5 +1221,20 @@ mod tests {
             IVec3::new(30, 0, -1),
             view_projection
         ));
+    }
+
+    #[test]
+    fn rotated_body_bounds_follow_the_mass_center_pivot() {
+        let (model, minimum, maximum) = body_transform_and_bounds(
+            Vec3::new(10.0, 0.0, 0.0),
+            Quat::from_rotation_z(core::f32::consts::FRAC_PI_2),
+            Vec3::new(1.0, 0.5, 0.5),
+            Vec3::new(2.0, 1.0, 1.0),
+        );
+
+        let transformed_pivot = model.transform_point3(Vec3::new(1.0, 0.5, 0.5));
+        assert!(transformed_pivot.abs_diff_eq(Vec3::new(11.0, 0.5, 0.5), 0.000_01));
+        assert!(minimum.abs_diff_eq(Vec3::new(10.5, -0.5, 0.0), 0.000_01));
+        assert!(maximum.abs_diff_eq(Vec3::new(11.5, 1.5, 1.0), 0.000_01));
     }
 }

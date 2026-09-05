@@ -37,9 +37,10 @@ The Linux demo now combines the authoritative core with a real-time first-person
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,
   server-owned body descriptors in the same transaction;
-- protocol-v5 body assignments and three-axis fixed-state updates using compact server-monotonic 64-bit entity
-  IDs, independent 128-bit geometry fingerprints, pre/post body fingerprints, and full client-side
-  connectivity, material, mass, identity, and state revalidation;
+- protocol-v6 body assignments, three-axis translation, canonical fixed-quaternion orientation, and
+  bounded angular velocity using compact server-monotonic 64-bit entity IDs, independent 128-bit
+  geometry fingerprints, pre/post body fingerprints, and full client-side connectivity, material,
+  mass, identity, and state revalidation;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
@@ -48,10 +49,12 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - bounded off-thread body meshing in local space, with fixed-capacity GPU instance transforms,
   independent body frustum culling, and participation in both world and shadow passes;
 - 60 Hz server-authoritative body motion in deterministic micrometre units, mass-weighted blast
-  impulses, three-axis swept static collision, material ground friction and normal restitution,
-  vertical voxel-column body collision, four-pass coarse swept X/Z body contacts with mass-weighted
-  impulse exchange and tangential friction, stable stacking, wake propagation, sleeping, bounded
-  sweep-and-prune broad phase, atomic overload rollback, and replicated GPU transforms;
+  impulses, inertia-weighted off-centre angular response, canonical fixed-quaternion integration,
+  three-axis swept static collision, material ground friction and normal restitution, vertical
+  voxel-column body collision, four-pass coarse swept X/Z body contacts with mass-weighted impulse
+  exchange and tangential friction, stable stacking, wake propagation, sleeping, bounded
+  sweep-and-prune broad phase, atomic overload rollback, and replicated GPU transforms about the
+  mass centre;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map, procedural material
@@ -60,11 +63,11 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
-game. Angular motion, voxel-exact multi-body contacts, deeper constraint-island convergence,
-progressive structural stress, authenticated remote-authority integration, trusted OIDC
-discovery/JWKS provisioning and certificate lifecycle, adaptive retransmission and congestion
-control, audio, asset-quality PBR, temporal anti-aliasing, and large-world residency streaming remain
-explicit later gates.
+game. Oriented voxel collision, contact-generated torque, gyroscopic response, deeper
+constraint-island convergence, progressive structural stress, authenticated remote-authority
+integration, trusted OIDC discovery/JWKS provisioning and certificate lifecycle, adaptive
+retransmission and congestion control, audio, asset-quality PBR, temporal anti-aliasing, and
+large-world residency streaming remain explicit later gates.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
@@ -75,8 +78,11 @@ blast impulse. It sweeps all translation axes against static voxels, applies bou
 ground friction, stacks on exact vertical body columns, and sleeps after a deterministic rest
 interval. Four bounded passes separate coarse swept X/Z body bounds, exchange normal velocity from
 mass and restitution, reduce tangential slip without losing linear momentum, and propagate a short
-contact chain. Rotation, voxel-exact lateral contact, and full constraint-island convergence are not
-claimed yet.
+contact chain. A nearest-voxel blast application point additionally generates deterministic angular
+velocity through the diagonal inertia tensor; protocol-v6 deltas and snapshot-v2 transfers replicate
+the canonical quaternion, and the GPU rotates the mesh around its mass centre. Collision geometry is
+still axis-aligned, so oriented voxel contact, contact torque, and full constraint-island convergence
+are not claimed yet.
 
 ## Screenshots
 

@@ -128,7 +128,7 @@ fn structural_detachment_is_one_replicated_authoritative_transaction() {
 
     let mut assembler = FrameAssembler::default();
     let mut complete = None;
-    for bytes in encode_frames(&packet, 158)
+    for bytes in encode_frames(&packet, 201)
         .expect("minimum body-state MTU")
         .into_iter()
         .rev()
@@ -179,6 +179,7 @@ fn off_center_blast_impulse_moves_and_replicates_on_all_active_axes() {
     let initial_state = spawn.body_updates[0].state;
     assert!(initial_state.linear_velocity_um_per_second.x > 0);
     assert!(initial_state.linear_velocity_um_per_second.y > 0);
+    assert!(initial_state.angular_velocity_mrad_per_second.z > 0);
     assert_eq!(client.receive(&spawn), Ok(ClientStatus::Applied));
     assert_eq!(client.body_states(), server.body_states());
 
@@ -352,13 +353,21 @@ fn corrupted_body_motion_is_rejected_before_replica_state_changes() {
     let before = client.body_states().clone();
     let (packet, _) = server.advance_physics();
     let mut packet = packet.expect("falling body changes on first physics tick");
-    let frames = encode_frames(&packet, 158).expect("one minimum-size body-state frame");
+    let frames = encode_frames(&packet, 201).expect("one minimum-size body-state frame");
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].len(), 158);
+    assert_eq!(frames[0].len(), 201);
     let mut invalid_wire_state = frames[0].clone();
     *invalid_wire_state.last_mut().expect("sleeping flag") = 2;
     assert_eq!(
         decode_frame(&invalid_wire_state),
+        Err(CodecError::InvalidBodyState)
+    );
+    let mut invalid_orientation = frames[0].clone();
+    let trailing_after_orientation = 24 + 3 + 3 + 2 + 1;
+    let orientation_w_end = invalid_orientation.len() - trailing_after_orientation;
+    invalid_orientation[orientation_w_end - 4..orientation_w_end].fill(0);
+    assert_eq!(
+        decode_frame(&invalid_orientation),
         Err(CodecError::InvalidBodyState)
     );
     packet.body_updates[0].state.translation_um.y -= 1;
@@ -429,10 +438,10 @@ fn codec_rejects_truncated_and_corrupted_frames() {
     corrupted[0] = b'X';
     assert!(decode_frame(&corrupted).is_err());
     let mut old_version = frames[0].clone();
-    old_version[4] = 4;
+    old_version[4] = 5;
     assert_eq!(
         decode_frame(&old_version),
-        Err(CodecError::UnsupportedVersion(4))
+        Err(CodecError::UnsupportedVersion(5))
     );
 }
 

@@ -3,6 +3,42 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — authoritative angular-state increment
+
+Source state: parent `a75db12` plus the angular-state increment documented here. Bodies now carry a
+canonical integer quaternion scaled by 1,000,000, world-space milliradian angular velocity capped at
+12 rad/s, and three fixed-step remainders. Each 60 Hz step uses integer quaternion composition and
+renormalization. An impulse applied at the body voxel nearest the blast is transformed around the
+mass centre, evaluated against the body-space diagonal inertia, and transformed back to produce
+angular velocity. Supported bodies use bounded angular damping so they can deterministically sleep.
+
+Protocol v6 and snapshot v2 reject prior layouts and carry orientation, angular velocity, and
+remainders through the body fingerprint. The renderer converts only the already validated quaternion
+to a GPU transform, rotates around the mass centre, and derives a conservative world AABB from all
+eight transformed corners for frustum culling. Physics collision geometry remains axis-aligned: this
+increment does not claim oriented voxel collision, contact-generated torque, or gyroscopic response.
+
+Focused tests cover canonical quaternion rejection, bit-identical 120-step integration, an
+inertia-weighted off-centre impulse, snapshot/delta version rejection, end-to-end angular replication,
+mass-centred rendering, and rotated render bounds. The complete promotion passed 87 library tests,
+four binary tests, and 40 integration tests in debug and release; strict Clippy was clean.
+
+```bash
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 1000 --scenario dynamic-head-on
+cargo run --release --bin snapshot-benchmark -- --iterations 100
+cargo run --release --bin playable-demo -- --showcase --smoke-seconds 8
+```
+
+The 1,024-body dynamic fixture resolved all 512,000 contacts with tick p50 0.961 ms, p95 0.983 ms,
+p99 1.010 ms, and maximum 1.178 ms. The representative snapshot used 859 frames / 0.983 MiB and
+completed at p50 8.438 ms, p95 8.547 ms, p99 8.636 ms, and maximum 9.412 ms. Both remain below the
+12 ms server-work target on this machine.
+
+The real RTX 4050 Vulkan smoke completed with one of one bodies asleep, 1,483 CPU and 1,481 GPU
+samples, and no dropped GPU timestamp. GPU-total p50 was 0.193 ms, p95 0.199 ms, p99 0.203 ms, and
+maximum 0.210 ms; GPU initialization took 2,086.5 ms and the 128-chunk bootstrap stream 37.3 ms. The
+short run validates the new mass-centred transform and clean shutdown, not final 1080p performance.
+
 ## 2026-09-05 — four-pass contact and friction increment
 
 Source state: parent `62519ab` plus the bounded contact-iteration increment documented here. The

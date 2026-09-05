@@ -2,8 +2,8 @@ use crate::destruction::{DestructionReport, Explosion};
 use crate::material::{InvalidMaterial, Voxel};
 use crate::physics::{
     BodyError, BodyId, BodyLimits, BodyVoxel, FixedImpulseMilliNewtonSeconds3, FixedMicrometers3,
-    RigidBodyDescriptor, RigidBodyState, apply_linear_impulse, step_rigid_bodies,
-    valid_rigid_body_state,
+    FixedMillimeters3, FixedMilliradians3, FixedQuaternion, RigidBodyDescriptor, RigidBodyState,
+    apply_impulse_at_local_point, step_rigid_bodies, valid_rigid_body_state,
 };
 use crate::structural::{
     StructuralAnchors, StructuralError, StructuralLimits, analyze_structural_changes,
@@ -13,12 +13,12 @@ use core::fmt;
 use std::collections::{BTreeMap, HashMap};
 
 const MAGIC: [u8; 4] = *b"DFPS";
-const PROTOCOL_VERSION: u8 = 5;
+const PROTOCOL_VERSION: u8 = 6;
 const DELTA_KIND: u8 = 1;
 const HEADER_BYTES: usize = 96;
 const CHANGE_BYTES: usize = 16;
 const BODY_ASSIGNMENT_BYTES: usize = 22;
-const BODY_UPDATE_BYTES: usize = 62;
+const BODY_UPDATE_BYTES: usize = 105;
 const MAX_DATAGRAM_BYTES: usize = 1_200;
 const MAX_FRAGMENTS: u16 = 1_024;
 const MAX_PENDING_PACKETS: usize = 64;
@@ -454,7 +454,9 @@ fn initial_blast_states(
         .iter()
         .map(|body| {
             let mut state = RigidBodyState::at_spawn(body);
-            let _ = apply_linear_impulse(body, &mut state, blast_impulse(body, command));
+            let impulse = blast_impulse(body, command);
+            let application_point = blast_application_point(body, command);
+            let _ = apply_impulse_at_local_point(body, &mut state, impulse, application_point);
             state
         })
         .collect::<Vec<_>>();
@@ -469,6 +471,52 @@ fn initial_blast_states(
         })
         .collect();
     (states, updates)
+}
+
+fn blast_application_point(
+    body: &RigidBodyDescriptor,
+    command: ExplosionCommand,
+) -> FixedMillimeters3 {
+    let center = [
+        i128::from(command.center.x)
+            .saturating_mul(1_000)
+            .saturating_add(500),
+        i128::from(command.center.y)
+            .saturating_mul(1_000)
+            .saturating_add(500),
+        i128::from(command.center.z)
+            .saturating_mul(1_000)
+            .saturating_add(500),
+    ];
+    let voxel = body
+        .voxels
+        .iter()
+        .min_by_key(|body_voxel| {
+            let point = [
+                i128::from(body_voxel.position.x)
+                    .saturating_mul(1_000)
+                    .saturating_add(500),
+                i128::from(body_voxel.position.y)
+                    .saturating_mul(1_000)
+                    .saturating_add(500),
+                i128::from(body_voxel.position.z)
+                    .saturating_mul(1_000)
+                    .saturating_add(500),
+            ];
+            let distance_squared = point
+                .iter()
+                .zip(center)
+                .fold(0_u128, |sum, (value, center)| {
+                    sum.saturating_add(value.saturating_sub(center).unsigned_abs().pow(2))
+                });
+            (distance_squared, body_voxel.position)
+        })
+        .expect("rigid-body descriptors are non-empty");
+    FixedMillimeters3 {
+        x: i64::from(voxel.position.x.saturating_sub(body.minimum.x)) * 1_000 + 500,
+        y: i64::from(voxel.position.y.saturating_sub(body.minimum.y)) * 1_000 + 500,
+        z: i64::from(voxel.position.z.saturating_sub(body.minimum.z)) * 1_000 + 500,
+    }
 }
 
 fn blast_impulse(
@@ -548,8 +596,8 @@ fn rollback_changes(world: &mut World, changes: &[VoxelChange]) {
     }
 }
 
-const fn body_fingerprint_token(body: &RigidBodyDescriptor, state: RigidBodyState) -> u128 {
-    let mut token = (body.id as u128).rotate_left(41)
+fn body_fingerprint_token(body: &RigidBodyDescriptor, state: RigidBodyState) -> u128 {
+    let mut token = u128::from(body.id).rotate_left(41)
         ^ body.geometry_fingerprint.rotate_left(67)
         ^ 0xa076_1d64_78bd_642f_e703_7ed1_a0b4_28db_u128;
     let values = [
@@ -559,22 +607,33 @@ const fn body_fingerprint_token(body: &RigidBodyDescriptor, state: RigidBodyStat
         state.linear_velocity_um_per_second.x,
         state.linear_velocity_um_per_second.y,
         state.linear_velocity_um_per_second.z,
+        i64::from(state.orientation.x),
+        i64::from(state.orientation.y),
+        i64::from(state.orientation.z),
+        i64::from(state.orientation.w),
+        state.angular_velocity_mrad_per_second.x,
+        state.angular_velocity_mrad_per_second.y,
+        state.angular_velocity_mrad_per_second.z,
     ];
     let mut index = 0;
     while index < values.len() {
         token = token
             .rotate_left(23)
-            .wrapping_add(values[index].cast_unsigned() as u128)
+            .wrapping_add(u128::from(values[index].cast_unsigned()))
             .wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_013b_u128);
         index += 1;
     }
-    let remainder = (state.integration_remainder[0] as u128)
-        | ((state.integration_remainder[1] as u128) << 8)
-        | ((state.integration_remainder[2] as u128) << 16);
+    let remainder = u128::from(state.integration_remainder[0])
+        | (u128::from(state.integration_remainder[1]) << 8)
+        | (u128::from(state.integration_remainder[2]) << 16);
+    let angular_remainder = u128::from(state.angular_integration_remainder[0])
+        | (u128::from(state.angular_integration_remainder[1]) << 8)
+        | (u128::from(state.angular_integration_remainder[2]) << 16);
     token
         ^ remainder.rotate_left(79)
-        ^ (state.sleep_ticks as u128).rotate_left(101)
-        ^ (state.sleeping as u128).rotate_left(127)
+        ^ angular_remainder.rotate_left(89)
+        ^ u128::from(state.sleep_ticks).rotate_left(101)
+        ^ u128::from(state.sleeping).rotate_left(127)
 }
 
 fn payload_fragment_count(
@@ -1353,7 +1412,15 @@ fn encode_body_update(bytes: &mut Vec<u8>, update: BodyStateUpdate) {
     push_i64(bytes, update.state.linear_velocity_um_per_second.x);
     push_i64(bytes, update.state.linear_velocity_um_per_second.y);
     push_i64(bytes, update.state.linear_velocity_um_per_second.z);
+    push_i32(bytes, update.state.orientation.x);
+    push_i32(bytes, update.state.orientation.y);
+    push_i32(bytes, update.state.orientation.z);
+    push_i32(bytes, update.state.orientation.w);
+    push_i64(bytes, update.state.angular_velocity_mrad_per_second.x);
+    push_i64(bytes, update.state.angular_velocity_mrad_per_second.y);
+    push_i64(bytes, update.state.angular_velocity_mrad_per_second.z);
     bytes.extend_from_slice(&update.state.integration_remainder);
+    bytes.extend_from_slice(&update.state.angular_integration_remainder);
     push_u16(bytes, update.state.sleep_ticks);
     bytes.push(u8::from(update.state.sleeping));
 }
@@ -1371,7 +1438,19 @@ fn decode_body_update(cursor: &mut Cursor<'_>) -> Result<BodyStateUpdate, CodecE
             y: cursor.take_i64()?,
             z: cursor.take_i64()?,
         },
+        orientation: FixedQuaternion {
+            x: cursor.take_i32()?,
+            y: cursor.take_i32()?,
+            z: cursor.take_i32()?,
+            w: cursor.take_i32()?,
+        },
+        angular_velocity_mrad_per_second: FixedMilliradians3 {
+            x: cursor.take_i64()?,
+            y: cursor.take_i64()?,
+            z: cursor.take_i64()?,
+        },
         integration_remainder: cursor.take_array::<3>()?,
+        angular_integration_remainder: cursor.take_array::<3>()?,
         sleep_ticks: cursor.take_u16()?,
         sleeping: match cursor.take_u8()? {
             0 => false,

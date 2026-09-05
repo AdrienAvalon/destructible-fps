@@ -2,20 +2,20 @@
 
 use crate::{
     AuthoritativeServer, BodyError, BodyId, BodyLimits, BodyVoxel, ClientReplica,
-    FixedMicrometers3, ReplicationError, RigidBodyDescriptor, RigidBodyState, Voxel, World,
-    material::InvalidMaterial,
+    FixedMicrometers3, FixedMilliradians3, FixedQuaternion, ReplicationError, RigidBodyDescriptor,
+    RigidBodyState, Voxel, World, material::InvalidMaterial, valid_rigid_body_state,
 };
 use core::fmt;
 use std::collections::BTreeMap;
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"DFSN";
-const SNAPSHOT_VERSION: u8 = 1;
+const SNAPSHOT_VERSION: u8 = 2;
 const SNAPSHOT_KIND: u8 = 1;
 const FRAME_HEADER_BYTES: usize = 38;
 const PAYLOAD_HEADER_BYTES: usize = 48;
 const VOXEL_BYTES: usize = 14;
-const BODY_HEADER_AND_STATE_BYTES: usize = 66;
-const BODY_STATE_BYTES: usize = 54;
+const BODY_HEADER_AND_STATE_BYTES: usize = 109;
+const BODY_STATE_BYTES: usize = 97;
 const MAX_SNAPSHOT_FRAGMENTS: usize = 4_096;
 pub const MAX_SNAPSHOT_PAYLOAD_BYTES: usize = 4 * 1_024 * 1_024;
 pub const MAX_SNAPSHOT_STATIC_VOXELS: usize = 262_144;
@@ -607,7 +607,15 @@ fn encode_body_state(bytes: &mut Vec<u8>, state: RigidBodyState) {
     push_i64(bytes, state.linear_velocity_um_per_second.x);
     push_i64(bytes, state.linear_velocity_um_per_second.y);
     push_i64(bytes, state.linear_velocity_um_per_second.z);
+    push_i32(bytes, state.orientation.x);
+    push_i32(bytes, state.orientation.y);
+    push_i32(bytes, state.orientation.z);
+    push_i32(bytes, state.orientation.w);
+    push_i64(bytes, state.angular_velocity_mrad_per_second.x);
+    push_i64(bytes, state.angular_velocity_mrad_per_second.y);
+    push_i64(bytes, state.angular_velocity_mrad_per_second.z);
     bytes.extend_from_slice(&state.integration_remainder);
+    bytes.extend_from_slice(&state.angular_integration_remainder);
     push_u16(bytes, state.sleep_ticks);
     bytes.push(u8::from(state.sleeping));
 }
@@ -624,7 +632,19 @@ fn decode_body_state(cursor: &mut Cursor<'_>) -> Result<RigidBodyState, Snapshot
             y: cursor.take_i64()?,
             z: cursor.take_i64()?,
         },
+        orientation: FixedQuaternion {
+            x: cursor.take_i32()?,
+            y: cursor.take_i32()?,
+            z: cursor.take_i32()?,
+            w: cursor.take_i32()?,
+        },
+        angular_velocity_mrad_per_second: FixedMilliradians3 {
+            x: cursor.take_i64()?,
+            y: cursor.take_i64()?,
+            z: cursor.take_i64()?,
+        },
         integration_remainder: [cursor.take_u8()?, cursor.take_u8()?, cursor.take_u8()?],
+        angular_integration_remainder: [cursor.take_u8()?, cursor.take_u8()?, cursor.take_u8()?],
         sleep_ticks: cursor.take_u16()?,
         sleeping: match cursor.take_u8()? {
             0 => false,
@@ -636,6 +656,11 @@ fn decode_body_state(cursor: &mut Cursor<'_>) -> Result<RigidBodyState, Snapshot
             }
         },
     };
+    if !valid_rigid_body_state(state) {
+        return Err(SnapshotCodecError::InvalidPayload(
+            "invalid rigid-body state",
+        ));
+    }
     Ok(state)
 }
 
@@ -736,6 +761,7 @@ fn push_i64(bytes: &mut Vec<u8>, value: i64) {
 mod tests {
     use super::*;
     use crate::{ExplosionCommand, IVec3, demo_world};
+    use core::mem::size_of;
 
     #[test]
     fn fragmented_snapshot_round_trips_out_of_order_and_installs() {
@@ -844,6 +870,12 @@ mod tests {
         let mut frame = encode_snapshot_frames(1, &authority, MAX_SNAPSHOT_DATAGRAM_BYTES)
             .expect("empty-world snapshot")
             .remove(0);
+        let mut old_version = frame.clone();
+        old_version[4] = 1;
+        assert!(matches!(
+            SnapshotAssembler::default().push(&old_version),
+            Err(SnapshotCodecError::UnsupportedVersion(1))
+        ));
         frame.truncate(FRAME_HEADER_BYTES);
         assert!(matches!(
             SnapshotAssembler::default().push(&frame),
@@ -852,6 +884,37 @@ mod tests {
         assert!(matches!(
             SnapshotAssembler::default().push(&vec![0; MAX_SNAPSHOT_DATAGRAM_BYTES + 1]),
             Err(SnapshotCodecError::InvalidLength { .. })
+        ));
+    }
+
+    #[test]
+    fn snapshot_payload_rejects_a_noncanonical_orientation() {
+        let mut authority = AuthoritativeServer::new(demo_world());
+        authority
+            .execute_explosion(
+                1,
+                ExplosionCommand {
+                    command_id: 1,
+                    center: IVec3::new(-20, 6, 0),
+                    radius_voxels: 8,
+                    peak_energy: 30_000,
+                },
+            )
+            .expect("body-producing snapshot fixture");
+        assert_eq!(authority.bodies().len(), 1);
+        let mut payload = encode_payload(&authority).expect("canonical snapshot payload");
+        let body_state_start = PAYLOAD_HEADER_BYTES
+            + authority.world().stats().solid_voxels * VOXEL_BYTES
+            + size_of::<u64>()
+            + size_of::<u32>();
+        let orientation_w_start = body_state_start + 6 * size_of::<i64>() + 3 * size_of::<i32>();
+        payload[orientation_w_start..orientation_w_start + size_of::<i32>()].fill(0);
+
+        assert!(matches!(
+            decode_payload(&payload),
+            Err(SnapshotCodecError::InvalidPayload(
+                "invalid rigid-body state"
+            ))
         ));
     }
 }

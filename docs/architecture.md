@@ -195,15 +195,16 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
   canonical detached-island descriptors (delivered as an isolated server-side primitive);
 - revalidated rigid-body descriptors with fixed integer centre of mass, diagonal inertia, mass,
   bounds, canonical geometry fingerprint, and independent monotonic entity identity (delivered);
-- atomic static-world detachment and protocol-v5 body replication with independent fingerprints,
+- atomic static-world detachment and protocol-v6 body replication with independent fingerprints,
   compact 64-bit IDs, hostile-input limits, and replica reconstruction (delivered);
 - local-space body meshes produced by the bounded background worker, fixed-capacity GPU transform
   instances, body frustum culling, and world/shadow rendering (delivered);
-- deterministic 60 Hz micrometre state, gravity, mass-weighted blast impulse, three-axis swept
-  static collision, material ground friction and normal restitution, exact vertical body columns,
-  stable stacking, wake propagation, sleeping, bounded sweep-and-prune with atomic overload
-  rollback, protocol state replication, and batched GPU transform updates (delivered for
-  axis-aligned bodies);
+- deterministic 60 Hz micrometre state, gravity, mass-weighted blast impulse, inertia-weighted
+  off-centre angular response, canonical fixed-quaternion integration, three-axis swept static
+  collision, material ground friction and normal restitution, exact vertical body columns, stable
+  stacking, wake propagation, sleeping, bounded sweep-and-prune with atomic overload rollback,
+  protocol-v6/snapshot-v2 state replication, and mass-centred GPU rotation with conservative rotated
+  render bounds (delivered; collision geometry remains axis-aligned);
 - four-pass X/Z dynamic contact from swept coarse body bounds, rational orthogonal-overlap validation
   at time of impact, inverse-mass separation, material restitution, momentum-preserving tangential
   friction, impact wake-up, and deterministic short-chain propagation (delivered);
@@ -212,8 +213,8 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - local stress propagation after damage;
 - unsupported island extraction (delivered for topology-changing voxel edits);
 - rigid-body mass, centre of mass, and inertia derived from geometry (delivered);
-- angular motion, voxel-exact lateral contact, deeper constraint-island convergence, clustering, and
-  distance-based solver budgets.
+- oriented voxel contact, collision-generated torque, gyroscopic response, deeper constraint-island
+  convergence, clustering, and distance-based solver budgets.
 
 Gate: destroying a load-bearing member produces a repeatable progressive collapse and never stalls a
 60 Hz server tick in the agreed worst-case scene.

@@ -43,11 +43,12 @@ pub use oidc::{
 };
 pub use physics::{
     BodyError, BodyId, BodyLimits, BodySimulationReport, BodyStateTransition, BodyStepResult,
-    BodyVoxel, BroadPhaseResult, FixedImpulseMilliNewtonSeconds3, FixedMicrometers3,
-    FixedMillimeters3, InertiaDiagonalKgMm2, MAX_BODY_SOLVER_PASSES, MAX_BROAD_PHASE_PAIRS,
-    MICROMETERS_PER_VOXEL, RigidBodyDescriptor, RigidBodyState, SERVER_PHYSICS_HZ,
-    apply_linear_impulse, broad_phase_pairs, step_rigid_bodies, step_rigid_body,
-    valid_rigid_body_state,
+    BodyVoxel, BroadPhaseResult, FIXED_QUATERNION_SCALE, FixedImpulseMilliNewtonSeconds3,
+    FixedMicrometers3, FixedMillimeters3, FixedMilliradians3, FixedQuaternion,
+    InertiaDiagonalKgMm2, MAX_ANGULAR_SPEED_MRAD_PER_SECOND, MAX_BODY_SOLVER_PASSES,
+    MAX_BROAD_PHASE_PAIRS, MICROMETERS_PER_VOXEL, RigidBodyDescriptor, RigidBodyState,
+    SERVER_PHYSICS_HZ, apply_impulse_at_local_point, apply_linear_impulse, broad_phase_pairs,
+    step_rigid_bodies, step_rigid_body, valid_fixed_quaternion, valid_rigid_body_state,
 };
 pub use replication::{
     AuthoritativeServer, BodyStateUpdate, BodyVoxelAssignment, ClientReplica, ClientStatus,

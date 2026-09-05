@@ -3,6 +3,7 @@
 use crate::{IVec3, World, mesh::CpuMesh, mesh::mesh_chunk};
 use core::fmt;
 use std::{
+    sync::Arc,
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     thread::{self, JoinHandle},
 };
@@ -10,7 +11,7 @@ use std::{
 pub const MAX_CHUNKS_PER_MESH_JOB: usize = 256;
 
 struct MeshJob {
-    world: World,
+    world: Arc<World>,
     chunks: Vec<IVec3>,
 }
 
@@ -83,7 +84,7 @@ impl MeshScheduler {
     /// # Errors
     ///
     /// Rejects empty or oversized jobs, backpressure, and a stopped worker.
-    pub fn submit(&self, world: World, chunks: Vec<IVec3>) -> Result<(), MeshScheduleError> {
+    pub fn submit(&self, world: Arc<World>, chunks: Vec<IVec3>) -> Result<(), MeshScheduleError> {
         if chunks.is_empty() {
             return Err(MeshScheduleError::EmptyJob);
         }
@@ -159,7 +160,7 @@ mod tests {
         let fingerprint = world.fingerprint();
         let scheduler = MeshScheduler::new();
         scheduler
-            .submit(world, vec![IVec3::new(0, 0, 0)])
+            .submit(Arc::new(world), vec![IVec3::new(0, 0, 0)])
             .expect("valid job should be queued");
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -180,7 +181,7 @@ mod tests {
         let scheduler = MeshScheduler::new();
         let chunks = vec![IVec3::default(); MAX_CHUNKS_PER_MESH_JOB + 1];
         assert_eq!(
-            scheduler.submit(World::default(), chunks),
+            scheduler.submit(Arc::new(World::default()), chunks),
             Err(MeshScheduleError::TooManyChunks(
                 MAX_CHUNKS_PER_MESH_JOB + 1
             ))

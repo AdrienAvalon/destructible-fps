@@ -19,8 +19,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
-- face-culled chunk meshes and bounded background remeshing limited to chunks whose visible
-  boundary changed;
+- face-culled chunk meshes, distance-prioritized asynchronous initial streaming, and bounded
+  background remeshing limited to chunks whose visible boundary changed;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map, procedural material
@@ -29,7 +29,7 @@ The Linux demo now combines the authoritative core with a real-time first-person
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
 game. Structural collapse, detached rigid bodies, remote sessions, audio, asset-quality PBR,
-temporal anti-aliasing, and asynchronous initial-world streaming remain explicit later gates.
+temporal anti-aliasing, and large-world residency streaming remain explicit later gates.
 
 ## Screenshots
 

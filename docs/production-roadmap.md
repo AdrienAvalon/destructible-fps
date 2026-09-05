@@ -42,7 +42,8 @@ developer impressions are never release evidence.
 - bounded 1,200-byte framing, out-of-order reassembly, replay and gap detection;
 - server-to-client UDP loopback tests and repeatable destruction benchmark;
 - fixed-step first-person movement, collision, rifle, explosive, crosshair, and Vulkan presentation;
-- boundary-aware background remeshing on immutable world snapshots;
+- distance-prioritized initial streaming and boundary-aware background remeshing on shared immutable
+  world snapshots;
 - voxel ambient occlusion, directional shadows, fog, and filmic output;
 - bounded CPU frame distributions and non-blocking real-GPU timestamp telemetry.
 
@@ -52,7 +53,8 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
 
 - real GPU timestamp queries and bounded CPU/GPU p50/p95/p99 telemetry (delivered; automated budget
   comparison remains);
-- asynchronous initial meshing and distance-prioritized chunk streaming;
+- asynchronous initial meshing and distance-prioritized bounded bootstrap streaming (delivered;
+  large-world residency streaming remains);
 - camera frustum, hierarchical-Z occlusion, indirect drawing, and mesh-buffer arenas;
 - physically based material table, texture arrays, normal/roughness/metalness maps, and HDR pipeline;
 - cascaded sun shadows, local lights, temporal anti-aliasing, and measured dynamic resolution;
@@ -164,9 +166,9 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. stream the initial chunk mesh through a bounded worker without blocking window responsiveness;
-2. add chunk frustum culling with visible/drawn counters and an adversarial camera fixture;
-3. implement the first incremental support graph and a deterministic unsupported-island fixture.
+1. add chunk frustum culling with visible/drawn counters and an adversarial camera fixture;
+2. implement the first incremental support graph and a deterministic unsupported-island fixture;
+3. promote unsupported islands into bounded authoritative rigid-body descriptors.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

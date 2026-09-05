@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use destructible_fps::{
-    DemoSession, FireMode, IVec3,
+    DemoSession, FireMode, IVec3, World, chunk_position,
     mesh_scheduler::{MAX_CHUNKS_PER_MESH_JOB, MeshScheduler},
     player::{MovementInput, Player},
     render::{RenderOutcome, Renderer},
@@ -20,7 +20,14 @@ use winit::{
 
 const FIXED_STEP_SECONDS: f32 = 1.0 / 120.0;
 const MAX_PENDING_MESH_CHUNKS: usize = 512;
+const INITIAL_MESH_BATCH_CHUNKS: usize = 16;
 const TELEMETRY_WINDOW: usize = 4_096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MeshPhase {
+    InitialStreaming,
+    Live,
+}
 
 struct RuntimeTelemetry {
     frame_interval: SampleWindow,
@@ -95,6 +102,8 @@ struct Game {
     last_action: String,
     showcase: bool,
     mesh_scheduler: MeshScheduler,
+    mesh_snapshot: Arc<World>,
+    mesh_phase: MeshPhase,
     pending_mesh_chunks: HashSet<IVec3>,
     mesh_job_in_flight: bool,
     mesh_started: Option<Instant>,
@@ -116,16 +125,25 @@ impl Game {
         } else {
             "pret".to_owned()
         };
+        let mesh_snapshot = Arc::new(session.world().clone());
+        let pending_mesh_chunks = mesh_snapshot
+            .chunk_positions()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let initial_chunk_count = pending_mesh_chunks.len();
+        if initial_chunk_count > MAX_PENDING_MESH_CHUNKS {
+            return Err(format!(
+                "monde initial trop grand pour la file bornee: {initial_chunk_count} chunks, maximum {MAX_PENDING_MESH_CHUNKS}"
+            ));
+        }
         let before = Instant::now();
-        let renderer = pollster::block_on(Renderer::new(Arc::clone(&window), session.world()))?;
+        let renderer = pollster::block_on(Renderer::new(Arc::clone(&window)))?;
         let now = Instant::now();
         let world = session.world().stats();
-        let render = renderer.stats();
         println!(
-            "Monde: {} voxels solides, {} chunks; {} faces; initialisation GPU + maillage: {:.1} ms",
+            "Monde: {} voxels solides, {} chunks a streamer; initialisation GPU: {:.1} ms",
             world.solid_voxels,
-            render.chunks,
-            render.exposed_faces,
+            initial_chunk_count,
             now.duration_since(before).as_secs_f64() * 1_000.0
         );
         println!(
@@ -146,7 +164,9 @@ impl Game {
             last_action,
             showcase,
             mesh_scheduler: MeshScheduler::new(),
-            pending_mesh_chunks: HashSet::new(),
+            mesh_snapshot,
+            mesh_phase: MeshPhase::InitialStreaming,
+            pending_mesh_chunks,
             mesh_job_in_flight: false,
             mesh_started: None,
             telemetry: RuntimeTelemetry::new(),
@@ -198,6 +218,7 @@ impl Game {
         ) {
             Ok(Some(result)) => {
                 let dirty_count = result.dirty_chunks.len();
+                self.mesh_snapshot = Arc::new(self.session.world().clone());
                 self.queue_dirty_chunks(result.dirty_chunks);
                 self.last_action = format!(
                     "{:?}: {} fractures + {} endommages, {} datagrammes/{:.1} KiB, autorite {:.2} ms, {} chunks planifies",
@@ -233,7 +254,7 @@ impl Game {
         }
     }
 
-    fn pump_meshing(&mut self) {
+    fn pump_meshing(&mut self, focus: Vec3) {
         match self.mesh_scheduler.poll() {
             Ok(Some(completed)) => {
                 self.mesh_job_in_flight = false;
@@ -262,19 +283,32 @@ impl Game {
             }
         }
 
-        if self.mesh_job_in_flight || self.pending_mesh_chunks.is_empty() {
+        if !self.mesh_job_in_flight && self.pending_mesh_chunks.is_empty() {
+            if self.mesh_phase == MeshPhase::InitialStreaming {
+                self.mesh_phase = MeshPhase::Live;
+                self.last_action = format!(
+                    "streaming initial termine en {:.1} ms: {} chunks, {} faces",
+                    self.started.elapsed().as_secs_f64() * 1_000.0,
+                    self.renderer.stats().chunks,
+                    self.renderer.stats().exposed_faces
+                );
+                println!("{}", self.last_action);
+            }
             return;
         }
-        let mut chunks: Vec<_> = self
-            .pending_mesh_chunks
-            .iter()
-            .copied()
-            .take(MAX_CHUNKS_PER_MESH_JOB)
-            .collect();
-        chunks.sort_unstable();
+        if self.mesh_job_in_flight {
+            return;
+        }
+        let batch_limit = if self.mesh_phase == MeshPhase::InitialStreaming {
+            INITIAL_MESH_BATCH_CHUNKS
+        } else {
+            MAX_CHUNKS_PER_MESH_JOB
+        };
+        let focus_chunk = world_position_to_chunk(focus);
+        let chunks = prioritized_chunks(&self.pending_mesh_chunks, focus_chunk, batch_limit);
         match self
             .mesh_scheduler
-            .submit(self.session.world().clone(), chunks.clone())
+            .submit(Arc::clone(&self.mesh_snapshot), chunks.clone())
         {
             Ok(()) => {
                 for chunk in chunks {
@@ -287,7 +321,11 @@ impl Game {
         }
     }
 
-    fn redraw(&mut self, event_loop: &ActiveEventLoop, exit_after: Option<Duration>) {
+    fn redraw(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        exit_after: Option<Duration>,
+    ) -> Option<String> {
         let cpu_frame_started = Instant::now();
         let now = Instant::now();
         let frame_interval = now.duration_since(self.previous_frame);
@@ -306,14 +344,13 @@ impl Game {
                 steps += 1;
             }
         }
-        self.pump_meshing();
-
         let elapsed_seconds = now.duration_since(self.started).as_secs_f32();
         let (camera_position, view_direction) = if self.showcase {
             showcase_camera(elapsed_seconds)
         } else {
             (self.player.camera_position(), self.player.view_direction())
         };
+        self.pump_meshing(camera_position);
         match self
             .renderer
             .render(camera_position, view_direction, elapsed_seconds)
@@ -326,6 +363,7 @@ impl Game {
                 if let Err(error) = self.renderer.recreate_surface() {
                     eprintln!("surface Vulkan perdue: {error}");
                     event_loop.exit();
+                    return Some(format!("surface Vulkan perdue: {error}"));
                 }
             }
         }
@@ -355,9 +393,20 @@ impl Game {
         }
         if exit_after.is_some_and(|duration| now.duration_since(self.started) >= duration) {
             self.telemetry.print_report(&self.renderer);
+            if self.mesh_phase != MeshPhase::Live {
+                let error = format!(
+                    "streaming initial incomplet: {} chunks en attente, worker actif={}",
+                    self.pending_mesh_chunks.len(),
+                    self.mesh_job_in_flight
+                );
+                eprintln!("{error}");
+                event_loop.exit();
+                return Some(error);
+            }
             println!("smoke test graphique termine proprement");
             event_loop.exit();
         }
+        None
     }
 }
 
@@ -365,6 +414,7 @@ struct App {
     game: Option<Game>,
     exit_after: Option<Duration>,
     showcase: bool,
+    failure: Option<String>,
 }
 
 impl ApplicationHandler for App {
@@ -438,7 +488,11 @@ impl ApplicationHandler for App {
                     game.fire(FireMode::Explosive);
                 }
             }
-            WindowEvent::RedrawRequested => game.redraw(event_loop, self.exit_after),
+            WindowEvent::RedrawRequested => {
+                if let Some(error) = game.redraw(event_loop, self.exit_after) {
+                    self.failure = Some(error);
+                }
+            }
             _ => {}
         }
     }
@@ -466,6 +520,21 @@ impl ApplicationHandler for App {
 
 fn axis(positive: bool, negative: bool) -> f32 {
     f32::from(u8::from(positive)) - f32::from(u8::from(negative))
+}
+
+const fn world_position_to_chunk(position: Vec3) -> IVec3 {
+    chunk_position(IVec3::new(
+        position.x.floor() as i32,
+        position.y.floor() as i32,
+        position.z.floor() as i32,
+    ))
+}
+
+fn prioritized_chunks(pending: &HashSet<IVec3>, focus: IVec3, limit: usize) -> Vec<IVec3> {
+    let mut chunks: Vec<_> = pending.iter().copied().collect();
+    chunks.sort_unstable_by_key(|chunk| (chunk.squared_distance(focus), *chunk));
+    chunks.truncate(limit);
+    chunks
 }
 
 struct LaunchOptions {
@@ -513,7 +582,40 @@ fn main() -> Result<(), Box<dyn Error>> {
         game: None,
         exit_after: options.exit_after,
         showcase: options.showcase,
+        failure: None,
     };
     event_loop.run_app(&mut app)?;
+    if let Some(error) = app.failure {
+        return Err(error.into());
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn world_position_maps_to_negative_chunk_with_euclidean_division() {
+        assert_eq!(
+            world_position_to_chunk(Vec3::new(-0.1, 16.0, -16.1)),
+            IVec3::new(-1, 1, -2)
+        );
+    }
+
+    #[test]
+    fn streaming_batch_selects_nearest_chunks_deterministically() {
+        let pending = [
+            IVec3::new(8, 0, 0),
+            IVec3::new(1, 0, 0),
+            IVec3::new(-1, 0, 0),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            prioritized_chunks(&pending, IVec3::default(), 2),
+            vec![IVec3::new(-1, 0, 0), IVec3::new(1, 0, 0)]
+        );
+    }
 }

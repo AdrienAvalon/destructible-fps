@@ -3,8 +3,8 @@
 #![allow(clippy::cast_precision_loss)]
 
 use crate::{
-    IVec3, World,
-    mesh::{CpuMesh, Vertex, mesh_chunk},
+    IVec3,
+    mesh::{CpuMesh, Vertex},
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -233,13 +233,13 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Initializes the Vulkan device and uploads the initial chunk meshes.
+    /// Initializes the Vulkan device without doing CPU meshing on this thread.
     ///
     /// # Errors
     ///
     /// Returns a diagnostic when the window surface or a compatible GPU is unavailable.
     #[allow(clippy::too_many_lines)]
-    pub async fn new(window: Arc<Window>, world: &World) -> Result<Self, String> {
+    pub async fn new(window: Arc<Window>) -> Result<Self, String> {
         let size = non_zero_size(window.inner_size());
         let mut instance_descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         instance_descriptor.backends = wgpu::Backends::VULKAN;
@@ -501,7 +501,7 @@ impl Renderer {
         });
 
         let depth_view = create_depth_view(&device, size);
-        let mut renderer = Self {
+        let renderer = Self {
             instance,
             window,
             surface,
@@ -521,7 +521,6 @@ impl Renderer {
             chunks: HashMap::new(),
             stats: RenderStats::default(),
         };
-        renderer.rebuild_all(world);
         Ok(renderer)
     }
 
@@ -549,30 +548,11 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn rebuild_all(&mut self, world: &World) {
-        self.chunks.clear();
-        for chunk in world.chunk_positions() {
-            self.upload_chunk(world, chunk);
-        }
-        self.refresh_stats();
-    }
-
-    pub fn rebuild_chunks(&mut self, world: &World, chunks: &[IVec3]) {
-        for &chunk in chunks {
-            self.upload_chunk(world, chunk);
-        }
-        self.refresh_stats();
-    }
-
     pub fn upload_chunk_meshes(&mut self, meshes: Vec<(IVec3, CpuMesh)>) {
         for (chunk, mesh) in meshes {
             self.upload_mesh(chunk, &mesh);
         }
         self.refresh_stats();
-    }
-
-    fn upload_chunk(&mut self, world: &World, chunk: IVec3) {
-        self.upload_mesh(chunk, &mesh_chunk(world, chunk));
     }
 
     fn upload_mesh(&mut self, chunk: IVec3, mesh: &CpuMesh) {

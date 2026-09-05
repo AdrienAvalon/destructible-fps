@@ -34,6 +34,15 @@ completion. GPU values come from native pass timestamp queries multiplied by the
 period. The scene is still small and uses simple materials; these results establish instrumentation,
 not the final photorealistic content budget.
 
+## 2026-09-05 — asynchronous initial meshing
+
+The release showcase smoke initialized the Vulkan device and pipelines without performing CPU
+meshing on the presentation thread. A dedicated worker then meshed the 128 chunks in
+distance-prioritized batches of 16 from one shared immutable world snapshot. The renderer reached
+all 43,912 exposed faces in 32.4 ms after the game runtime started and still completed the five-second
+GPU smoke with zero dropped timestamp samples. The initial pending set is explicitly capped at 512
+chunks; larger future worlds require the Stage 1 residency streamer rather than an unbounded queue.
+
 ## 2026-09-05 — authoritative destruction baseline
 
 Command:

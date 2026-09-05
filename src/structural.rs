@@ -69,7 +69,7 @@ impl StructuralAnchors {
         Ok(self)
     }
 
-    fn contains(&self, position: IVec3) -> bool {
+    pub(crate) fn contains(&self, position: IVec3) -> bool {
         self.foundation_max_y
             .is_some_and(|maximum_y| position.y <= maximum_y)
             || self.explicit.contains(&position)

@@ -32,6 +32,10 @@ name = "structural-load-benchmark"
 path = "src/bin/structural_load_benchmark.rs"
 
 [[bin]]
+name = "structural-jobs-benchmark"
+path = "src/bin/structural_jobs_benchmark.rs"
+
+[[bin]]
 name = "physics-benchmark"
 path = "src/bin/physics_benchmark.rs"
 

@@ -1787,3 +1787,119 @@ underlying exit 1, 160 seconds). Codex performed the final source review and add
 3D balance fixture; there is no successful final external review to claim for this increment.
 Graphify's final index is fresh: 2,388 nodes, 6,622 post-build edges, zero unverified code nodes
 and zero dangling endpoints. It is an AST navigation aid, not evidence of mechanical correctness.
+
+## 2026-09-06 — immutable world domains and bounded structural worker
+
+Source state: `aefb6f6` plus the callable structural-job adapter, copy-on-write world chunks and
+full-future-queue repair correction. Domain extraction now follows the actual complete free
+component and includes only existing solid clamps. A real foundation blast regression removes
+supports, replicates the integer transaction, rejects the pre-blast calculation and verifies that
+surviving supports carry redistributed weight. Twenty-one adapter tests cover limits, cancellation,
+reconfiguration, authority identity, construction in an absent neighbour chunk, and an interleaved
+worker read / live authoritative write. This is a callable self-weight analysis, not automatic
+gameplay fracture, realistic material calibration or a photorealistic rendering improvement.
+
+### Copy-on-write comparison
+
+A standalone optimized Rust harness compiled the exact baseline `World`, material and demo-generator
+sources and the modified `World`, without rebuilding a different scene for the baseline. Each
+variant used 128 chunks, 98,394 solid voxels and 1,048,576 logical dense-payload bytes. Two alternating
+runs measured 10,000 samples per operation on the same i7-13700H, without concurrent compilation or
+tests. The first sample is included; these predominantly warm microbenchmarks are not cold-process
+or frame-time measurements, and CPU clocks were not locked. Clone timing excludes destruction;
+first-write timing excludes the preceding snapshot clone.
+
+| Operation | Baseline run 1 p50 / p95 / p99 | COW run 1 p50 / p95 / p99 | Baseline run 2 p50 / p95 / p99 | COW run 2 p50 / p95 / p99 |
+|---|---:|---:|---:|---:|
+| Clone world | 162,542 / 174,028 / 186,818 ns | 575 / 578 / 579 ns | 161,870 / 168,762 / 178,137 ns | 778 / 812 / 822 ns |
+| Write an unshared chunk | 33 / 36 / 37 ns | 36 / 47 / 48 ns | 34 / 36 / 36 ns | 37 / 49 / 51 ns |
+| First write while retaining a snapshot | 40 / 44 / 49 ns | 100 / 105 / 107 ns | 54 / 60 / 65 ns | 103 / 108 / 127 ns |
+
+Clone maxima were 337,176 / 337,122 ns before and 8,089 / 9,974 ns after. Sharing removes dense
+payload copies from clone and defers a bounded 8 KiB copy to the first real write of a shared chunk;
+this is not a claim that all operations become faster. Immutable voxel/fingerprint isolation is
+checked in the harness and in repository tests. No allocation count or physical RSS delta was
+measured. The local harness is `/tmp/fps-world-cow-V8nNQt/measure.rs`, SHA-256
+`aa9f3f00b3469467623fb7ba4eceb77002aa7a2e259444a7acd74866de15e92f`, built with
+`rustc --edition=2024 -O -C codegen-units=1 -C lto=fat` (and `--cfg old` for the baseline).
+It is a local comparison artifact, not a checked-in, automatically maintained benchmark.
+
+### Worker, regression benchmarks and real GPU smoke
+
+The release worker benchmark used Rust 1.97.1 on the same Linux/i7-13700H, a 32×32 one-cell-thick
+brick wall, `E=1e9 Pa`, `nu=0.25` and the game's approximate 1,900 kg/m³ density. Each configuration
+ran 20 in-process repetitions, including its first job. There was no concurrent compilation or
+benchmark; binaries were initially rebuilt immediately before their first run, followed by a
+separate warm repeat. The table measures submission through worker completion and polling, not an
+isolated solver kernel or a production server tick. The benchmark's caller yields while polling.
+
+| Wall boundary | Nodes / observed chunks | Solver iterations | First run p50 / p95 / p99 | Warm repeat p50 / p95 / p99 | Maximum support reaction |
+|---|---:|---:|---:|---:|---:|
+| All 32 base supports | 1,024 / 10 | 178 | 15.101 / 15.464 / 16.276 ms | 16.589 / 17.049 / 19.934 ms | 596,448 N |
+| Only two base supports | 994 / 10 | 216 | 19.123 / 19.447 / 19.856 ms | 17.744 / 18.641 / 19.113 ms | 9,263,583 N |
+
+Submission p99 was 0.001–0.002 ms and revalidation rounded to 0.000 ms at the printed precision:
+it is not literally zero cost, nor a worst-case observation benchmark. Every repetition requires
+convergence and selected-domain force balance. Total jobs exceed the 12 ms server target even
+though they run off-thread; fair scheduling and integration latency remain unmeasured.
+
+Other required release checks retained correct replicas and bounded state:
+
+| Fixture | p50 / p95 / p99 |
+|---|---:|
+| Destruction, 500 events | 0.013 / 0.232 / 0.388 ms |
+| Topology analysis + promotion, 8,192 voxels, 100 repetitions | 4.161 / 4.219 / 4.303 ms |
+| Physics, 1,024 bodies × 300 ticks | 0.538 / 1.121 / 1.150 ms |
+| Snapshot encode/decode/install, 20 repetitions | 11.969 / 12.329 / 18.391 ms |
+| Snapshot separate warm repeat, 20 repetitions | 12.077 / 12.663 / 13.179 ms |
+
+Snapshot wire size remains 1,181 frames / 1.351 MiB. The initial 18.391 ms outlier is retained,
+not removed in favour of the warm repeat. The standalone elastic benchmark also passed all four
+analytical/force-balance fixtures; its 64×32 and two-support wall solve p99 values were 46.410 and
+59.759 ms respectively, so this change does not claim a faster numerical kernel.
+
+The required five-second real Vulkan smoke completed on the RTX 4050 Laptop, NVIDIA 610.57.04,
+release, default 1,440×900 logical window, 98,394 solid voxels, 128 chunks and 48,736 faces.
+No active bodies or players were present. CPU frame-wall p50/p95/p99 was
+16.654/16.974/33.450 ms (332 samples), including acquisition and presentation waits. GPU shadows
+were 0.096/0.097/0.097 ms, world/HUD 0.937/0.940/1.050 ms and total 1.048/1.054/1.138 ms
+(330 samples, zero drops, 1.151 ms maximum total GPU). Initial streaming took 65.3 ms. This is a
+startup/compatibility check, not a sustained combat, CPU-active-time or photorealism acceptance run.
+
+Full debug and release matrices each passed 242 library, 11 binary and 71 ordinary integration
+tests. Both explicitly executed the normally ignored production-shader GPU projection test on
+Vulkan. Formatting, strict all-target Clippy, dedicated network, secure transport/authority/process
+and six OIDC tests passed. Tool/material Python tests also passed (10), with ShellCheck and
+Python syntax checks. No allocation counts, total worker peak RSS, multi-OS or sustained combat
+measurements are claimed by this increment.
+
+### Validation boundaries and review
+
+The adapter accepts at most 512 resident chunks, bounded historical map capacity, 4,096 mechanical
+nodes and one outstanding job. Its finite work cap is not a wall-clock guarantee. The global vacancy
+epoch deliberately invalidates absent-boundary jobs on distant chunk creation/reclamation;
+large-map residency, fair automatic scheduling and atomic fracture promotion remain open. A stopped
+worker must be reported and replaced, not treated as a supported structure or silently retried.
+
+The first dedicated debug network rerun failed with `TooManyPendingBytes` while release compilation
+was active. The original output did not record the incoming sequence, so its exact packet cannot
+be established retrospectively. Inspection found a separate reproducible defect: a full 16-packet
+future queue refused even the missing packet that could drain it. A new regression failed before
+the correction and passes afterwards. Immediately deliverable repairs now bypass future retention;
+the test verifies that an extra future packet still fails at the unchanged limit and that accounting
+returns to zero after repair. Integration failures now report sequence and queue accounting. All
+twelve release network integration tests subsequently passed ten consecutive complete runs without
+relaxing impairment, repair, convergence or buffer limits. This repetition does not retrospectively
+identify the original failure's packet, nor claim resilience to arbitrary test-process starvation.
+
+Claude's analysis and final review both completed for the structural adapter. The review informed
+exhaustive material mapping, explicit terminal-worker recovery documentation and additional
+interleaving/observation-bound tests. Its historical-map-capacity limitation remains documented,
+not hidden by synchronous compaction. The observation-limit test prepopulates the defensive set;
+it does not pretend that a valid 4,096-node domain naturally reaches that conservative bound.
+Final code and regression confirmation remain Codex's responsibility. The subsequently discovered
+network correction was independently reproduced and locally reviewed, not included in that external
+structural review. The separate tooling review's failed invocation remains documented in `tooling.md`.
+Graphify's final local AST index was fresh with 2,525 nodes, 6,943 post-build edges, zero unverified
+code nodes and zero dangling endpoints. Conclusions were confirmed in source, not inferred solely
+from graph connections.

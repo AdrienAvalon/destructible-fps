@@ -1,4 +1,4 @@
-//! Bounded small-deflection 3D beam equilibrium, for future server structural jobs.
+//! Bounded small-deflection 3D beam equilibrium for immutable server structural jobs.
 //!
 //! Six DOFs per node: translations in metres and rotations in radians. This module never mutates
 //! voxels or replicas. Converged forces are evidence for a future validated fracture transaction,

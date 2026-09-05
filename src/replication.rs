@@ -138,6 +138,7 @@ pub struct AuthoritativeServer {
     body_fingerprint: u128,
     active_body_voxels: usize,
     structural_anchors: StructuralAnchors,
+    pub(crate) structural_context: crate::structural_jobs::StructuralContext,
     structural_limits: StructuralLimits,
     body_limits: BodyLimits,
     next_body_id: BodyId,
@@ -317,6 +318,7 @@ impl AuthoritativeServer {
             body_fingerprint: 0,
             active_body_voxels: 0,
             structural_anchors: StructuralAnchors::foundation_plane(0),
+            structural_context: crate::structural_jobs::StructuralContext::default(),
             structural_limits: StructuralLimits::default(),
             body_limits: BodyLimits::default(),
             next_body_id: 1,
@@ -334,9 +336,39 @@ impl AuthoritativeServer {
         body_limits: BodyLimits,
     ) -> Self {
         self.structural_anchors = anchors;
+        self.structural_context.invalidate();
         self.structural_limits = structural_limits;
         self.body_limits = body_limits;
         self
+    }
+
+    /// Enables explicit elastic parameters for server-selected structural analysis jobs.
+    /// Does not activate an automatic fracture law or change any replicated voxel state.
+    #[must_use]
+    pub fn with_structural_materials(
+        mut self,
+        materials: crate::structural_jobs::StructuralMaterials,
+    ) -> Self {
+        self.structural_context.configure(materials);
+        self
+    }
+
+    pub(crate) const fn structural_anchors(&self) -> &StructuralAnchors {
+        &self.structural_anchors
+    }
+
+    /// Revalidates the originating authority, material/anchor configuration and every read chunk.
+    /// The returned borrow prevents mutation through this authority while the result is inspected.
+    ///
+    /// # Errors
+    /// Rejects stale or foreign results and propagates explicit domain/solver failure. This method
+    /// does not commit damage; a future fracture commit must repeat these checks atomically.
+    pub fn structural_result<'a>(
+        &'a self,
+        completed: &'a crate::structural_jobs::CompletedStructuralJob,
+    ) -> Result<&'a crate::elasticity::ElasticSolution, crate::structural_jobs::StructuralJobError>
+    {
+        self.structural_context.validate(&self.world, completed)
     }
 
     /// Validates and applies one client request as an authoritative transaction.

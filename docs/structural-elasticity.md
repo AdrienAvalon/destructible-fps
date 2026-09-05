@@ -2,9 +2,11 @@
 
 `src/elasticity.rs` adds an actual six-degree-of-freedom equilibrium calculation toward PHYS-01:
 loads redistribute through surviving connections instead of treating every ground-connected
-component as infinitely strong. This is currently an offline-tested foundation for future server
-jobs. Neither `AuthoritativeServer` nor a graphical client invokes it yet. It does not fracture a
-voxel, animate deformation, or claim that the requested progressive collapse is already playable.
+component as infinitely strong. `src/structural_jobs.rs` now extracts authoritative world domains
+and runs immutable calculations on a bounded worker. The server exposes an explicit scheduling/
+revalidation API; the normal game loop does not automatically schedule or commit structural load
+failures yet. This calculation does not fracture a voxel, animate deformation, or claim that the
+requested progressive collapse is already playable.
 
 ## Mechanical representation
 
@@ -61,17 +63,88 @@ classify a building as safe, destroy it by default, or become hidden indestructi
 decomposition, bounded backlog, stronger preconditioning and explicit failure handling are promotion
 requirements before general gameplay integration.
 
-The model knows only its supplied mechanical domain. It cannot detect omitted neighbouring world
-geometry or stale world revisions: the future domain builder must prove completeness, include
-actual boundary support/load contributions and retain a revision/fingerprint for revalidation.
-Omitted voxels are never implicitly fixed anchors. Large connected worlds exceed this first cap;
-passing the small fixtures is not evidence of whole-map structural support.
+The numerical model knows only its supplied mechanical domain. The authoritative adapter below
+owns completeness and stale-state checks. Omitted voxels are never implicitly fixed anchors.
+Large connected worlds exceed this first cap; passing the small fixtures is not evidence of
+whole-map structural support.
+
+## Authoritative domains and immutable jobs
+
+An explicitly configured `StructuralMaterials` provides finite, kernel-compatible Young's moduli
+and Poisson ratios for all seven solid material IDs. There is no synthetic default disguised as
+material calibration. Mass comes from the same material density as significant fragments and uses
+the world's one-metre cell spacing. The current job applies self-weight only, with the same gravity
+as body dynamics; damaged occupied voxels retain all mass. Blast impulses, contact forces from
+resting bodies, temperature and material fatigue are not included in this static analysis.
+
+The caller submits a trusted server-selected **free solid seed**, not a client-specified fragment.
+The worker traverses the whole face-connected free component and reads all its cardinal neighbours,
+including air. Actual clamped solid neighbours are included but not traversed through. Finding the
+first foundation does not terminate the search as it can for simple connectivity. Authored anchors
+without a solid voxel never support the component. Coordinates use checked neighbour arithmetic.
+Empty seeds, fixed seeds, invalid integrity, unanchored components, oversized domains and solver
+failures remain explicit errors, not successful partial support classifications.
+
+This is a complete **clamped-boundary problem**, not all matter connected through soil. Another
+free branch across an infinitely clamped node does not change this domain's displacement, but its
+load is not in the reported reactions. A shared foundation's bearing check would require separate
+aggregation of every contributing domain and counting its own weight only once. These reactions
+must not be treated as total soil/foundation capacity. Flexible foundations require including their
+coupled free nodes, not reusing this rigid-boundary simplification.
+
+`World` now shares immutable dense chunks with `Arc`; cloning copies map metadata, not every
+4,096-cell payload. The first actual write to a shared chunk copies that chunk; no-op writes do not
+copy or retire it. Wire data, fingerprints, tick semantics and logical dense-payload statistics are
+unchanged. Logical payload bytes do not measure shared physical RSS.
+
+Submission checks backpressure before capture. It accepts at most 512 resident chunks and limits
+historical hash-table capacity metadata to twice that cap. Reclaiming entries alone does not shrink
+a `HashMap`, so the retained high-water bound prevents a once-large map from silently making snapshot
+work unbounded. An over-limit history remains an explicit rejection until a later bounded residency/
+compaction design handles it; no synchronous full-map rebuild is hidden on the caller's path.
+Up to 4,096 authored anchor positions are copied as bounded configuration metadata.
+
+The worker retains an observation for every read chunk. An occupied observation holds the actual
+immutable chunk allocation, not a wrapping revision counter. Changing data, removing/recreating
+the chunk, or changing data then rolling it back cannot revalidate the old pointer while it is
+retained. An absent observation holds a vacancy epoch and requires continued absence. Chunk
+creation/reclamation changes that epoch, preventing empty/occupied/empty ABA. This deliberately
+conservative global epoch can also invalidate an absent-boundary job when a distant chunk is
+created or reclaimed. Remote writes in **existing unobserved chunks** do not invalidate it. Fine
+grained absence histories/fair dirty-domain scheduling remain necessary before heavy construction
+churn can be claimed starvation-free.
+
+Every result also retains an authority/configuration identity. Changing anchors or materials,
+or cloning the authority, creates a new identity. A result from another instance cannot be used
+even if voxel bytes and fingerprints match. `AuthoritativeServer::structural_result` revalidates
+all these observations and returns a borrowed solution: inspecting it keeps that authority
+immutably borrowed. This is not a mutation permit. A future fracture transaction must repeat
+validation at commit and quantize accepted changes into the existing integer protocol.
+
+The scheduler has one thread and **one outstanding slot**, including a completed-but-unconsumed
+result. Repeated submissions return `Busy`; they cannot build an unbounded backlog. Explicit
+cancellation retires even a result already waiting in that slot, and polling drains it before reuse.
+Work checks cancellation per traversal node and between eight-iteration solve slices. Drop closes
+both channels, requests cancellation and joins the thread. Model construction and final force
+extraction are bounded but not preemptible; cancellation is not a hard wall-clock deadline.
+`WorkerStopped` is terminal for that scheduler instance. Its owner must report the failure and
+replace the scheduler; no automatic panic retry hides a deterministic solver defect or promotes
+an incomplete result. Material mapping is exhaustive, so adding an enum variant requires an
+explicit mapping/calibration decision instead of silently extending a worker-side array index.
+
+Read observations are capped separately at `7 * 4096 + 1`, including absent neighbouring chunks;
+they need not be fewer than the resident chunk count. At most the snapshot's 512 dense chunks
+can be retained, initially about 4 MiB of logical voxel payload; configuration, map/node/bond
+metadata and numerical scratch add to this. This is not a measured total-memory budget, nor a cap
+on results that a caller deliberately retains after consuming the scheduler slot.
 
 ## Validation and progression
 
 ```bash
 cargo test --lib elasticity::tests
+cargo test --lib structural_jobs::tests
 cargo run --release --bin structural-load-benchmark -- --iterations 20
+cargo run --release --bin structural-jobs-benchmark -- --iterations 20
 ```
 
 Tests compare axial compression, torsion, shear-aware cantilever deflection and pure bending moments
@@ -87,12 +160,14 @@ convergence, force balance and analytical long-cantilever agreement, not merely 
 
 Next promotion work remains explicit:
 
-1. Extract complete affected mechanical domains from authoritative voxel/material snapshots; prove
-   boundary contributions and stale-result rejection under concurrent destruction/building.
+1. Extend the explicit complete-domain worker to fair automatic dirty-domain scheduling and bounded
+   decomposition/residency for real maps. Preserve shared-clamp reaction semantics and stale-state
+   rejection under distant new-chunk churn, not only edits in existing chunks.
 2. Calibrate strength and direction-dependent material response; derive fracture candidates from
    compression, tension, shear, bending and torsional demand, preserving significant fragment mass.
-3. Schedule bounded immutable jobs outside receive/presentation paths, then revalidate and commit
-   integer damage, structural separation and significant body assignments atomically.
+3. Integrate the worker outside receive/presentation paths, then revalidate and commit integer
+   damage, structural separation and significant body assignments atomically; never treat unresolved
+   jobs as stable support or automatic collapse.
 4. Exercise weak wood, explosive wall breach and overloaded remaining supports in the same two-client
    playable sequence, including repair/late join and repeated failure/rebuild. Validate multi-OS,
    sustained latency and memory before claiming realistic synchronized collapse.

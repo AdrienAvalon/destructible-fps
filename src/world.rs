@@ -1,6 +1,6 @@
 use crate::material::Voxel;
 use core::fmt;
-use std::collections::HashMap;
+use std::{collections::HashMap, collections::hash_map::Entry, sync::Arc};
 
 pub const CHUNK_EDGE: i32 = 16;
 const CHUNK_EDGE_USIZE: usize = CHUNK_EDGE as usize;
@@ -55,10 +55,39 @@ impl Default for Chunk {
 
 #[derive(Clone, Default)]
 pub struct World {
-    chunks: HashMap<IVec3, Chunk>,
+    chunks: HashMap<IVec3, Arc<Chunk>>,
+    chunk_capacity_high_water: usize,
+    // Retained by absent-chunk observations. Allocation/reclamation replaces the token, so an
+    // empty -> occupied -> empty ABA cannot make a previously observed absence look unchanged.
+    vacancy_epoch: Arc<()>,
     tick: u64,
     fingerprint: u128,
     solid_voxels: usize,
+}
+
+pub(crate) struct ChunkObservation {
+    position: IVec3,
+    state: ObservedChunk,
+}
+
+enum ObservedChunk {
+    Occupied(Arc<Chunk>),
+    Absent(Arc<()>),
+}
+
+impl ChunkObservation {
+    pub(crate) fn matches(&self, world: &World) -> bool {
+        match &self.state {
+            ObservedChunk::Occupied(expected) => world
+                .chunks
+                .get(&self.position)
+                .is_some_and(|actual| Arc::ptr_eq(expected, actual)),
+            ObservedChunk::Absent(expected) => {
+                !world.chunks.contains_key(&self.position)
+                    && Arc::ptr_eq(expected, &world.vacancy_epoch)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,6 +138,26 @@ impl fmt::Display for WorldError {
 impl std::error::Error for WorldError {}
 
 impl World {
+    /// Bound `HashMap` storage as well as live entries: reclamation need not shrink its allocation.
+    pub(crate) fn bounded_snapshot(&self, maximum_chunks: usize) -> Option<Self> {
+        if self.chunks.len() > maximum_chunks
+            || self.chunk_capacity_high_water > maximum_chunks.saturating_mul(2)
+        {
+            return None;
+        }
+        Some(self.clone())
+    }
+
+    pub(crate) fn observe_chunk(&self, position: IVec3) -> ChunkObservation {
+        ChunkObservation {
+            position,
+            state: self.chunks.get(&position).map_or_else(
+                || ObservedChunk::Absent(Arc::clone(&self.vacancy_epoch)),
+                |chunk| ObservedChunk::Occupied(Arc::clone(chunk)),
+            ),
+        }
+    }
+
     #[must_use]
     pub fn voxel(&self, position: IVec3) -> Voxel {
         let (chunk_position, local) = split_position(position);
@@ -126,8 +175,20 @@ impl World {
 
         let (chunk_position, local) = split_position(position);
         let should_remove;
+        let inserted;
         {
-            let chunk = self.chunks.entry(chunk_position).or_default();
+            let chunk = match self.chunks.entry(chunk_position) {
+                Entry::Occupied(entry) => {
+                    inserted = false;
+                    entry.into_mut()
+                }
+                Entry::Vacant(entry) => {
+                    inserted = true;
+                    self.vacancy_epoch = Arc::new(());
+                    entry.insert(Arc::default())
+                }
+            };
+            let chunk = Arc::make_mut(chunk);
             let slot = &mut chunk.voxels[local_index(local)];
             if before.is_solid() && !after.is_solid() {
                 chunk.solid_voxels -= 1;
@@ -141,9 +202,15 @@ impl World {
             should_remove = chunk.solid_voxels == 0;
         }
 
+        if inserted {
+            self.chunk_capacity_high_water =
+                self.chunk_capacity_high_water.max(self.chunks.capacity());
+        }
+
         self.fingerprint ^= voxel_token(position, before) ^ voxel_token(position, after);
         if should_remove {
             self.chunks.remove(&chunk_position);
+            self.vacancy_epoch = Arc::new(());
         }
         before
     }
@@ -351,6 +418,79 @@ const fn splitmix64(mut value: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::material::Material;
+
+    #[test]
+    fn copy_on_write_snapshots_share_only_unchanged_chunks() {
+        let first = IVec3::new(0, 0, 0);
+        let other = IVec3::new(32, 0, 0);
+        let brick = Voxel::new(Material::Brick);
+        let mut live = World::default();
+        live.set_voxel(first, brick);
+        live.set_voxel(other, brick);
+        let snapshot = live.clone();
+        let first_proof = snapshot.observe_chunk(chunk_position(first));
+        let other_proof = snapshot.observe_chunk(chunk_position(other));
+        live.set_voxel(first, brick);
+        assert!(
+            first_proof.matches(&live),
+            "no-op write must keep the snapshot valid"
+        );
+        live.set_voxel(first, Voxel::new(Material::Steel));
+        assert!(!first_proof.matches(&live));
+        assert!(other_proof.matches(&live));
+        assert_eq!(snapshot.voxel(first), brick);
+        assert_eq!(snapshot.fingerprint(), snapshot.recompute_fingerprint());
+        assert_eq!(live.fingerprint(), live.recompute_fingerprint());
+        assert_ne!(snapshot.fingerprint(), live.fingerprint());
+    }
+
+    #[test]
+    fn occupied_and_absent_chunk_observations_reject_aba() {
+        let position = IVec3::new(-17, 4, -1);
+        let brick = Voxel::new(Material::Brick);
+        let mut world = World::default();
+        let absent = world.observe_chunk(chunk_position(position));
+        assert!(absent.matches(&world));
+        world.set_voxel(position, brick);
+        assert!(!absent.matches(&world));
+        let occupied = world.observe_chunk(chunk_position(position));
+        world.set_voxel(position, Voxel::new(Material::Wood));
+        world.set_voxel(position, brick);
+        assert!(
+            !occupied.matches(&world),
+            "same voxel bytes must not restore a retired token"
+        );
+        let occupied = world.observe_chunk(chunk_position(position));
+        world.set_voxel(position, Voxel::AIR);
+        assert!(
+            !absent.matches(&world),
+            "chunk reclamation must not restore observed absence"
+        );
+        world.set_voxel(position, brick);
+        assert!(
+            !occupied.matches(&world),
+            "recreated chunk must have a new retained identity"
+        );
+    }
+
+    #[test]
+    fn rollback_restores_content_without_revalidating_an_old_chunk_observation() {
+        let position = IVec3::new(1, 1, 1);
+        let before = Voxel::new(Material::Brick);
+        let mut world = World::default();
+        world.set_voxel(position, before);
+        let snapshot = world.clone();
+        let observed = world.observe_chunk(chunk_position(position));
+        let change = VoxelChange {
+            position,
+            before,
+            after: Voxel::AIR,
+        };
+        assert!(world.apply_checked(&[change], 1).is_err());
+        assert_eq!(world.fingerprint(), snapshot.fingerprint());
+        assert_eq!(world.voxel(position), before);
+        assert!(!observed.matches(&world));
+    }
 
     #[test]
     fn negative_coordinates_round_trip() {

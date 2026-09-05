@@ -31,6 +31,7 @@ pub mod server_config;
 pub mod session;
 pub mod snapshot;
 pub mod structural;
+pub mod structural_jobs;
 pub mod telemetry;
 pub mod transport;
 pub mod world;

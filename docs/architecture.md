@@ -128,20 +128,30 @@ pinned issuer and validated subject; display names never become identity.
 
 JWKS replacement validates the complete candidate before one write-lock swap, so a bad refresh keeps
 the last accepted keys. Verification performs no DNS, HTTP, or file access and holds the key lock only
-long enough to clone the selected immutable key. A trusted supervisor still needs to validate OIDC
-discovery over TLS, enforce cache/freshness policy, deliver rotation atomically, and fail closed when
-the last accepted set expires.
+long enough to clone the selected immutable key. The standalone process loads a bounded static set
+whose declared remaining validity must be between one minute and 24 hours. The verifier rejects new
+admissions at expiry and the process stops rather than running on stale identity data. A trusted
+supervisor still needs to validate OIDC discovery over TLS and atomically deliver refreshed sets.
+
+The process configuration is bounded to 16 KiB and rejects unknown fields, links, relative credential
+paths, non-regular files, certificates over 256 KiB or eight entries, private keys over 64 KiB, and
+JWKS over 64 KiB. It requires exactly one PEM private key and verifies key/certificate compatibility
+through rustls before opening the endpoint. On Unix, configuration, certificate, and JWKS files may
+not be group/world writable; the private key may have no group/world access. Credential content is
+never accepted through argv or printed. Windows remains loopback-only while installer-owned DACL
+validation is designed.
 
 Real loopback QUIC tests cover a valid encrypted datagram exchange, an untrusted certificate, an
 invalid application credential, a stalled admission deadline, a mismatched nonce echo, oversized
 payloads in both directions, and 20 independent sequential sessions. A second real-QUIC integration
 suite admits two clients, routes one destructive command through the authority, and verifies that
 both receive the same canonical transaction. It also proves that invalid credentials never enter
-authority state and that an over-rate session closes before simulation work. The standalone
-executable still instantiates only the legacy loopback UDP adapter. Production OIDC discovery/JWKS
-refresh, certificate lifecycle, reliable snapshot/control streams, operational configuration, and
-an external-process negative matrix remain required before non-loopback exposure.
-The public runtime bind remains fail-closed to loopback until that production policy exists.
+authority state and that an over-rate session closes before simulation work. Four standalone-process
+tests exercise real OIDC admission and command application, invalid-token rejection without a world
+mutation, remote-bind rejection, and private-key permission rejection before readiness. Production
+OIDC discovery/JWKS refresh, certificate lifecycle, reliable snapshot/control streams, OS-specific
+secret ACL validation, and a non-loopback attack matrix remain required before remote exposure. Both
+the direct runtime API and the validated file policy remain fail-closed to loopback.
 
 ## Planned engine layers
 

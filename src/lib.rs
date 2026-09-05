@@ -16,6 +16,7 @@ pub mod render;
 pub mod replication;
 pub mod secure_server;
 pub mod secure_transport;
+pub mod server_config;
 pub mod session;
 pub mod snapshot;
 pub mod structural;
@@ -65,6 +66,11 @@ pub use secure_transport::{
     decode_session_hello, decode_session_welcome, encode_session_hello, encode_session_welcome,
     establish_session, receive_gameplay_datagram, secure_client_config, secure_server_config,
     send_gameplay_datagram,
+};
+pub use server_config::{
+    MAX_CERTIFICATE_CHAIN_BYTES, MAX_CERTIFICATE_CHAIN_ENTRIES, MAX_SECURE_CONFIG_BYTES,
+    MAX_STATIC_JWKS_VALIDITY_SECONDS, MAX_TLS_PRIVATE_KEY_BYTES, MIN_STATIC_JWKS_VALIDITY_SECONDS,
+    SecureAuthorityLaunchConfig, SecureAuthorityLaunchError, SecureNetworkExposure,
 };
 pub use session::{DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
 pub use snapshot::{

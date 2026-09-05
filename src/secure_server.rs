@@ -120,6 +120,30 @@ impl SecureDedicatedServer {
                 "secure authority remains loopback-only until trusted process configuration",
             ));
         }
+        Self::bind_resolved(address, server_config, verifier, world)
+    }
+
+    pub(crate) fn bind_validated_loopback(
+        address: SocketAddr,
+        server_config: ServerConfig,
+        verifier: Arc<dyn SessionCredentialVerifier>,
+        world: World,
+    ) -> io::Result<Self> {
+        if !address.ip().is_loopback() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "validated secure authority policy permits only loopback",
+            ));
+        }
+        Self::bind_resolved(address, server_config, verifier, world)
+    }
+
+    fn bind_resolved(
+        address: SocketAddr,
+        server_config: ServerConfig,
+        verifier: Arc<dyn SessionCredentialVerifier>,
+        world: World,
+    ) -> io::Result<Self> {
         let runtime = Handle::try_current().map_err(|_error| {
             io::Error::other("secure authority requires an active Tokio runtime")
         })?;

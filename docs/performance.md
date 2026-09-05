@@ -3,6 +3,32 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — standalone secure authority promotion
+
+Source state: commit `6900d38` plus the standalone configuration/process increment documented here.
+The complete suite passed 71 library tests, four binary tests, and 39 integration tests in both debug
+and release. Its four external-process cases completed in 1.20 seconds: a real RS256 OIDC credential
+admitted a QUIC session and one authoritative destruction command; an invalid credential produced no
+simulation work; a non-loopback bind and a group-readable Unix private key both failed before
+readiness. The process accepts only a configuration path in argv and its captured output contained no
+test credential.
+
+The launch path bounds configuration to 16 KiB, certificate input to 256 KiB/eight entries, private
+key input to 64 KiB/one entry, and JWKS input to 64 KiB/32 validated keys. Static key validity is
+limited to 60–86,400 seconds and converted once into a monotonic deadline. This is configuration and
+security evidence, not a networking throughput result; non-loopback exposure remains disabled.
+
+Sequential release baselines remained within the existing targets: destruction p99 0.354 ms at
+21,502 events/s, structural combined p99 4.158 ms (max 4.232 ms), 1,024-body physics p99 0.866 ms
+(max 0.900 ms), and snapshot total p99 9.434 ms. Replicas converged, all simulated bodies slept, and
+the representative snapshot remained 859 frames / 0.983 MiB.
+
+A five-second Vulkan smoke on the NVIDIA GeForce RTX 4050 Laptop GPU completed with 379 CPU and 377
+GPU samples, zero timestamp drops, CPU-work p99 17.019 ms, GPU-shadow p99 0.089 ms, GPU world/HUD p99
+0.110 ms, and GPU-total p99 0.220 ms. Initial GPU setup took 270.1 ms and the 128-chunk initial stream
+took 40.2 ms. The secure process is not on the renderer path; this run guards against an unrelated
+regression rather than attributing graphical performance to it.
+
 ## 2026-09-05 — dedicated-process transport promotion
 
 Source state: parent `ce27090` plus the dedicated transport change documented in this section.

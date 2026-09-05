@@ -120,6 +120,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - 32-task bounded concurrent admission, 64-event control and 256-datagram gameplay queues,
   cryptographic server nonces, monotonic session allocation, per-session ingress limits, and
   two-client secure-authority convergence (delivered in-process over real QUIC sockets);
+- standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
+  Unix permission checks, static-JWKS expiry, signal-aware shutdown, and a four-case external-process
+  matrix (delivered for loopback; online refresh and remote policy remain);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
@@ -208,8 +211,8 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add trusted certificate/OIDC configuration loading and a secure standalone process, then pass an
-   external-process negative-test matrix before any non-loopback exposure;
+1. add trusted OIDC discovery/JWKS refresh, certificate-expiry/lifecycle validation, Windows service
+   DACL checks, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
 2. add horizontal velocity, material friction/restitution, and deterministic impulse response,
    followed by angular state and replicated orientation.
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at

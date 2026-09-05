@@ -349,7 +349,12 @@ fn unix_seconds() -> Result<u64, OidcVerificationError> {
 mod tests {
     use super::*;
     use crate::SampleWindow;
-    use base64::engine::general_purpose::STANDARD;
+    use aws_lc_rs::{
+        encoding::AsDer,
+        rand::SystemRandom,
+        rsa::{KeyPair as RsaKeyPair, KeySize},
+        signature::{KeyPair as _, RSA_PKCS1_SHA256, RsaKeyPair as SigningRsaKeyPair},
+    };
     use jsonwebtoken::{EncodingKey, Header, encode};
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -357,41 +362,8 @@ mod tests {
     const ISSUER: &str = "https://identity.example.test/realms/game";
     const AUDIENCE: &str = "destructible-fps";
     const KEY_ID: &str = "test-key-2026";
-    // Published jsonwebtoken RSA fixture, used only to produce deterministic local test tokens.
-    const TEST_RSA_PRIVATE_DER_BASE64: &str = concat!(
-        "MIIEpAIBAAKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sg",
-        "gh5/CYYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2VrUyWyj3MFl0HTVF9K",
-        "wRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG/AtH89BIE9jDBHZ9dLelK9",
-        "a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5x",
-        "qi+yUod+j8MtvIj812dkS4QMiRVN/by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQIDAQAB",
-        "AoIBAHREk0I0O9DvECKdWUpAmF3mY7oY9PNQiu44Yaf+AoSuyRpRUGTMIgc3u3eivOE8ALX0Bm",
-        "YUO5JtuRNZDpvt4SAwqCnVUinIf6C+eH/wSurCpapSM0BAHp4aOA7igptyOMgMPYBHNA1e9A7j",
-        "E0dCxKWMl3DSWNyjQTk4zeRGEAEfbNjHrq6YCtjHSZSLmWiG80hnfnYos9hOr5JnLnyS7ZmFE/",
-        "5P3XVrxLc/tQ5zum0R4cbrgzHiQP5RgfxGJaEi7XcgherCCOgurJSSbYH29Gz8u5fFbS+Yg8s+",
-        "OiCss3cs1rSgJ9/eHZuzGEdUZVARH6hVMjSuwvqVTFaE8AgtleECgYEA+uLMn4kNqHlJS2A5u",
-        "AnCkj90ZxEtNm3E8hAxUrhssktY5XSOAPBlxyf5RuRGIImGtUVIr4HuJSa5TX48n3Vdt9MYCpr",
-        "O/iYl6moNRSPt5qowIIOJmIjY2mqPDfDt/zw+fcDD3lmCJrFlzcnh0uea1CohxEbQnL3cypeLt",
-        "+WbU6kCgYEAzSp19m1ajieFkqgoB0YTpt/OroDx38vvI5unInJlEeOjQ+oIAQdN2wpxBvTrRor",
-        "MU6P07mFUbt1j+Co6CbNiw+X8HcCaqYLR5clbJOOWNR36PuzOpQLkfK8woupBxzW9B8gZmY8rB",
-        "1mbJ+/WTPrEJy6YGmIEBkWylQ2VpW8O4O0CgYEApdbvvfFBlwD9YxbrcGz7MeNCFbMz+MucqQn",
-        "tIKoKJ91ImPxvtc0y6e/Rhnv0oyNlaUOwJVu0yNgNG117w0g4t/+Q38mvVC5xV7/cn7x9UMFk6",
-        "MkqVir3dYGEqIl/OP1grY2Tq9HtB5iyG9L8NIamQOLMyUqqMUILxdthHyFmiGkCgYEAn9+PjpjG",
-        "MPHxL0gj8Q8VbzsFtou6b1deIRRA2CHmSltltR1gYVTMwXxQeUhPMmgkMqUXzs4/WijgpthY44h",
-        "K1TaZEKIuoxrS70nJ4WQLf5a9k1065fDsFZD6yGjdGxvwEmlGMZgTwqV7t1I4X0Ilqhav5hcs5",
-        "apYL7gnPYPeRz0CgYALHCj/Ji8XSsDoF/MhVhnGdIs2P99NNdmo3R2Pv0CuZbDKMU559LJHUvrK",
-        "S8WkuWRDuKrz1W/EQKApFjDGpdqToZqriUFQzwy7mR3ayIiogzNtHcvbDHx8oFnGY0OFksX/ye",
-        "0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ=="
-    );
-    const TEST_RSA_PUBLIC_DER_BASE64: &str = concat!(
-        "MIIBCgKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5/C",
-        "YYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2VrUyWyj3MFl0HTVF9KwRXLAc",
-        "wkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG/AtH89BIE9jDBHZ9dLelK9a184zAf",
-        "8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi+yUod+",
-        "j8MtvIj812dkS4QMiRVN/by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQIDAQAB"
-    );
-
     struct TestIdentity {
-        encoding_key: EncodingKey,
+        signing_key: SigningRsaKeyPair,
         jwks: Vec<u8>,
     }
 
@@ -412,7 +384,7 @@ mod tests {
             OidcSessionVerifier::new(ISSUER, AUDIENCE, &identity.jwks).expect("valid verifier");
         let now = unix_seconds().expect("test clock");
         let token = signed_token(
-            &identity.encoding_key,
+            &identity.signing_key,
             KEY_ID,
             TestClaims {
                 iss: ISSUER,
@@ -445,7 +417,7 @@ mod tests {
             OidcSessionVerifier::new(ISSUER, AUDIENCE, &identity.jwks).expect("valid verifier");
         let now = unix_seconds().expect("test clock");
         let wrong_audience = signed_token(
-            &identity.encoding_key,
+            &identity.signing_key,
             KEY_ID,
             TestClaims {
                 iss: ISSUER,
@@ -457,7 +429,7 @@ mod tests {
             },
         );
         let unknown_key = signed_token(
-            &identity.encoding_key,
+            &identity.signing_key,
             "unknown-key",
             TestClaims {
                 iss: ISSUER,
@@ -540,7 +512,7 @@ mod tests {
             ),
         ];
         for (index, (claims, expected)) in cases.into_iter().enumerate() {
-            let token = signed_token(&identity.encoding_key, KEY_ID, claims);
+            let token = signed_token(&identity.signing_key, KEY_ID, claims);
             assert_eq!(
                 verifier.verify_oidc(token.as_bytes()),
                 Err(expected),
@@ -548,7 +520,7 @@ mod tests {
             );
         }
         let valid = signed_token(
-            &identity.encoding_key,
+            &identity.signing_key,
             KEY_ID,
             TestClaims {
                 iss: ISSUER,
@@ -580,7 +552,7 @@ mod tests {
             .map(|iteration| {
                 let jti = format!("measured-jti-{iteration:04}");
                 signed_token(
-                    &identity.encoding_key,
+                    &identity.signing_key,
                     KEY_ID,
                     TestClaims {
                         iss: ISSUER,
@@ -618,7 +590,7 @@ mod tests {
         assert!(verifier.replace_jwks(b"{}").is_err());
         let now = unix_seconds().expect("test clock");
         let before_rotation = signed_token(
-            &identity.encoding_key,
+            &identity.signing_key,
             KEY_ID,
             TestClaims {
                 iss: ISSUER,
@@ -637,7 +609,7 @@ mod tests {
         assert_eq!(verifier.replace_jwks(&replacement), Ok(1));
 
         let old_key = signed_token(
-            &identity.encoding_key,
+            &identity.signing_key,
             KEY_ID,
             TestClaims {
                 iss: ISSUER,
@@ -649,7 +621,7 @@ mod tests {
             },
         );
         let new_key = signed_token(
-            &identity.encoding_key,
+            &identity.signing_key,
             "rotated-key",
             TestClaims {
                 iss: ISSUER,
@@ -723,21 +695,36 @@ mod tests {
         ));
     }
 
-    fn signed_token(claims_key: &EncodingKey, key_id: &str, claims: TestClaims<'_>) -> String {
+    fn signed_token(
+        claims_key: &SigningRsaKeyPair,
+        key_id: &str,
+        claims: TestClaims<'_>,
+    ) -> String {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(key_id.to_owned());
-        encode(&header, &claims, claims_key).expect("signed test token")
+        let encoded_header = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header).expect("serialized test token header"));
+        let encoded_claims = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).expect("serialized test token claims"));
+        let message = format!("{encoded_header}.{encoded_claims}");
+        let mut signature = vec![0_u8; claims_key.public_modulus_len()];
+        claims_key
+            .sign(
+                &RSA_PKCS1_SHA256,
+                &SystemRandom::new(),
+                message.as_bytes(),
+                &mut signature,
+            )
+            .expect("signed test token");
+        format!("{message}.{}", URL_SAFE_NO_PAD.encode(signature))
     }
 
     fn test_identity(key_id: &str) -> TestIdentity {
-        let private_der = STANDARD
-            .decode(TEST_RSA_PRIVATE_DER_BASE64)
-            .expect("published test private key");
-        let public_der = STANDARD
-            .decode(TEST_RSA_PUBLIC_DER_BASE64)
-            .expect("published test public key");
-        let encoding_key = EncodingKey::from_rsa_der(&private_der);
-        let decoding_key = DecodingKey::from_rsa_der(&public_der);
+        let key_pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("ephemeral test RSA key");
+        let private_der = key_pair.as_der().expect("ephemeral test private key");
+        let signing_key = SigningRsaKeyPair::from_pkcs8(private_der.as_ref())
+            .expect("ephemeral test signing key");
+        let decoding_key = DecodingKey::from_rsa_der(key_pair.public_key().as_ref());
         let mut jwk =
             Jwk::from_decoding_key(&decoding_key, Some(Algorithm::RS256)).expect("test public JWK");
         jwk.common.key_id = Some(key_id.to_owned());
@@ -745,6 +732,6 @@ mod tests {
         jwk.common.public_key_use = Some(PublicKeyUse::Signature);
         jwk.common.key_operations = Some(vec![KeyOperations::Verify]);
         let jwks = serde_json::to_vec(&JwkSet { keys: vec![jwk] }).expect("test JWKS");
-        TestIdentity { encoding_key, jwks }
+        TestIdentity { signing_key, jwks }
     }
 }

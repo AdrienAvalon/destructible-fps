@@ -31,6 +31,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - a bounded offline Keycloak-compatible OIDC verifier with RS256/JWKS key policy, exact
   issuer/audience and time validation, atomic key rotation, one-use `jti` replay defense, and stable
   issuer/subject-derived principals;
+- a standalone secure authority process with bounded JSON/PEM/JWKS loading, strict Unix key-file
+  permissions, forced static-JWKS expiry, graceful interruption, and no credential-valued arguments;
 - strict caps on incomplete packets, fragments, and retained bytes to prevent
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,
@@ -85,6 +87,7 @@ cargo test --all-targets
 cargo test --test network
 cargo test --test secure_transport
 cargo test --test secure_authority
+cargo test --test secure_server_process
 cargo test oidc::tests
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
@@ -97,17 +100,29 @@ The legacy dedicated-server process is intentionally restricted to loopback. Its
 separated from the reusable authority core and its real two-client path is exercised by
 `cargo test --test network`; do not expose that binary to a LAN or the Internet. The separate secure
 runtime now connects QUIC admissions and encrypted datagrams to the same authority core, and
-`cargo test --test secure_authority` proves a two-client destructive transaction. It does not yet
-have a production configuration/launch binary and therefore also rejects non-loopback binds. The
-secure boundary tests
+`cargo test --test secure_authority` proves a two-client destructive transaction. The
+`secure-dedicated-server` process loads certificate paths and a time-bounded OIDC JWKS from a
+fail-closed file configuration. It still rejects non-loopback binds pending trusted online key
+refresh, certificate lifecycle checks, and the remote-exposure test gate. The secure boundary tests
 cover TLS certificate rejection, application-credential rejection, admission timeout, nonce
 mismatch, datagram bounds, invalid credentials, and per-session rate limiting. A separate offline
-OIDC verifier validates pre-provisioned JWKS, but trusted discovery/refresh, certificate
-provisioning, reliable control/snapshot streams, and process configuration are still required.
+OIDC verifier validates pre-provisioned JWKS. Four external-process tests prove valid OIDC command
+admission, invalid-token rejection without simulation work, remote-bind refusal, and Unix private-key
+permission refusal. Trusted discovery/refresh, certificate provisioning, reliable control/snapshot
+streams, and remote deployment policy are still required.
 For local protocol development the legacy authority can be started directly:
 
 ```bash
 cargo run --release --bin dedicated-server -- --bind 127.0.0.1:40000
+```
+
+The authenticated authority accepts only one non-secret argument: an absolute configuration path.
+See [`docs/secure-server.md`](docs/secure-server.md) and
+[`config/secure-server.example.json`](config/secure-server.example.json):
+
+```bash
+cargo run --release --bin secure-dedicated-server -- \
+  --config /absolute/path/to/secure-server.json
 ```
 
 The benchmark includes server-side destruction, encoding, deliberate frame reordering, decoding,

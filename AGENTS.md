@@ -53,6 +53,7 @@ cargo test --release --all-targets
 cargo test --test network
 cargo test --test secure_transport
 cargo test --test secure_authority
+cargo test --test secure_server_process
 cargo test oidc::tests
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100

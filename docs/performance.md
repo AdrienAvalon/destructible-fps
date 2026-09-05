@@ -204,6 +204,31 @@ p99 was 14.014 ms, GPU shadow p99 0.090 ms, GPU world/HUD p99 0.103 ms, and GPU-
 The renderer does not call the authority-core transport adapter; this smoke is a regression gate, not
 evidence that the networking refactor improved rendering.
 
+## 2026-09-05 — secure authority runtime baseline
+
+Source state: commit `5287248` plus the QUIC authority adapter documented here. Admission and
+datagram reception run asynchronously outside simulation. The adapter bounds concurrent admission
+tasks at 32, its control channel at 64 events, gameplay buffering at 256 × 1,100-byte payloads, core
+ingress at 64 payloads per tick, active peers at 16, and each peer at 240 received datagrams per
+fixed one-second window. Thirty-two consecutive full gameplay-queue writes close the offending
+connection. Outbound datagrams are copied once into Quinn-owned storage and remain subject to the
+core's shared 4,096-attempt tick budget and Quinn's 128-KiB send buffer.
+
+Four real-QUIC adapter tests passed in 0.10 seconds in the optimized profile: two authenticated
+clients received the same destructive authority transaction, an invalid credential never created a
+core session, a 241-datagram burst was closed by the per-session limiter before simulation work, and
+a wildcard bind was rejected without a production exposure policy. The full promotion passed 67
+library tests, three binary tests, and 35 integration tests in both
+debug and release. The sequential release baselines were destruction p99 0.403 ms, structural
+combined p99 4.303 ms, 1,024-body physics p99 0.856 ms, and snapshot round-trip p99 9.550 ms. Replica
+fingerprints remained equal and all simulated bodies slept.
+
+Two consecutive five-second Vulkan regression smokes completed with zero timestamp drops but exposed
+presentation/clock variance. The first collected 369 GPU samples (CPU-work p99 33.445 ms, GPU-total
+p99 0.212 ms); the repeat collected 401 (CPU-work p99 17.001 ms, GPU-total p99 0.814 ms). The secure
+authority is not on the renderer path, and these short surface-paced runs are recorded rather than
+misattributed; a sustained capture remains required for render-performance conclusions.
+
 ## 2026-09-05 — Stage 1 telemetry baseline
 
 Command:

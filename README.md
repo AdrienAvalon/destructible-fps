@@ -25,9 +25,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   windows, atomic install acknowledgement, and retained-delta catch-up before live delivery;
 - a bounded deterministic UDP impairment proxy exercising latency, jitter, loss, duplication,
   reordering, delta repair, fragment repair, and acknowledgement retry against the real process;
-- an isolated TLS 1.3 QUIC session boundary with certificate verification, game-specific ALPN,
-  bounded post-TLS credential admission, connection-bound principals, and 1,100-byte encrypted
-  gameplay datagrams;
+- a TLS 1.3 QUIC authority adapter with certificate verification, game-specific ALPN, bounded
+  post-TLS credential admission, connection-bound principals, cryptographic server nonces,
+  monotonic session IDs, and 1,100-byte encrypted gameplay datagrams;
 - a bounded offline Keycloak-compatible OIDC verifier with RS256/JWKS key policy, exact
   issuer/audience and time validation, atomic key rotation, one-use `jti` replay defense, and stable
   issuer/subject-derived principals;
@@ -84,6 +84,7 @@ are not claimed yet.
 cargo test --all-targets
 cargo test --test network
 cargo test --test secure_transport
+cargo test --test secure_authority
 cargo test oidc::tests
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
@@ -94,11 +95,15 @@ cargo run --release --bin playable-demo
 
 The legacy dedicated-server process is intentionally restricted to loopback. Its socket has been
 separated from the reusable authority core and its real two-client path is exercised by
-`cargo test --test network`, but the process is not yet connected to the separately tested
-authenticated QUIC boundary; do not expose it to a LAN or the Internet. The secure boundary tests
+`cargo test --test network`; do not expose that binary to a LAN or the Internet. The separate secure
+runtime now connects QUIC admissions and encrypted datagrams to the same authority core, and
+`cargo test --test secure_authority` proves a two-client destructive transaction. It does not yet
+have a production configuration/launch binary and therefore also rejects non-loopback binds. The
+secure boundary tests
 cover TLS certificate rejection, application-credential rejection, admission timeout, nonce
-mismatch, and datagram bounds. A separate offline OIDC verifier now validates pre-provisioned JWKS,
-but trusted discovery/refresh, certificate provisioning, and authority wiring are still required.
+mismatch, datagram bounds, invalid credentials, and per-session rate limiting. A separate offline
+OIDC verifier validates pre-provisioned JWKS, but trusted discovery/refresh, certificate
+provisioning, reliable control/snapshot streams, and process configuration are still required.
 For local protocol development the legacy authority can be started directly:
 
 ```bash

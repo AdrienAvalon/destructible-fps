@@ -110,13 +110,16 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   return to live delivery (delivered for loopback);
 - bounded TLS 1.3 QUIC configuration, server-certificate validation, post-TLS opaque credential
   admission, connection-bound principal, admission timeout, and encrypted datagram tests (delivered
-  as an isolated boundary);
+  and wired into the authority runtime);
 - offline RS256 access-token verification with strict JWKS key policy, exact issuer/audience and time
   validation, bounded one-use `jti` cache, atomic rotation, and issuer/subject-derived 256-bit
-  principal (delivered; trusted discovery/refresh and dedicated-authority wiring remain);
+  principal (delivered; trusted discovery/refresh and process configuration remain);
 - transport-independent authority state keyed by opaque peer IDs, authenticated principal binding,
   bounded core-owned ingress and egress, transport-sized delta/snapshot framing, and legacy UDP
   behavior preserved by process tests (delivered);
+- 32-task bounded concurrent admission, 64-event control and 256-datagram gameplay queues,
+  cryptographic server nonces, monotonic session allocation, per-session ingress limits, and
+  two-client secure-authority convergence (delivered in-process over real QUIC sockets);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
@@ -205,9 +208,8 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. wire the tested QUIC/OIDC boundary into the transport-independent authority core, add trusted
-   configuration loading, and pass a process-level negative-test matrix before any non-loopback
-   exposure;
+1. add trusted certificate/OIDC configuration loading and a secure standalone process, then pass an
+   external-process negative-test matrix before any non-loopback exposure;
 2. add horizontal velocity, material friction/restitution, and deterministic impulse response,
    followed by angular state and replicated orientation.
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at

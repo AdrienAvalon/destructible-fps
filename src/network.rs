@@ -402,6 +402,13 @@ where
     }
 
     #[must_use]
+    pub fn session_is_active(&self, source: PeerId, session_id: u64) -> bool {
+        self.peers
+            .get(&source)
+            .is_some_and(|peer| peer.session_id == session_id)
+    }
+
+    #[must_use]
     pub const fn application_datagram_bytes(&self) -> usize {
         self.application_datagram_bytes
     }

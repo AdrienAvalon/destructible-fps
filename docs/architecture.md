@@ -85,9 +85,9 @@ buffered; another repairs the lost snapshot fragments and survives a lost first 
 bounded client retry. This is deterministic fault injection for correctness and byte accounting,
 not an Internet congestion algorithm or a substitute for authenticated transport.
 
-An isolated secure-session boundary now proves the intended replacement transport before it is wired
-into the authority. Quinn and rustls negotiate TLS 1.3 with a server certificate verified against
-explicit client roots and the `destructible-fps/1` ALPN. The first bidirectional stream carries one
+The secure runtime now wires the transport-independent authority core to Quinn/rustls TLS 1.3. A
+server certificate is verified against explicit client roots and the `destructible-fps/1` ALPN. The
+first bidirectional stream carries one
 versioned opaque credential after TLS; an injected synchronous verifier maps it to an opaque
 server-owned principal. The verifier performs bounded offline work and must never trust a
 caller-supplied display identity. Client nonce, unique server session ID, and server nonce bind the
@@ -105,6 +105,15 @@ and immediately after receive, reserving space below the project's 1,200-byte UD
 IP overhead. QUIC supplies transport encryption, integrity, loss recovery for streams, congestion
 control, and connection migration; application command IDs and authoritative sequencing remain
 necessary for semantic replay protection.
+
+Handshake and credential admission tasks run outside the fixed simulation tick and are capped at 32
+concurrent attempts. The server reserves monotonically increasing non-zero session IDs in accept
+order and samples each server nonce from the operating system CSPRNG. Successful admissions enter a
+64-event control queue; authenticated gameplay enters a separate 256-datagram / 281,600-byte queue.
+The tick drains controls first and at most 64 gameplay payloads, then advances repair,
+commands, physics, and replication. A connection may submit at most 240 datagrams in one fixed
+one-second window; protocol violations close immediately, while 32 consecutive full-queue drops
+close a sender that keeps applying backpressure. The authority retains at most 16 active sessions.
 
 The first concrete verifier accepts only RS256 access tokens against a pre-provisioned JWKS no larger
 than 64 KiB and 32 keys. Every key needs a bounded unique `kid`, cannot declare non-signing use or
@@ -125,11 +134,14 @@ the last accepted set expires.
 
 Real loopback QUIC tests cover a valid encrypted datagram exchange, an untrusted certificate, an
 invalid application credential, a stalled admission deadline, a mismatched nonce echo, oversized
-payloads in both directions, and 20 independent sequential sessions. The authority core is now
-transport-independent and accepts connection-bound principals at a 1,100-byte payload ceiling, but
-the executable still instantiates only the legacy loopback UDP adapter. Production OIDC
-discovery/JWKS refresh, unpredictable nonce allocation, certificate lifecycle, reliable snapshot
-streams, rate limits, and QUIC process integration remain required before non-loopback exposure.
+payloads in both directions, and 20 independent sequential sessions. A second real-QUIC integration
+suite admits two clients, routes one destructive command through the authority, and verifies that
+both receive the same canonical transaction. It also proves that invalid credentials never enter
+authority state and that an over-rate session closes before simulation work. The standalone
+executable still instantiates only the legacy loopback UDP adapter. Production OIDC discovery/JWKS
+refresh, certificate lifecycle, reliable snapshot/control streams, operational configuration, and
+an external-process negative matrix remain required before non-loopback exposure.
+The public runtime bind remains fail-closed to loopback until that production policy exists.
 
 ## Planned engine layers
 
@@ -205,12 +217,14 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
 - bounded deterministic latency/jitter/loss/duplication/reordering injection across real sockets,
   including delta recovery, selective snapshot recovery, ACK retry, and per-channel byte evidence
   (delivered for loopback tests);
-- bounded TLS 1.3 QUIC transport and post-TLS credential admission (delivered as an isolated,
-  loopback-tested boundary);
+- bounded TLS 1.3 QUIC transport and post-TLS credential admission (delivered and wired to the
+  authority in a loopback-tested runtime; operational process configuration remains);
 - bounded offline RS256/JWKS OIDC validation, atomic rotation, replay cache, and stable principal
-  mapping (delivered as an isolated verifier; trusted refresh and authority integration remain);
+  mapping (delivered as an injectable verifier; trusted refresh and process configuration remain);
 - transport-independent bounded authority core, opaque peer IDs, authenticated principal binding,
   transport-sized framing, and a regression-preserving loopback UDP adapter (delivered);
+- bounded async admission/gameplay queues, monotonic session IDs, CSPRNG server nonces, per-session
+  ingress limiting, lifecycle cleanup, and two-client QUIC authority convergence (delivered);
 - unreliable sequenced deltas plus reliable snapshot/control channels;
 - configurable stochastic and trace-replay network simulation beyond the delivered fixed profile;
 - spatial interest management and per-client bandwidth budgets;

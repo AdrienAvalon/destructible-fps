@@ -14,6 +14,7 @@ pub mod physics;
 pub mod player;
 pub mod render;
 pub mod replication;
+pub mod secure_server;
 pub mod secure_transport;
 pub mod session;
 pub mod snapshot;
@@ -51,13 +52,19 @@ pub use replication::{
     CodecError, CommandError, DeltaFrame, DeltaPacket, ExplosionCommand, FrameAssembler,
     PhysicsTickReport, ReplicationError, decode_frame, encode_frames,
 };
+pub use secure_server::{
+    MAX_CONSECUTIVE_GAMEPLAY_QUEUE_DROPS, MAX_SECURE_CONTROL_EVENTS, MAX_SECURE_GAMEPLAY_BYTES,
+    MAX_SECURE_GAMEPLAY_EVENTS, MAX_SESSION_DATAGRAMS_PER_SECOND, SecureDedicatedServer,
+    SecureNetworkTickReport,
+};
 pub use secure_transport::{
-    ALPN_PROTOCOL, AuthenticatedPrincipal, AuthenticatedSession, MAX_QUIC_DATAGRAM_PAYLOAD_BYTES,
-    MAX_SESSION_CREDENTIAL_BYTES, MAX_SESSION_HELLO_BYTES, SecureConfigError, SecureDatagramError,
-    SecureDatagramReceiveError, SessionAdmissionError, SessionCodecError,
-    SessionCredentialVerifier, SessionHello, SessionWelcome, admit_session, decode_session_hello,
-    decode_session_welcome, encode_session_hello, encode_session_welcome, establish_session,
-    receive_gameplay_datagram, secure_client_config, secure_server_config, send_gameplay_datagram,
+    ALPN_PROTOCOL, AuthenticatedPrincipal, AuthenticatedSession, MAX_PENDING_QUIC_HANDSHAKES,
+    MAX_QUIC_DATAGRAM_PAYLOAD_BYTES, MAX_SESSION_CREDENTIAL_BYTES, MAX_SESSION_HELLO_BYTES,
+    SecureConfigError, SecureDatagramError, SecureDatagramReceiveError, SessionAdmissionError,
+    SessionCodecError, SessionCredentialVerifier, SessionHello, SessionWelcome, admit_session,
+    decode_session_hello, decode_session_welcome, encode_session_hello, encode_session_welcome,
+    establish_session, receive_gameplay_datagram, secure_client_config, secure_server_config,
+    send_gameplay_datagram,
 };
 pub use session::{DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
 pub use snapshot::{

@@ -1,7 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use destructible_fps::{
-    DemoSession, FireMode, IVec3, Material, World, chunk_position,
+    DemoSession, FireMode, FixedMicrometers3, IVec3, MICROMETERS_PER_VOXEL, Material,
+    ReplicatedPlayerState, World, chunk_position,
     mesh_scheduler::{
         CompletedMeshJob, MAX_BODIES_PER_MESH_JOB, MAX_BODY_VOXELS_PER_MESH_JOB,
         MAX_CHUNKS_PER_MESH_JOB, MeshScheduler,
@@ -158,7 +159,10 @@ impl Game {
             ));
         }
         let before = Instant::now();
-        let renderer = pollster::block_on(Renderer::new(Arc::clone(&window)))?;
+        let mut renderer = pollster::block_on(Renderer::new(Arc::clone(&window)))?;
+        if showcase {
+            renderer.update_player_transforms(&showcase_players(), None)?;
+        }
         let now = Instant::now();
         let world = session.world().stats();
         println!(
@@ -505,12 +509,13 @@ impl Game {
             let world = self.session.world().stats();
             let render = self.renderer.stats();
             self.window.set_title(&format!(
-                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {}/{} chunks + {}/{} corps visibles | {} | {}",
+                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {}/{} chunks + {}/{} corps + {} joueurs | {} | {}",
                 world.solid_voxels,
                 render.visible_chunks,
                 render.chunks,
                 render.visible_bodies,
                 render.bodies,
+                render.visible_players,
                 if self.cursor_captured {
                     "souris capturee"
                 } else {
@@ -531,11 +536,13 @@ impl Game {
         self.telemetry.print_report(&self.renderer);
         let render = self.renderer.stats();
         println!(
-            "Culling: {}/{} chunks et {}/{} corps visibles; {} draws monde, {} draws ombres",
+            "Culling: {}/{} chunks, {}/{} corps et {}/{} joueurs visibles; {} draws monde, {} draws ombres",
             render.visible_chunks,
             render.chunks,
             render.visible_bodies,
             render.bodies,
+            render.visible_players,
+            render.players,
             render.world_draw_calls,
             render.shadow_draw_calls
         );
@@ -560,6 +567,12 @@ impl Game {
                 "rendu de corps incomplet: {} corps GPU pour {} corps autoritaires",
                 render.bodies,
                 self.session.bodies().len()
+            ))
+        } else if self.showcase && render.players != showcase_players().len() {
+            Some(format!(
+                "rendu joueur incomplet: {} avatars GPU pour {} attendus",
+                render.players,
+                showcase_players().len()
             ))
         } else if self.showcase && sleeping_bodies != self.session.body_states().len() {
             Some(format!(
@@ -742,6 +755,28 @@ fn showcase_camera(elapsed_seconds: f32) -> (Vec3, Vec3) {
     let position = Vec3::new(angle.sin() * 41.0, 11.5, angle.cos() * 41.0);
     let direction = (Vec3::new(0.0, 7.0, 0.0) - position).normalize();
     (position, direction)
+}
+
+fn showcase_players() -> [ReplicatedPlayerState; 2] {
+    [
+        showcase_player(101, -4, 1, 8),
+        showcase_player(103, 5, 1, 5),
+    ]
+}
+
+fn showcase_player(session_id: u64, x: i64, y: i64, z: i64) -> ReplicatedPlayerState {
+    ReplicatedPlayerState {
+        session_id,
+        position_um: FixedMicrometers3 {
+            x: x * MICROMETERS_PER_VOXEL,
+            y: y * MICROMETERS_PER_VOXEL,
+            z: z * MICROMETERS_PER_VOXEL,
+        },
+        velocity_um_per_second: FixedMicrometers3::default(),
+        integration_remainder: [0; 3],
+        grounded: true,
+        last_input_sequence: 0,
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

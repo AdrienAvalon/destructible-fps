@@ -96,6 +96,13 @@ impossible-acknowledgement and over-cap paths leave prediction unchanged. This s
 is proven through real QUIC; graphical wiring and visual correction smoothing remain presentation
 work.
 
+Remote presentation owns one immutable six-face avatar mesh and a fixed 16-matrix GPU instance
+arena. Each accepted interpolated view rewrites only the compact transforms, excludes the local
+session, and renders all remaining players with one instanced world draw and one instanced shadow
+draw. The placeholder dimensions exactly match the authoritative 0.6 m by 1.8 m character bounds.
+This deliberately proves the data/GPU path before committing to a skinned character asset and
+animation graph.
+
 The dedicated-authority sessions described above are deliberately loopback-only and unauthenticated;
 the snapshot hash is an integrity check, not a MAC, and that legacy transport provides no
 confidentiality, identity, packet authenticity, or congestion control. It must not be exposed beyond

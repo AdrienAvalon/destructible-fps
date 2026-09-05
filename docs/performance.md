@@ -3,6 +3,27 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — instanced remote-player presentation increment
+
+Source state: parent `cb4d7bc` plus the avatar presentation increment documented here. The renderer
+allocates exactly 16 transform slots and one immutable six-face placeholder mesh. All remote players
+share one world draw and one shadow draw regardless of count; the local session is omitted. A pure
+transform test proves the rendered 0.6 m by 1.8 m bounds match the authoritative collider.
+
+```bash
+cargo run --release --bin playable-demo -- --showcase --smoke-seconds 8
+```
+
+The real RTX 4050 Vulkan smoke rendered two placeholder remote players, all 128 chunks and the one
+detached body, then exited cleanly. Initial GPU setup took 2,057.3 ms and initial streaming 36.7 ms.
+The bounded 4,096-frame window reported GPU-total p50 0.139 ms, p95 0.202 ms, p99 0.203 ms and maximum
+0.215 ms with zero dropped timestamp samples. CPU/redraw p99 was 8.179 ms. The final view contained
+86 visible chunks, one visible body and both players, with 88 world draws and 130 shadow draws; the
+two players contributed only one draw to each pass.
+
+The complete promotion passed 115 library tests, four binary tests, and 41 integration tests in
+debug and release; strict Clippy was clean.
+
 ## 2026-09-05 — local prediction and exact reconciliation increment
 
 Source state: parent `7633f75` plus the prediction increment documented here. Player-state protocol

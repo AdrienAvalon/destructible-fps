@@ -57,6 +57,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
   interpolation, coherent join/leave boundaries, bounded history eviction, and safe edge clamping;
 - local player prediction with contiguous input sequencing, a 128-input ceiling, atomic authority
   reconciliation, and deterministic replay of every input newer than the server acknowledgement;
+- a fixed-capacity instanced remote-player GPU path: one shared avatar mesh, at most one world draw
+  and one shadow draw for all remote players, with the local session excluded;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;

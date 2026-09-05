@@ -3,8 +3,9 @@
 #![allow(clippy::cast_precision_loss)]
 
 use crate::{
-    BodyId, CHUNK_EDGE, IVec3,
-    mesh::{CpuBodyMesh, CpuMesh, Vertex},
+    BodyId, CHUNK_EDGE, FixedMicrometers3, IVec3, MAX_SERVER_PEERS, Material, PLAYER_HEIGHT_UM,
+    PLAYER_RADIUS_UM, ReplicatedPlayerState, Voxel, World,
+    mesh::{CpuBodyMesh, CpuMesh, Vertex, mesh_chunk},
     physics::{FIXED_QUATERNION_SCALE, MICROMETERS_PER_VOXEL, RigidBodyState},
     replication::MAX_ACTIVE_BODIES,
 };
@@ -24,6 +25,7 @@ const GPU_TIMESTAMP_BYTES: u64 = 4 * 8;
 const GPU_READBACK_SLOTS: usize = 4;
 const MAX_COMPLETED_GPU_SAMPLES: usize = 16;
 const BODY_INSTANCE_BYTES: u64 = 64;
+const PLAYER_INSTANCE_BYTES: u64 = BODY_INSTANCE_BYTES;
 const SHADER: &str = include_str!("shaders/world.wgsl");
 
 #[repr(C)]
@@ -67,6 +69,8 @@ pub struct RenderStats {
     pub bodies: usize,
     pub body_faces: usize,
     pub visible_bodies: usize,
+    pub players: usize,
+    pub visible_players: usize,
     pub world_draw_calls: usize,
     pub shadow_draw_calls: usize,
 }
@@ -255,6 +259,9 @@ pub struct Renderer {
     globals_buffer: wgpu::Buffer,
     body_instance_buffer: wgpu::Buffer,
     body_instances: Vec<BodyInstance>,
+    player_mesh: GpuMesh,
+    player_instance_buffer: wgpu::Buffer,
+    player_instances: Vec<BodyInstance>,
     globals_bind_group: wgpu::BindGroup,
     shadow_sampling_bind_group: wgpu::BindGroup,
     gpu_profiler: Option<GpuProfiler>,
@@ -342,6 +349,13 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let player_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("remote player instance transforms"),
+            size: u64::try_from(MAX_SERVER_PEERS).unwrap_or(u64::MAX) * PLAYER_INSTANCE_BYTES,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let player_mesh = create_gpu_mesh(&device, &player_cpu_mesh(), "remote player");
         let (shadow_texture, shadow_view) = create_shadow_map(&device);
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow comparison sampler"),
@@ -637,6 +651,9 @@ impl Renderer {
             globals_buffer,
             body_instance_buffer,
             body_instances: Vec::new(),
+            player_mesh,
+            player_instance_buffer,
+            player_instances: Vec::with_capacity(MAX_SERVER_PEERS),
             globals_bind_group,
             shadow_sampling_bind_group,
             gpu_profiler,
@@ -684,7 +701,7 @@ impl Renderer {
             return;
         }
         self.chunks
-            .insert(chunk, self.create_gpu_mesh(mesh, "chunk"));
+            .insert(chunk, create_gpu_mesh(&self.device, mesh, "chunk"));
     }
 
     /// Uploads body meshes already produced by the bounded background worker.
@@ -739,7 +756,7 @@ impl Renderer {
             self.bodies.insert(
                 body.body_id,
                 GpuBody {
-                    mesh: self.create_gpu_mesh(&body.mesh, "rigid body"),
+                    mesh: create_gpu_mesh(&self.device, &body.mesh, "rigid body"),
                     instance_slot,
                     extent,
                     rotation_pivot,
@@ -797,28 +814,42 @@ impl Renderer {
         }
     }
 
-    fn create_gpu_mesh(&self, mesh: &CpuMesh, label: &str) -> GpuMesh {
-        let index_count =
-            u32::try_from(mesh.indices.len()).expect("bounded mesh index count fits in u32");
-        let vertex = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytemuck::cast_slice(&mesh.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let index = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytemuck::cast_slice(&mesh.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-        GpuMesh {
-            vertex,
-            index,
-            index_count,
+    /// Uploads one compact transform per remote player for instanced rendering.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a view larger than the fixed server/player cap before changing GPU-visible state.
+    pub fn update_player_transforms(
+        &mut self,
+        states: &[ReplicatedPlayerState],
+        local_session_id: Option<u64>,
+    ) -> Result<(), String> {
+        let remote_count = states
+            .iter()
+            .filter(|state| Some(state.session_id) != local_session_id)
+            .count();
+        if remote_count > MAX_SERVER_PEERS {
+            return Err(format!(
+                "remote-player instance arena exhausted at {MAX_SERVER_PEERS} players"
+            ));
         }
+        let instances = states
+            .iter()
+            .filter(|state| Some(state.session_id) != local_session_id)
+            .map(|state| BodyInstance {
+                model: player_model(state.position_um).to_cols_array_2d(),
+            })
+            .collect::<Vec<_>>();
+        if !instances.is_empty() {
+            self.queue.write_buffer(
+                &self.player_instance_buffer,
+                0,
+                bytemuck::cast_slice(&instances),
+            );
+        }
+        self.player_instances = instances;
+        self.stats.players = self.player_instances.len();
+        Ok(())
     }
 
     fn refresh_stats(&mut self) {
@@ -834,6 +865,7 @@ impl Renderer {
             .values()
             .map(|body| body.mesh.index_count as usize / 6)
             .sum();
+        self.stats.players = self.player_instances.len();
     }
 
     #[must_use]
@@ -922,8 +954,10 @@ impl Renderer {
             .collect();
         self.stats.visible_chunks = visible_chunks.len();
         self.stats.visible_bodies = visible_bodies.len();
-        self.stats.world_draw_calls = visible_chunks.len() + visible_bodies.len();
-        self.stats.shadow_draw_calls = self.chunks.len() + self.bodies.len();
+        self.stats.visible_players = self.player_instances.len();
+        let player_draw = usize::from(!self.player_instances.is_empty());
+        self.stats.world_draw_calls = visible_chunks.len() + visible_bodies.len() + player_draw;
+        self.stats.shadow_draw_calls = self.chunks.len() + self.bodies.len() + player_draw;
         let shadow_timestamp_writes = self
             .gpu_profiler
             .as_ref()
@@ -959,6 +993,17 @@ impl Renderer {
                 );
                 shadow_pass.set_index_buffer(body.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 shadow_pass.draw_indexed(0..body.mesh.index_count, 0, 0..1);
+            }
+            if !self.player_instances.is_empty() {
+                shadow_pass.set_vertex_buffer(0, self.player_mesh.vertex.slice(..));
+                shadow_pass.set_vertex_buffer(1, self.player_instance_buffer.slice(..));
+                shadow_pass
+                    .set_index_buffer(self.player_mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                shadow_pass.draw_indexed(
+                    0..self.player_mesh.index_count,
+                    0,
+                    0..u32::try_from(self.player_instances.len()).unwrap_or(u32::MAX),
+                );
             }
         }
         let world_timestamp_writes = self
@@ -1011,6 +1056,16 @@ impl Renderer {
                 pass.set_index_buffer(body.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..body.mesh.index_count, 0, 0..1);
             }
+            if !self.player_instances.is_empty() {
+                pass.set_vertex_buffer(0, self.player_mesh.vertex.slice(..));
+                pass.set_vertex_buffer(1, self.player_instance_buffer.slice(..));
+                pass.set_index_buffer(self.player_mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(
+                    0..self.player_mesh.index_count,
+                    0,
+                    0..u32::try_from(self.player_instances.len()).unwrap_or(u32::MAX),
+                );
+            }
             pass.set_pipeline(&self.crosshair_pipeline);
             pass.draw(0..12, 0..1);
         }
@@ -1029,6 +1084,52 @@ impl Renderer {
             RenderOutcome::Presented
         }
     }
+}
+
+fn create_gpu_mesh(device: &wgpu::Device, mesh: &CpuMesh, label: &str) -> GpuMesh {
+    let index_count =
+        u32::try_from(mesh.indices.len()).expect("bounded mesh index count fits in u32");
+    let vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::cast_slice(&mesh.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::cast_slice(&mesh.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    GpuMesh {
+        vertex,
+        index,
+        index_count,
+    }
+}
+
+fn player_cpu_mesh() -> CpuMesh {
+    let mut world = World::default();
+    world.fill_box(
+        IVec3::new(0, 0, 0),
+        IVec3::new(0, 0, 0),
+        Voxel::new(Material::Steel),
+    );
+    mesh_chunk(&world, IVec3::new(0, 0, 0))
+}
+
+fn player_model(position_um: FixedMicrometers3) -> Mat4 {
+    let voxel_scale = MICROMETERS_PER_VOXEL as f32;
+    let radius = PLAYER_RADIUS_UM as f32 / voxel_scale;
+    let scale = Vec3::new(
+        radius * 2.0,
+        PLAYER_HEIGHT_UM as f32 / voxel_scale,
+        radius * 2.0,
+    );
+    let translation = Vec3::new(
+        position_um.x as f32 / voxel_scale - radius,
+        position_um.y as f32 / voxel_scale,
+        position_um.z as f32 / voxel_scale - radius,
+    );
+    Mat4::from_scale_rotation_translation(scale, Quat::IDENTITY, translation)
 }
 
 fn preferred_surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
@@ -1236,5 +1337,21 @@ mod tests {
         assert!(transformed_pivot.abs_diff_eq(Vec3::new(11.0, 0.5, 0.5), 0.000_01));
         assert!(minimum.abs_diff_eq(Vec3::new(10.5, -0.5, 0.0), 0.000_01));
         assert!(maximum.abs_diff_eq(Vec3::new(11.5, 1.5, 1.0), 0.000_01));
+    }
+
+    #[test]
+    fn remote_player_model_matches_authoritative_character_bounds() {
+        let position = FixedMicrometers3 {
+            x: 2 * MICROMETERS_PER_VOXEL,
+            y: MICROMETERS_PER_VOXEL,
+            z: -3 * MICROMETERS_PER_VOXEL,
+        };
+        let model = player_model(position);
+        let minimum = model.transform_point3(Vec3::ZERO);
+        let maximum = model.transform_point3(Vec3::ONE);
+
+        assert!(minimum.abs_diff_eq(Vec3::new(1.7, 1.0, -3.3), 0.000_01));
+        assert!(maximum.abs_diff_eq(Vec3::new(2.3, 2.8, -2.7), 0.000_01));
+        assert_eq!(player_cpu_mesh().exposed_faces(), 6);
     }
 }

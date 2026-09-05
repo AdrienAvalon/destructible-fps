@@ -84,7 +84,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
 - exact face-culled architectural meshes plus crack-free Surface Nets for soil and stone, using a
   fixed 17³-cell cache per chunk, distance-prioritized asynchronous initial streaming, and bounded
-  background remeshing across every affected face, edge, or corner;
+  background remeshing across every affected face, edge, or corner; sufficiently damaged brick and
+  concrete reuse that bounded derived path for irregular static breach silhouettes while intact
+  architecture remains exact;
 - bounded off-thread body meshing in local space, with fixed-capacity GPU instance transforms,
   independent body frustum culling, and participation in both world and shadow passes;
 - 60 Hz server-authoritative body motion in deterministic micrometre units, mass-weighted blast
@@ -100,20 +102,22 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map with 3×3 PCF filtering,
   energy-aware Cook-Torrance GGX, stable per-material procedural albedo/roughness/metalness and
-  micro-normal synthesis, screen-footprint detail fading, a view-correct atmospheric sky, altitude
-  haze, single-transfer tone mapping, and a crosshair;
+  micro-normal synthesis, an integrity-derived fracture/aggregate/crack response for masonry,
+  screen-footprint detail fading, a view-correct atmospheric sky, altitude haze, single-transfer
+  tone mapping, and a crosshair;
 - non-blocking real-GPU timestamp queries and bounded CPU/GPU p50/p95/p99 frame telemetry;
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not yet a photorealistic or production multiplayer
 game. The first realistic-material, atmosphere, and smooth hybrid-terrain foundations are live, but
-irregular fracture surfaces, layered damage, authored/scanned assets, vegetation, reflections,
-temporal anti-aliasing and post-processing remain visual gates. Exact convex contact manifolds, gyroscopic
-response, deeper constraint-island convergence, progressive structural stress, remote-authority
-exposure, automated certificate issuance, first-person arms/weapon presentation, transport pacing
-and congestion control, audio, and large-world residency streaming also remain explicit later
-gates. See [`docs/visual-direction.md`](docs/visual-direction.md) for the visual target and promotion
-order.
+the new static masonry fracture silhouette is only a first coarse layer. Smooth detached fracture
+bodies, sub-voxel interiors/rebar, calibrated authored or scanned assets, vegetation, reflections,
+temporal anti-aliasing and post-processing remain visual gates. Exact convex contact manifolds,
+gyroscopic response, deeper constraint-island convergence, progressive structural stress,
+remote-authority exposure, automated certificate issuance, first-person arms/weapon presentation,
+transport pacing and congestion control, audio, and large-world residency streaming also remain
+explicit later gates. See [`docs/visual-direction.md`](docs/visual-direction.md) for the visual target
+and promotion order.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
@@ -150,6 +154,8 @@ constraint-island convergence are not claimed yet.
 ![First procedural PBR and atmosphere pass](docs/screenshots/04-procedural-pbr-atmosphere.png)
 
 ![Hybrid Surface Nets terrain around exact architecture](docs/screenshots/05-hybrid-natural-surface.png)
+
+![Integrity-derived irregular masonry breach](docs/screenshots/06-irregular-masonry-fracture.png)
 
 ## Run
 

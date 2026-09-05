@@ -1511,3 +1511,54 @@ but the deliberately dropped fragment; this path passed three consecutive releas
 complete matrices passed. GPU p99 remains about ten percent of one 60 Hz frame. The rounded mesh is
 deliberately visual-only for this increment: conservative voxel collision can precede the visible
 surface near curved edges, and smooth detached fracture bodies remain a later gate.
+
+## 2026-09-05 — integrity-derived static masonry fractures
+
+Source state: parent `ae1d608` plus the coarse static-fracture increment. Authoritative voxels remain
+two bytes and integer damage, collision, physics, fingerprints, snapshots and network formats are
+unchanged. Brick and concrete at or below 224 integrity enter the same fixed 17³-cell derived mesh
+path as terrain. Their density crossing retreats toward the surviving voxel centre as integrity
+falls; masonry above the threshold and all other authored materials remain exact. The exact side
+uniquely owns every mixed transition face, including across chunk boundaries. This closes the
+rasterized image but is not claimed as a single watertight collision manifold.
+
+The GPU vertex grew from 52 to 56 bytes with a render-only damage ratio derived from the existing
+integrity byte. Procedural masonry uses it for bounded aggregate, fractured height, crack darkening
+and roughness. Detached bodies remain exact but receive the same damage shading. Tests cover every
+u8 crossing value, the exact 224/225 topology boundary, finite fractional vertices, byte offsets,
+material identity, damage values, unique mixed-face ownership and a mixed transition across a chunk
+boundary. Workspace lint configuration continues to forbid unsafe code.
+
+The representative eight-second `--showcase` run used the release profile at a 1,440×900 logical
+window on the NVIDIA GeForce RTX 4050 Laptop GPU through Vulkan. It rendered 98,078 solid voxels,
+48,668 surface quads, one detached body and two players. Initial asynchronous streaming completed in
+45.5 ms. The final view submitted 90 visible world draws and 130 shadow draws. A separate mandatory
+five-second ordinary smoke also completed with all four world/body and shadow pipelines using the
+same 56-byte vertex layout.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 190 passed debug; 190 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 70 passed debug; 70 passed release |
+| Destruction p99, 500 events | 0.383 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.313 ms |
+| Physics p99, 1,024 bodies | 1.143 ms |
+| Snapshot encode + decode + install p99 | 13.280 ms |
+| Snapshot wire size | 1,181 frames / 1.351 MiB |
+| Initial asynchronous streaming | 45.5 ms |
+| CPU frame-work p50 / p95 / p99 | 3.091 / 16.750 / 16.853 ms |
+| GPU shadows p50 / p95 / p99 | 0.079 / 0.096 / 0.097 ms |
+| GPU world + HUD p50 / p95 / p99 | 1.470 / 1.849 / 1.853 ms |
+| Vulkan GPU total p50 / p95 / p99 | 1.561 / 1.959 / 1.962 ms |
+| Vulkan GPU maximum | 1.978 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+The 33 additional showcase quads and four-byte vertex increase did not threaten the GPU budget: the
+observed p99 is 11.8% of one 60 Hz frame. It is not a controlled before/after experiment, so the
+change in frame distributions is not attributed solely to this increment. The capture proves a less
+cubic breach rim and damage-dependent masonry response, not photorealism. Sub-voxel layered fracture,
+rebar/interiors, scanned material assets, temporal reconstruction, image-based lighting and world
+dressing remain promotion gates. Graphify reported 2,244 nodes, 6,282 post-build edges, zero
+unverified code nodes and a fully fresh index; the affected view of `mesh_chunk` remained confined to
+meshing, rendering clients and their tests.

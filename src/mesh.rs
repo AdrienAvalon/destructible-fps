@@ -19,9 +19,11 @@ pub struct Vertex {
     pub metallic: f32,
     /// Stable material identifier used only for procedural visual synthesis on the GPU.
     pub material: u32,
+    /// Render-only damage ratio derived from authoritative integer integrity.
+    pub damage: f32,
 }
 
-const _: () = assert!(size_of::<Vertex>() == 52);
+const _: () = assert!(size_of::<Vertex>() == 56);
 
 #[derive(Debug, Default)]
 pub struct CpuMesh {
@@ -41,28 +43,30 @@ pub struct CpuBodyMesh {
 
 impl CpuMesh {
     #[must_use]
-    /// Returns the number of rendered surface quads. Architectural materials use exact voxel
-    /// faces, while natural materials use one Surface Nets quad per exposed density edge.
+    /// Returns the number of rendered surface quads. Intact architectural materials use exact
+    /// voxel faces, while natural and fractured materials use one Surface Nets quad per exposed
+    /// density edge.
     pub const fn exposed_faces(&self) -> usize {
         self.indices.len() / 6
     }
 }
 
-const NATURAL_CELL_EDGE: usize = CHUNK_EDGE as usize + 1;
-const NATURAL_CELL_COUNT: usize = NATURAL_CELL_EDGE * NATURAL_CELL_EDGE * NATURAL_CELL_EDGE;
+const DERIVED_CELL_EDGE: usize = CHUNK_EDGE as usize + 1;
+const DERIVED_CELL_COUNT: usize = DERIVED_CELL_EDGE * DERIVED_CELL_EDGE * DERIVED_CELL_EDGE;
+const FRACTURE_SURFACE_INTEGRITY_MAX: u8 = 224;
 
 #[derive(Clone, Copy, Debug)]
-struct NaturalSurfacePoint {
+struct DerivedSurfacePoint {
     position: [f32; 3],
     normal: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-enum NaturalCell {
+enum DerivedCell {
     #[default]
     Uncomputed,
     Empty,
-    Surface(NaturalSurfacePoint),
+    Surface(DerivedSurfacePoint),
 }
 
 /// Fixed-size cache covering the 17³ cell coordinates in the inclusive range
@@ -70,29 +74,29 @@ enum NaturalCell {
 /// complete immutable world snapshot, so the corresponding 18 possible sample coordinates are not
 /// cache entries. This makes smoothing independent of scene complexity and prevents an adversarial
 /// world from growing temporary meshing memory beyond a compile-time bound.
-struct NaturalCellCache {
+struct DerivedCellCache {
     minimum: IVec3,
-    cells: Vec<NaturalCell>,
+    cells: Vec<DerivedCell>,
 }
 
-impl NaturalCellCache {
+impl DerivedCellCache {
     fn new(chunk_origin: IVec3) -> Self {
         Self {
             minimum: add(chunk_origin, IVec3::new(-1, -1, -1)),
-            cells: vec![NaturalCell::Uncomputed; NATURAL_CELL_COUNT],
+            cells: vec![DerivedCell::Uncomputed; DERIVED_CELL_COUNT],
         }
     }
 
-    fn surface(&mut self, world: &World, cell: IVec3) -> Option<NaturalSurfacePoint> {
+    fn surface(&mut self, world: &World, cell: IVec3) -> Option<DerivedSurfacePoint> {
         let index = self.index(cell)?;
         match self.cells[index] {
-            NaturalCell::Uncomputed => {
-                let surface = natural_surface_point(world, cell);
-                self.cells[index] = surface.map_or(NaturalCell::Empty, NaturalCell::Surface);
+            DerivedCell::Uncomputed => {
+                let surface = derived_surface_point(world, cell);
+                self.cells[index] = surface.map_or(DerivedCell::Empty, DerivedCell::Surface);
                 surface
             }
-            NaturalCell::Empty => None,
-            NaturalCell::Surface(surface) => Some(surface),
+            DerivedCell::Empty => None,
+            DerivedCell::Surface(surface) => Some(surface),
         }
     }
 
@@ -100,10 +104,10 @@ impl NaturalCellCache {
         let x = usize::try_from(cell.x.checked_sub(self.minimum.x)?).ok()?;
         let y = usize::try_from(cell.y.checked_sub(self.minimum.y)?).ok()?;
         let z = usize::try_from(cell.z.checked_sub(self.minimum.z)?).ok()?;
-        if x >= NATURAL_CELL_EDGE || y >= NATURAL_CELL_EDGE || z >= NATURAL_CELL_EDGE {
+        if x >= DERIVED_CELL_EDGE || y >= DERIVED_CELL_EDGE || z >= DERIVED_CELL_EDGE {
             return None;
         }
-        Some(x + y * NATURAL_CELL_EDGE + z * NATURAL_CELL_EDGE * NATURAL_CELL_EDGE)
+        Some(x + y * DERIVED_CELL_EDGE + z * DERIVED_CELL_EDGE * DERIVED_CELL_EDGE)
     }
 }
 
@@ -199,7 +203,7 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
         chunk.z * CHUNK_EDGE,
     );
     let mut mesh = CpuMesh::default();
-    let mut natural_cells = NaturalCellCache::new(origin);
+    let mut derived_cells = DerivedCellCache::new(origin);
     for local_z in 0..CHUNK_EDGE {
         for local_y in 0..CHUNK_EDGE {
             for local_x in 0..CHUNK_EDGE {
@@ -209,11 +213,11 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
                 if !voxel.is_solid() {
                     continue;
                 }
-                if is_natural(voxel.material) {
-                    if !append_natural_surface(
+                if uses_derived_surface(voxel) {
+                    if !append_derived_surface(
                         &mut mesh,
                         world,
-                        &mut natural_cells,
+                        &mut derived_cells,
                         position,
                         voxel,
                     ) {
@@ -221,12 +225,12 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
                     }
                     continue;
                 }
-                // An exact architectural face closes the transition to a smoothed natural
-                // surface. Culling both sides would expose a crack because Surface Nets vertices
-                // are generally inset from the voxel boundary.
+                // An exact architectural face closes the transition to a derived surface. Culling
+                // both sides would expose a crack because Surface Nets vertices are generally
+                // inset from the voxel boundary.
                 let occupied = |sample| {
                     let neighbor = world.voxel(sample);
-                    neighbor.is_solid() && !is_natural(neighbor.material)
+                    neighbor.is_solid() && !uses_derived_surface(neighbor)
                 };
                 if !append_voxel(&mut mesh, position, position, voxel, &occupied) {
                     return mesh;
@@ -237,10 +241,10 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
     mesh
 }
 
-fn append_natural_surface(
+fn append_derived_surface(
     mesh: &mut CpuMesh,
     world: &World,
-    cells: &mut NaturalCellCache,
+    cells: &mut DerivedCellCache,
     position: IVec3,
     voxel: Voxel,
 ) -> bool {
@@ -248,7 +252,7 @@ fn append_natural_surface(
         if world.voxel(add(position, face.neighbor)).is_solid() {
             continue;
         }
-        let (axis, tangent_u, tangent_v) = natural_edge_basis(face.neighbor);
+        let (axis, tangent_u, tangent_v) = surface_edge_basis(face.neighbor);
         let edge_base = if axis_component(face.neighbor, axis) > 0 {
             position
         } else {
@@ -268,16 +272,16 @@ fn append_natural_surface(
             return false;
         };
         let surface_points = [first, second, third, fourth];
-        if !append_natural_quad(mesh, &surface_points, voxel, face.normal) {
+        if !append_derived_quad(mesh, &surface_points, voxel, face.normal) {
             return false;
         }
     }
     true
 }
 
-fn append_natural_quad(
+fn append_derived_quad(
     mesh: &mut CpuMesh,
-    points: &[NaturalSurfacePoint],
+    points: &[DerivedSurfacePoint],
     voxel: Voxel,
     outward: [f32; 3],
 ) -> bool {
@@ -299,6 +303,7 @@ fn append_natural_quad(
             ambient_occlusion: 1.0,
             metallic: base_color[4],
             material: u32::from(voxel.material as u8),
+            damage: voxel_damage(voxel),
         });
     }
     let diagonal_zero_two = squared_distance(points[0].position, points[2].position);
@@ -331,7 +336,7 @@ fn append_natural_quad(
     true
 }
 
-fn natural_surface_point(world: &World, cell: IVec3) -> Option<NaturalSurfacePoint> {
+fn derived_surface_point(world: &World, cell: IVec3) -> Option<DerivedSurfacePoint> {
     const CORNERS: [IVec3; 8] = [
         IVec3::new(0, 0, 0),
         IVec3::new(1, 0, 0),
@@ -363,20 +368,29 @@ fn natural_surface_point(world: &World, cell: IVec3) -> Option<NaturalSurfacePoi
     let mut first_normal = [0.0_f32; 3];
     let mut crossings = 0_u8;
     for (left_index, right_index) in EDGES {
-        let left_natural = is_natural(samples[left_index].material);
-        let right_natural = is_natural(samples[right_index].material);
+        let left_derived = uses_derived_surface(samples[left_index]);
+        let right_derived = uses_derived_surface(samples[right_index]);
         let left_air = !samples[left_index].is_solid();
         let right_air = !samples[right_index].is_solid();
-        if !(left_natural && right_air || right_natural && left_air) {
+        if !(left_derived && right_air || right_derived && left_air) {
             continue;
         }
 
         let left = CORNERS[left_index];
         let right = CORNERS[right_index];
-        position_sum[0] += ((left.x + right.x) as f32).mul_add(0.5, cell.x as f32 + 0.5);
-        position_sum[1] += ((left.y + right.y) as f32).mul_add(0.5, cell.y as f32 + 0.5);
-        position_sum[2] += ((left.z + right.z) as f32).mul_add(0.5, cell.z as f32 + 0.5);
-        let direction = if left_natural {
+        let (solid, air, solid_voxel) = if left_derived {
+            (left, right, samples[left_index])
+        } else {
+            (right, left, samples[right_index])
+        };
+        let crossing = surface_crossing_t(solid_voxel);
+        position_sum[0] +=
+            ((air.x - solid.x) as f32).mul_add(crossing, (cell.x + solid.x) as f32 + 0.5);
+        position_sum[1] +=
+            ((air.y - solid.y) as f32).mul_add(crossing, (cell.y + solid.y) as f32 + 0.5);
+        position_sum[2] +=
+            ((air.z - solid.z) as f32).mul_add(crossing, (cell.z + solid.z) as f32 + 0.5);
+        let direction = if left_derived {
             [
                 (right.x - left.x) as f32,
                 (right.y - left.y) as f32,
@@ -402,7 +416,7 @@ fn natural_surface_point(world: &World, cell: IVec3) -> Option<NaturalSurfacePoi
     }
     let divisor = f32::from(crossings);
     let normal = normalize_or(normal_sum, first_normal);
-    Some(NaturalSurfacePoint {
+    Some(DerivedSurfacePoint {
         position: [
             position_sum[0] / divisor,
             position_sum[1] / divisor,
@@ -416,7 +430,25 @@ const fn is_natural(material: Material) -> bool {
     matches!(material, Material::Soil | Material::Stone)
 }
 
-const fn natural_edge_basis(direction: IVec3) -> (usize, IVec3, IVec3) {
+const fn uses_derived_surface(voxel: Voxel) -> bool {
+    is_natural(voxel.material)
+        || (matches!(voxel.material, Material::Brick | Material::Concrete)
+            && voxel.integrity <= FRACTURE_SURFACE_INTEGRITY_MAX)
+}
+
+fn surface_crossing_t(voxel: Voxel) -> f32 {
+    if is_natural(voxel.material) {
+        return 0.5;
+    }
+    let density = f32::from(voxel.integrity) / f32::from(u8::MAX);
+    ((density - 0.5) / density.max(f32::EPSILON)).clamp(0.08, 0.5)
+}
+
+fn voxel_damage(voxel: Voxel) -> f32 {
+    1.0 - f32::from(voxel.integrity) / f32::from(u8::MAX)
+}
+
+const fn surface_edge_basis(direction: IVec3) -> (usize, IVec3, IVec3) {
     if direction.x != 0 {
         (0, IVec3::new(0, 1, 0), IVec3::new(0, 0, 1))
     } else if direction.y != 0 {
@@ -540,6 +572,7 @@ fn append_voxel(
                 ),
                 metallic: base_color[4],
                 material: u32::from(voxel.material as u8),
+                damage: voxel_damage(voxel),
             });
         }
         mesh.indices
@@ -612,6 +645,18 @@ mod tests {
     use crate::Voxel;
 
     #[test]
+    fn gpu_vertex_layout_is_stable_and_tightly_packed() {
+        assert_eq!(size_of::<Vertex>(), 56);
+        assert_eq!(core::mem::offset_of!(Vertex, position), 0);
+        assert_eq!(core::mem::offset_of!(Vertex, normal), 12);
+        assert_eq!(core::mem::offset_of!(Vertex, albedo_roughness), 24);
+        assert_eq!(core::mem::offset_of!(Vertex, ambient_occlusion), 40);
+        assert_eq!(core::mem::offset_of!(Vertex, metallic), 44);
+        assert_eq!(core::mem::offset_of!(Vertex, material), 48);
+        assert_eq!(core::mem::offset_of!(Vertex, damage), 52);
+    }
+
+    #[test]
     fn adjacent_voxels_hide_the_shared_faces() {
         let mut world = World::default();
         world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Brick));
@@ -655,6 +700,145 @@ mod tests {
                 .iter()
                 .all(|coordinate| coordinate.fract().abs() < f32::EPSILON)
         }));
+        assert!(
+            mesh.vertices
+                .iter()
+                .all(|vertex| vertex.damage.abs() < f32::EPSILON)
+        );
+    }
+
+    #[test]
+    fn damaged_masonry_crosses_a_deterministic_fracture_surface_threshold() {
+        for material in [Material::Brick, Material::Concrete] {
+            let mut world = World::default();
+            world.set_voxel(
+                IVec3::new(0, 0, 0),
+                Voxel {
+                    material,
+                    integrity: FRACTURE_SURFACE_INTEGRITY_MAX + 1,
+                },
+            );
+            let intact_shape = mesh_chunk(&world, IVec3::new(0, 0, 0));
+            assert_eq!(intact_shape.exposed_faces(), 6);
+            assert!(intact_shape.vertices.iter().all(|vertex| {
+                vertex
+                    .position
+                    .iter()
+                    .all(|coordinate| coordinate.fract().abs() < f32::EPSILON)
+            }));
+
+            world.set_voxel(
+                IVec3::new(0, 0, 0),
+                Voxel {
+                    material,
+                    integrity: FRACTURE_SURFACE_INTEGRITY_MAX,
+                },
+            );
+            let fractured_shape = mesh_chunk(&world, IVec3::new(0, 0, 0));
+            let expected_damage =
+                1.0 - f32::from(FRACTURE_SURFACE_INTEGRITY_MAX) / f32::from(u8::MAX);
+            assert_eq!(fractured_shape.exposed_faces(), 6);
+            assert!(fractured_shape.vertices.iter().any(|vertex| {
+                vertex
+                    .position
+                    .iter()
+                    .any(|coordinate| coordinate.fract().abs() > 0.01)
+            }));
+            assert!(fractured_shape.vertices.iter().all(|vertex| {
+                vertex
+                    .position
+                    .iter()
+                    .all(|coordinate| coordinate.is_finite())
+                    && vertex
+                        .normal
+                        .iter()
+                        .all(|coordinate| coordinate.is_finite())
+                    && (vertex.damage - expected_damage).abs() < f32::EPSILON
+            }));
+        }
+    }
+
+    #[test]
+    fn fracture_crossing_is_finite_bounded_and_monotonic_for_every_integrity() {
+        let mut previous = 0.0_f32;
+        for integrity in u8::MIN..=u8::MAX {
+            let crossing = surface_crossing_t(Voxel {
+                material: Material::Brick,
+                integrity,
+            });
+            assert!(crossing.is_finite());
+            assert!((0.08..=0.5).contains(&crossing));
+            assert!(crossing >= previous);
+            previous = crossing;
+        }
+        assert!((surface_crossing_t(Voxel::new(Material::Stone)) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn intact_architecture_closes_the_fractured_masonry_transition() {
+        let mut world = World::default();
+        world.set_voxel(
+            IVec3::new(0, 0, 0),
+            Voxel {
+                material: Material::Concrete,
+                integrity: FRACTURE_SURFACE_INTEGRITY_MAX,
+            },
+        );
+        world.set_voxel(IVec3::new(1, 0, 0), Voxel::new(Material::Brick));
+
+        let mesh = mesh_chunk(&world, IVec3::new(0, 0, 0));
+
+        assert_eq!(mesh.exposed_faces(), 11);
+        assert_eq!(
+            mesh.vertices
+                .iter()
+                .filter(|vertex| vertex.material == u32::from(Material::Concrete as u8))
+                .count(),
+            20,
+            "derived masonry must not emit a duplicate face toward the intact voxel"
+        );
+        assert_eq!(
+            mesh.vertices
+                .iter()
+                .filter(|vertex| {
+                    vertex.material == u32::from(Material::Brick as u8)
+                        && (vertex.position[0] - 1.0).abs() < f32::EPSILON
+                        && (vertex.normal[0] + 1.0).abs() < f32::EPSILON
+                })
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn fractured_to_intact_transition_has_one_owner_across_a_chunk_boundary() {
+        let mut world = World::default();
+        world.set_voxel(
+            IVec3::new(15, 4, 4),
+            Voxel {
+                material: Material::Brick,
+                integrity: FRACTURE_SURFACE_INTEGRITY_MAX,
+            },
+        );
+        world.set_voxel(IVec3::new(16, 4, 4), Voxel::new(Material::Concrete));
+
+        let fractured_chunk = mesh_chunk(&world, IVec3::new(0, 0, 0));
+        let intact_chunk = mesh_chunk(&world, IVec3::new(1, 0, 0));
+
+        assert_eq!(fractured_chunk.exposed_faces(), 5);
+        assert_eq!(intact_chunk.exposed_faces(), 6);
+        assert_eq!(fractured_chunk.vertices.len(), 20);
+        assert_eq!(
+            intact_chunk
+                .vertices
+                .iter()
+                .filter(|vertex| {
+                    (vertex.position[0] - 16.0).abs() < f32::EPSILON
+                        && (vertex.normal[0] + 1.0).abs() < f32::EPSILON
+                })
+                .count(),
+            4
+        );
     }
 
     #[test]
@@ -680,6 +864,7 @@ mod tests {
         );
         assert!(first.vertices.iter().all(|vertex| {
             vertex.material == u32::from(Material::Stone as u8)
+                && vertex.damage.abs() < f32::EPSILON
                 && vertex
                     .position
                     .iter()
@@ -843,8 +1028,8 @@ mod tests {
     }
 
     #[test]
-    fn natural_cell_cache_has_a_fixed_chunk_local_bound() {
-        let cache = NaturalCellCache::new(IVec3::new(16, -32, 48));
+    fn derived_cell_cache_has_a_fixed_chunk_local_bound() {
+        let cache = DerivedCellCache::new(IVec3::new(16, -32, 48));
 
         assert_eq!(cache.cells.len(), 17 * 17 * 17);
         assert!(cache.index(IVec3::new(15, -33, 47)).is_some());
@@ -866,7 +1051,7 @@ mod tests {
             }
         }
 
-        let surface = natural_surface_point(&world, IVec3::new(0, 0, 0))
+        let surface = derived_surface_point(&world, IVec3::new(0, 0, 0))
             .expect("checkerboard cell crosses its density boundary");
 
         assert_eq!(

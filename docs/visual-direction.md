@@ -41,6 +41,12 @@ Generation prompt (built-in image generation):
   glass preserve exact architectural edges;
 - each natural chunk uses a fixed 17³-cell cache, adaptive quad diagonals, bit-identical seams in
   all six directions, and conservative face/edge/corner invalidation after edits;
+- brick and concrete below a fixed authoritative-integrity threshold reuse the bounded derived mesh
+  to retreat static breach edges, while a unique exact-side cap closes every derived/architecture
+  transition including chunk boundaries;
+- exact integer integrity is converted only after meshing into a render-only GPU damage ratio;
+  deterministic aggregate, fracture, soot and crack synthesis changes damaged masonry and detached
+  debris without adding a replicated field or altering collision;
 - deterministic quarry banks make the smoother silhouette visible without changing the building,
   spawn, authoritative shot corridor, voxel fingerprints, physics, or network formats.
 
@@ -49,9 +55,10 @@ free and deterministic at the visual-input boundary.
 
 ## Promotion order
 
-1. Hybrid surface extraction (terrain delivered): retain exact cubes for authored architecture,
-   derive smooth crack-free soil and stone from the same voxel field, then extend the derived
-   representation to irregular fracture silhouettes and detached bodies.
+1. Hybrid surface extraction (terrain and coarse static masonry fractures delivered): retain exact
+   cubes for intact authored architecture, derive smooth crack-free soil and stone from the same
+   voxel field, then add sub-voxel fracture contours and extend the derived representation to
+   detached bodies.
 2. Layered destruction: distinguish facade, aggregate, reinforcement, insulation and interior
    surfaces; generate bounded local rubble and dust from authoritative fracture inputs.
 3. Asset/material pipeline: versioned texture arrays, calibrated color/normal/roughness/metalness,
@@ -69,7 +76,9 @@ Chunk streaming currently prioritizes render uploads from a complete immutable w
 does not treat an absent render mesh as absent neighbor world data. Future partial world residency
 must retain a neighbor halo or explicitly invalidate both sides when that data arrives.
 
-The current natural mesh is visual-only. Collision, ray impacts, and authority deliberately retain
-the conservative voxel volume, so contacts can precede the smoothed surface near a rounded edge.
-That temporary mismatch is preferable to weakening authority with an unvalidated floating-point
-collision proxy; a derived deterministic collision representation remains a later promotion gate.
+The current natural and fractured masonry mesh is visual-only. Collision, ray impacts, and authority
+deliberately retain the conservative voxel volume, so contacts can precede the smoothed surface near
+a rounded or recessed edge. Exact transition faces are a rasterization closure, not yet a proof of a
+single watertight manifold suitable for collision. That temporary mismatch is preferable to
+weakening authority with an unvalidated floating-point collision proxy; a derived deterministic
+collision representation remains a later promotion gate.

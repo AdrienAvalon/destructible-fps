@@ -451,7 +451,8 @@ impl Renderer {
             2 => Float32x4,
             3 => Float32,
             4 => Float32,
-            5 => Uint32
+            5 => Uint32,
+            10 => Float32
         ];
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: size_of::<Vertex>() as wgpu::BufferAddress,

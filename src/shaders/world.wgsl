@@ -23,6 +23,7 @@ struct VertexInput {
     @location(3) ambient_occlusion: f32,
     @location(4) metallic: f32,
     @location(5) material: u32,
+    @location(10) damage: f32,
 };
 
 struct VertexOutput {
@@ -37,6 +38,7 @@ struct VertexOutput {
     @location(7) material_uv: vec2<f32>,
     @location(8) world_tangent: vec3<f32>,
     @location(9) world_bitangent: vec3<f32>,
+    @location(10) @interpolate(flat) damage: f32,
 };
 
 struct BodyInstanceInput {
@@ -63,13 +65,15 @@ fn body_model(input: BodyInstanceInput) -> mat4x4<f32> {
 }
 
 fn face_tangent(normal: vec3<f32>) -> vec3<f32> {
-    if abs(normal.y) > 0.5 {
-        return vec3<f32>(1.0, 0.0, 0.0);
+    if normal.z < -0.999999 {
+        return vec3<f32>(0.0, -1.0, 0.0);
     }
-    if abs(normal.x) > 0.5 {
-        return vec3<f32>(0.0, 0.0, 1.0);
-    }
-    return vec3<f32>(1.0, 0.0, 0.0);
+    let inverse = 1.0 / (1.0 + normal.z);
+    return vec3<f32>(
+        1.0 - normal.x * normal.x * inverse,
+        -normal.x * normal.y * inverse,
+        -normal.x,
+    );
 }
 
 fn fill_vertex_output(
@@ -91,6 +95,7 @@ fn fill_vertex_output(
     output.material_uv = vec2<f32>(dot(input.position, tangent), dot(input.position, bitangent));
     output.world_tangent = normalize((model * vec4<f32>(tangent, 0.0)).xyz);
     output.world_bitangent = normalize((model * vec4<f32>(bitangent, 0.0)).xyz);
+    output.damage = input.damage;
     return output;
 }
 
@@ -163,7 +168,7 @@ fn brick_interior(uv: vec2<f32>) -> f32 {
     return smoothstep(0.035, 0.085, edge);
 }
 
-fn material_height(material: u32, uv: vec2<f32>) -> f32 {
+fn material_height(material: u32, uv: vec2<f32>, damage: f32) -> f32 {
     if material == 1u {
         return fbm(uv * 5.0) * 0.75 + value_noise(uv * 31.0) * 0.25;
     }
@@ -175,10 +180,16 @@ fn material_height(material: u32, uv: vec2<f32>) -> f32 {
         return grain * 0.55 + fbm(uv * 7.0) * 0.45;
     }
     if material == 4u {
-        return brick_interior(uv) * 0.78 + fbm(uv * 8.0) * 0.22;
+        let intact = brick_interior(uv) * 0.78 + fbm(uv * 8.0) * 0.22;
+        let fracture = fbm(uv * 4.7 + vec2<f32>(11.3, -4.9)) * 0.67
+            + value_noise(uv * 29.0) * 0.33;
+        return mix(intact, fracture, clamp(damage * 1.35, 0.0, 0.88));
     }
     if material == 5u {
-        return fbm(uv * 6.0) * 0.7 + value_noise(uv * 43.0) * 0.3;
+        let intact = fbm(uv * 6.0) * 0.7 + value_noise(uv * 43.0) * 0.3;
+        let aggregate = fbm(uv * 3.8 + vec2<f32>(-3.7, 8.1)) * 0.58
+            + value_noise(uv * 37.0) * 0.42;
+        return mix(intact, aggregate, clamp(damage * 1.30, 0.0, 0.84));
     }
     if material == 6u {
         let brushed = sin(uv.y * 145.0 + value_noise(uv * 3.0) * 5.0) * 0.5 + 0.5;
@@ -196,6 +207,7 @@ fn sample_material(
     base_albedo: vec3<f32>,
     base_roughness: f32,
     base_metallic: f32,
+    damage: f32,
 ) -> SurfaceSample {
     let broad = fbm(uv * 0.8);
     let footprint = max(length(dpdx(uv)), length(dpdy(uv)));
@@ -205,7 +217,7 @@ fn sample_material(
     surface.albedo = base_albedo * (0.80 + broad * 0.28 + fine * 0.035);
     surface.roughness = base_roughness;
     surface.metallic = base_metallic;
-    surface.height = material_height(material, uv);
+    surface.height = material_height(material, uv, damage);
 
     if material == 1u {
         let damp = smoothstep(0.58, 0.92, fbm(uv * 1.7));
@@ -252,6 +264,31 @@ fn sample_material(
         surface.albedo = mix(base_albedo * vec3<f32>(0.62, 0.83, 0.92), vec3<f32>(0.07, 0.085, 0.08), grime * 0.36);
         surface.roughness = 0.08 + fine * 0.10 + grime * 0.22;
     }
+
+    if (material == 4u || material == 5u) && damage > 0.0 {
+        let fracture_noise = fbm(uv * 3.1 + vec2<f32>(7.3, -12.8));
+        let aggregate_noise = value_noise(uv * 31.0 + vec2<f32>(-2.7, 9.4));
+        let crack_distance = abs(value_noise(uv * 5.7 + fracture_noise * 1.9) - 0.5);
+        let cracks = (1.0 - smoothstep(0.018, 0.072, crack_distance)) * detail_visibility;
+        let exposed = clamp(damage * (0.38 + fracture_noise * 0.72), 0.0, 0.92);
+        var fractured_albedo = vec3<f32>(0.30, 0.27, 0.23);
+        if material == 5u {
+            fractured_albedo = mix(
+                vec3<f32>(0.31, 0.32, 0.32),
+                vec3<f32>(0.52, 0.49, 0.43),
+                smoothstep(0.57, 0.83, aggregate_noise),
+            );
+        } else {
+            fractured_albedo = mix(
+                vec3<f32>(0.27, 0.16, 0.10),
+                vec3<f32>(0.47, 0.33, 0.24),
+                smoothstep(0.54, 0.86, aggregate_noise),
+            );
+        }
+        surface.albedo = mix(surface.albedo, fractured_albedo, exposed * 0.78);
+        surface.albedo = surface.albedo * mix(1.0, 0.24, cracks * clamp(damage * 2.4, 0.0, 1.0));
+        surface.roughness = max(surface.roughness, mix(surface.roughness, 0.98, exposed + cracks * 0.35));
+    }
     return surface;
 }
 
@@ -279,8 +316,16 @@ fn material_bump_strength(material: u32) -> f32 {
 
 fn perturb_normal(input: VertexOutput, center_height: f32) -> vec3<f32> {
     let epsilon = 0.018;
-    let tangent_height = material_height(input.material, input.material_uv + vec2<f32>(epsilon, 0.0));
-    let bitangent_height = material_height(input.material, input.material_uv + vec2<f32>(0.0, epsilon));
+    let tangent_height = material_height(
+        input.material,
+        input.material_uv + vec2<f32>(epsilon, 0.0),
+        input.damage,
+    );
+    let bitangent_height = material_height(
+        input.material,
+        input.material_uv + vec2<f32>(0.0, epsilon),
+        input.damage,
+    );
     let footprint = max(length(dpdx(input.material_uv)), length(dpdy(input.material_uv)));
     let detail_visibility = 1.0 - smoothstep(0.006, 0.075, footprint);
     let strength = material_bump_strength(input.material) * detail_visibility;
@@ -399,6 +444,7 @@ fn world_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
         input.albedo_roughness.rgb,
         input.albedo_roughness.w,
         input.metallic,
+        input.damage,
     );
     let normal = perturb_normal(input, sampled.height);
     let light_direction = normalize(-globals.sun_fog.xyz);

@@ -107,8 +107,13 @@ The first graphical network harness deliberately uses only the legacy loopback a
 from the identical deterministic demo world, performs the source-bound development handshake, sends
 camera-relative inputs at 60 Hz, predicts the local collider, reconciles every newer authority view,
 samples remote players through the delayed interpolation history, and uploads those transforms to
-the instanced renderer. The loopback authority now emits the same player-state packets as QUIC so
-the transport-independent simulation and client presentation can be exercised in two real windows.
+the instanced renderer. It also orders the permanent-world delta stream, validates every transaction
+through `ClientReplica`, remeshes changed chunk boundaries, uploads newly detached rigid bodies, and
+tracks their replicated transforms. Mouse actions send requests only; the authority chooses and
+broadcasts the resulting mutation. A release smoke run requires both real Vulkan clients to apply
+the same destruction delta. The loopback authority emits the same player-state and world-delta
+packets as QUIC so the transport-independent simulation and client presentation can be exercised in
+two real windows. Late-join snapshot bootstrap and asynchronous remeshing remain explicit gates.
 This does not relax exposure: both binaries refuse non-loopback addresses, and the production client
 must use authenticated QUIC/OIDC before any remote deployment.
 

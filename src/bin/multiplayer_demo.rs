@@ -5,13 +5,15 @@
 )]
 
 use destructible_fps::{
-    ClientPrediction, ClientPredictionError, FixedMicrometers3, MAX_APPLICATION_DATAGRAM_BYTES,
-    MAX_RECEIVED_DATAGRAMS_PER_TICK, MICROMETERS_PER_VOXEL, PlayerInputCommand,
-    PlayerInterpolationBuffer, PlayerInterpolationError, PlayerStateReceiveError,
-    ServerControlMessage, World, decode_player_state_packet, decode_server_control, demo_world,
-    encode_client_hello, encode_player_input, is_player_state_datagram,
-    mesh::mesh_chunk,
-    player::Player,
+    BuildCommand, ClientPrediction, ClientPredictionError, ClientReplica, ExplosionCommand,
+    FixedMicrometers3, IVec3, MAX_APPLICATION_DATAGRAM_BYTES, MAX_BUILD_REACH_VOXELS,
+    MAX_RECEIVED_DATAGRAMS_PER_TICK, MICROMETERS_PER_VOXEL, Material, OrderedDeltaInbox,
+    PlayerInputCommand, PlayerInterpolationBuffer, PlayerInterpolationError,
+    PlayerStateReceiveError, ServerControlMessage, decode_player_state_packet,
+    decode_server_control, demo_world, dirty_chunks, encode_build_request, encode_client_hello,
+    encode_explosion_request, encode_player_input, is_delta_datagram, is_player_state_datagram,
+    mesh::{mesh_body, mesh_chunk},
+    player::{Player, raycast},
     render::{RenderOutcome, Renderer},
 };
 use glam::Vec3;
@@ -26,7 +28,7 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{DeviceEvent, DeviceId, ElementState, WindowEvent},
+    event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
@@ -38,7 +40,8 @@ const DEFAULT_SERVER: &str = "127.0.0.1:40000";
 struct MultiplayerGame {
     window: Arc<Window>,
     renderer: Renderer,
-    world: World,
+    replica: ClientReplica,
+    delta_inbox: OrderedDeltaInbox,
     socket: UdpSocket,
     server: SocketAddr,
     nonce: u64,
@@ -47,6 +50,7 @@ struct MultiplayerGame {
     interpolation: PlayerInterpolationBuffer,
     latest_state_received_at: Option<Instant>,
     next_input_sequence: u64,
+    next_command_id: u64,
     view: Player,
     pressed: HashSet<KeyCode>,
     cursor_captured: bool,
@@ -58,6 +62,8 @@ struct MultiplayerGame {
     smoke_motion: bool,
     initial_position_um: Option<FixedMicrometers3>,
     maximum_horizontal_displacement_um: u64,
+    applied_world_deltas: u64,
+    smoke_action_sent: bool,
 }
 
 impl MultiplayerGame {
@@ -97,11 +103,14 @@ impl MultiplayerGame {
                 .map_err(|error| format!("adresse client: {error}"))?,
             renderer.stats().chunks
         );
-        println!("Commandes: clic pour capturer | ZQSD/WASD | Maj sprint | Espace saut | Echap");
+        println!(
+            "Commandes: clic pour capturer | ZQSD/WASD | Maj sprint | Espace saut | clic gauche/droit destruction | molette construction | Echap"
+        );
         Ok(Self {
             window,
             renderer,
-            world,
+            replica: ClientReplica::new(world),
+            delta_inbox: OrderedDeltaInbox::default(),
             socket,
             server,
             nonce,
@@ -110,6 +119,7 @@ impl MultiplayerGame {
             interpolation: PlayerInterpolationBuffer::default(),
             latest_state_received_at: None,
             next_input_sequence: 1,
+            next_command_id: 1,
             view: Player::default(),
             pressed: HashSet::new(),
             cursor_captured: false,
@@ -121,6 +131,8 @@ impl MultiplayerGame {
             smoke_motion,
             initial_position_um: None,
             maximum_horizontal_displacement_um: 0,
+            applied_world_deltas: 0,
+            smoke_action_sent: false,
         })
     }
 
@@ -156,6 +168,8 @@ impl MultiplayerGame {
             let payload = &bytes[..length];
             if is_player_state_datagram(payload) {
                 self.receive_player_state(payload)?;
+            } else if is_delta_datagram(payload) {
+                self.receive_world_delta(payload)?;
             } else if payload.starts_with(b"DFCT") {
                 self.receive_control(payload)?;
             }
@@ -165,6 +179,50 @@ impl MultiplayerGame {
                 .send_to(&encode_client_hello(self.nonce), self.server)
                 .map_err(|error| format!("nouvelle tentative de handshake: {error}"))?;
             self.last_hello_at = Instant::now();
+        }
+        Ok(())
+    }
+
+    fn receive_world_delta(&mut self, payload: &[u8]) -> Result<(), String> {
+        let packets = self
+            .delta_inbox
+            .push(payload)
+            .map_err(|error| format!("delta monde invalide: {error}"))?;
+        for packet in packets {
+            let chunks = dirty_chunks(&packet.changes);
+            let mut body_ids = packet
+                .body_assignments
+                .iter()
+                .map(|assignment| assignment.body_id)
+                .collect::<Vec<_>>();
+            body_ids.sort_unstable();
+            body_ids.dedup();
+            self.replica
+                .receive(&packet)
+                .map_err(|error| format!("replication du monde refusee: {error}"))?;
+            if !chunks.is_empty() {
+                let meshes = chunks
+                    .into_iter()
+                    .map(|chunk| (chunk, mesh_chunk(self.replica.world(), chunk)))
+                    .collect();
+                self.renderer.upload_chunk_meshes(meshes);
+            }
+            if !body_ids.is_empty() {
+                let meshes = body_ids
+                    .into_iter()
+                    .filter_map(|body_id| self.replica.bodies().get(&body_id))
+                    .map(mesh_body)
+                    .collect();
+                self.renderer.upload_body_meshes(meshes)?;
+            }
+            self.renderer
+                .update_body_transforms(self.replica.body_states());
+            self.applied_world_deltas = self.applied_world_deltas.saturating_add(1);
+            self.last_status = format!(
+                "delta {} applique | {} corps",
+                packet.sequence,
+                self.replica.bodies().len()
+            );
         }
         Ok(())
     }
@@ -211,7 +269,7 @@ impl MultiplayerGame {
             ));
         };
         if let Some(prediction) = &mut self.prediction {
-            match prediction.reconcile(packet.server_tick, authoritative, &self.world) {
+            match prediction.reconcile(packet.server_tick, authoritative, self.replica.world()) {
                 Ok(report) => {
                     self.last_status = format!(
                         "tick {} | ack {} | rejeu {}",
@@ -256,7 +314,7 @@ impl MultiplayerGame {
             return Ok(());
         };
         prediction
-            .predict(input, &self.world)
+            .predict(input, self.replica.world())
             .map_err(|error| format!("prediction locale refusee: {error}"))?;
         self.socket
             .send_to(&encode_player_input(session_id, input), self.server)
@@ -266,6 +324,95 @@ impl MultiplayerGame {
             .checked_add(1)
             .ok_or_else(|| "sequence joueur epuisee".to_owned())?;
         self.sync_local_view();
+        Ok(())
+    }
+
+    fn send_explosion(&mut self, radius_voxels: u16, peak_energy: u32) -> Result<(), String> {
+        let Some(session_id) = self.session_id else {
+            return Ok(());
+        };
+        let Some(hit) = raycast(
+            self.replica.world(),
+            self.view.camera_position(),
+            self.view.view_direction(),
+            120.0,
+        ) else {
+            "tir sans impact".clone_into(&mut self.last_status);
+            return Ok(());
+        };
+        let command_id = self.take_command_id()?;
+        let command = ExplosionCommand {
+            command_id,
+            center: hit.voxel,
+            radius_voxels,
+            peak_energy,
+        };
+        self.socket
+            .send_to(&encode_explosion_request(session_id, command), self.server)
+            .map_err(|error| format!("envoi destruction: {error}"))?;
+        self.last_status = format!("destruction {command_id} envoyee en {:?}", hit.voxel);
+        Ok(())
+    }
+
+    fn send_build(&mut self, material: Material) -> Result<(), String> {
+        let Some(session_id) = self.session_id else {
+            return Ok(());
+        };
+        let Some(position) = raycast(
+            self.replica.world(),
+            self.view.camera_position(),
+            self.view.view_direction(),
+            MAX_BUILD_REACH_VOXELS,
+        )
+        .and_then(|hit| hit.adjacent_empty) else {
+            "construction sans support a portee".clone_into(&mut self.last_status);
+            return Ok(());
+        };
+        let command_id = self.take_command_id()?;
+        let command = BuildCommand {
+            command_id,
+            position,
+            material,
+        };
+        self.socket
+            .send_to(&encode_build_request(session_id, command), self.server)
+            .map_err(|error| format!("envoi construction: {error}"))?;
+        self.last_status = format!("construction {command_id} envoyee en {position:?}");
+        Ok(())
+    }
+
+    fn take_command_id(&mut self) -> Result<u64, String> {
+        let command_id = self.next_command_id;
+        self.next_command_id = self
+            .next_command_id
+            .checked_add(1)
+            .ok_or_else(|| "sequence de commandes epuisee".to_owned())?;
+        Ok(command_id)
+    }
+
+    fn send_smoke_action(&mut self) -> Result<(), String> {
+        if !self.smoke_motion
+            || self.smoke_action_sent
+            || self.started.elapsed().as_secs_f32() < 3.0
+        {
+            return Ok(());
+        }
+        let Some(session_id) = self.session_id else {
+            return Ok(());
+        };
+        if !session_id.is_multiple_of(2) {
+            let command_id = self.take_command_id()?;
+            let command = ExplosionCommand {
+                command_id,
+                center: IVec3::new(-20, 6, 0),
+                radius_voxels: 2,
+                peak_energy: 7_500,
+            };
+            self.socket
+                .send_to(&encode_explosion_request(session_id, command), self.server)
+                .map_err(|error| format!("envoi destruction smoke: {error}"))?;
+        }
+        self.smoke_action_sent = true;
         Ok(())
     }
 
@@ -321,6 +468,7 @@ impl MultiplayerGame {
             self.accumulator -= FIXED_STEP_SECONDS;
             steps += 1;
         }
+        self.send_smoke_action()?;
         self.update_remote_players()?;
         match self.renderer.render(
             self.view.camera_position(),
@@ -351,8 +499,11 @@ impl MultiplayerGame {
                     self.maximum_horizontal_displacement_um
                 ));
             }
+            if self.applied_world_deltas == 0 {
+                return Err("smoke multijoueur sans delta de destruction replique".to_owned());
+            }
             println!(
-                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={}",
+                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={}",
                 self.session_id.unwrap_or_default(),
                 stats.players,
                 self.prediction
@@ -361,7 +512,8 @@ impl MultiplayerGame {
                 self.prediction
                     .as_ref()
                     .map_or(0, ClientPrediction::pending_inputs),
-                self.maximum_horizontal_displacement_um
+                self.maximum_horizontal_displacement_um,
+                self.applied_world_deltas
             );
             event_loop.exit();
         }
@@ -474,8 +626,24 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
+                button,
                 ..
-            } if !game.cursor_captured => game.capture_cursor(),
+            } => {
+                if game.cursor_captured {
+                    let result = match button {
+                        MouseButton::Left => game.send_explosion(2, 7_500),
+                        MouseButton::Right => game.send_explosion(6, 42_000),
+                        MouseButton::Middle => game.send_build(Material::Wood),
+                        _ => Ok(()),
+                    };
+                    if let Err(error) = result {
+                        self.failure = Some(error);
+                        event_loop.exit();
+                    }
+                } else {
+                    game.capture_cursor();
+                }
+            }
             WindowEvent::RedrawRequested => {
                 if let Err(error) = game.redraw(event_loop, self.exit_after) {
                     self.failure = Some(error);

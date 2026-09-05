@@ -3,6 +3,20 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — two-client graphical destruction replication increment
+
+Source state: parent `4488131` plus the graphical world-replication increment documented here. The
+loopback client now feeds bounded delta fragments through `OrderedDeltaInbox` and `ClientReplica`,
+remeshes every affected chunk boundary, uploads newly detached bodies, and advances replicated body
+transforms. Rifle, explosive, and construction mouse inputs remain requests; only the server emits
+permanent mutations. Late-join snapshot bootstrap and off-thread network remeshing remain later
+gates.
+
+Two release Vulkan clients ran simultaneously for nine seconds against the real release server.
+They established sessions 1 and 2, each rendered the other player, moved 80,096,248 um and
+22,700,000 um respectively, and each applied the same automatic authoritative destruction delta.
+Both clients exited successfully only after observing movement and a world mutation.
+
 ## 2026-09-05 — two-client graphical loopback increment
 
 Source state: parent `9752e28` plus the graphical loopback increment documented here. The legacy

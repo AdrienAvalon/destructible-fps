@@ -21,9 +21,11 @@ pub struct Vertex {
     pub material: u32,
     /// Render-only damage ratio derived from authoritative integer integrity.
     pub damage: f32,
+    /// Local coordinate through a fractured wall, or -1 for an ordinary surface.
+    pub fracture_depth: f32,
 }
 
-const _: () = assert!(size_of::<Vertex>() == 56);
+const _: () = assert!(size_of::<Vertex>() == 60);
 
 #[derive(Debug, Default)]
 pub struct CpuMesh {
@@ -54,6 +56,10 @@ impl CpuMesh {
 const DERIVED_CELL_EDGE: usize = CHUNK_EDGE as usize + 1;
 const DERIVED_CELL_COUNT: usize = DERIVED_CELL_EDGE * DERIVED_CELL_EDGE * DERIVED_CELL_EDGE;
 const FRACTURE_SURFACE_INTEGRITY_MAX: u8 = 224;
+const FRACTURE_VISUAL_HALO_RADIUS: i32 = 6;
+/// A damaged masonry voxel can switch a cut surface within the visual halo from exact faces to
+/// Surface Nets. One additional voxel covers the derived-cell and neighboring exact-face samples.
+pub(crate) const FRACTURE_RENDER_DEPENDENCY_RADIUS_VOXELS: i32 = FRACTURE_VISUAL_HALO_RADIUS + 1;
 
 #[derive(Clone, Copy, Debug)]
 struct DerivedSurfacePoint {
@@ -213,7 +219,7 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
                 if !voxel.is_solid() {
                     continue;
                 }
-                if uses_derived_surface(voxel) {
+                if uses_derived_surface_at(world, position, voxel) {
                     if !append_derived_surface(
                         &mut mesh,
                         world,
@@ -230,7 +236,7 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
                 // inset from the voxel boundary.
                 let occupied = |sample| {
                     let neighbor = world.voxel(sample);
-                    neighbor.is_solid() && !uses_derived_surface(neighbor)
+                    neighbor.is_solid() && !uses_derived_surface_at(world, sample, neighbor)
                 };
                 if !append_voxel(&mut mesh, position, position, voxel, &occupied) {
                     return mesh;
@@ -272,7 +278,15 @@ fn append_derived_surface(
             return false;
         };
         let surface_points = [first, second, third, fourth];
-        if !append_derived_quad(mesh, &surface_points, voxel, face.normal) {
+        let fracture_axis = fracture_cross_section_axis(world, position, face, voxel);
+        if !append_derived_quad(
+            mesh,
+            &surface_points,
+            position,
+            voxel,
+            face.normal,
+            fracture_axis,
+        ) {
             return false;
         }
     }
@@ -282,8 +296,10 @@ fn append_derived_surface(
 fn append_derived_quad(
     mesh: &mut CpuMesh,
     points: &[DerivedSurfacePoint],
+    owner: IVec3,
     voxel: Voxel,
     outward: [f32; 3],
+    fracture_axis: Option<usize>,
 ) -> bool {
     let Ok(first) = u32::try_from(mesh.vertices.len()) else {
         return false;
@@ -304,6 +320,9 @@ fn append_derived_quad(
             metallic: base_color[4],
             material: u32::from(voxel.material as u8),
             damage: voxel_damage(voxel),
+            fracture_depth: fracture_axis.map_or(-1.0, |axis| {
+                (point.position[axis] - integer_axis(owner, axis) as f32).clamp(0.0, 1.0)
+            }),
         });
     }
     let diagonal_zero_two = squared_distance(points[0].position, points[2].position);
@@ -362,14 +381,17 @@ fn derived_surface_point(world: &World, cell: IVec3) -> Option<DerivedSurfacePoi
         (3, 7),
     ];
 
-    let samples = CORNERS.map(|offset| world.voxel(add(cell, offset)));
+    let sample_positions = CORNERS.map(|offset| add(cell, offset));
+    let samples = sample_positions.map(|position| world.voxel(position));
     let mut position_sum = [0.0_f32; 3];
     let mut normal_sum = [0.0_f32; 3];
     let mut first_normal = [0.0_f32; 3];
     let mut crossings = 0_u8;
     for (left_index, right_index) in EDGES {
-        let left_derived = uses_derived_surface(samples[left_index]);
-        let right_derived = uses_derived_surface(samples[right_index]);
+        let left_derived =
+            uses_derived_surface_at(world, sample_positions[left_index], samples[left_index]);
+        let right_derived =
+            uses_derived_surface_at(world, sample_positions[right_index], samples[right_index]);
         let left_air = !samples[left_index].is_solid();
         let right_air = !samples[right_index].is_solid();
         if !(left_derived && right_air || right_derived && left_air) {
@@ -436,6 +458,56 @@ const fn uses_derived_surface(voxel: Voxel) -> bool {
             && voxel.integrity <= FRACTURE_SURFACE_INTEGRITY_MAX)
 }
 
+fn uses_derived_surface_at(world: &World, position: IVec3, voxel: Voxel) -> bool {
+    uses_derived_surface(voxel)
+        || (voxel.is_solid()
+            && FACES.iter().any(|face| {
+                !world.voxel(add(position, face.neighbor)).is_solid()
+                    && fracture_cross_section_axis(world, position, face, voxel).is_some()
+            }))
+}
+
+fn fracture_cross_section_axis(
+    world: &World,
+    position: IVec3,
+    face: &Face,
+    voxel: Voxel,
+) -> Option<usize> {
+    if !matches!(voxel.material, Material::Brick | Material::Concrete) {
+        return None;
+    }
+    let opposite = world.voxel(add(position, negate(face.neighbor)));
+    if opposite.material != voxel.material {
+        return None;
+    }
+    let wall_axis = [face.tangent_u, face.tangent_v]
+        .into_iter()
+        .filter(|axis| {
+            !world.voxel(add(position, *axis)).is_solid()
+                && !world.voxel(add(position, negate(*axis))).is_solid()
+        })
+        .map(cardinal_axis)
+        .min()?;
+    nearby_masonry_damage(world, position, voxel.material, wall_axis).then_some(wall_axis)
+}
+
+fn nearby_masonry_damage(
+    world: &World,
+    position: IVec3,
+    material: Material,
+    wall_axis: usize,
+) -> bool {
+    for first in -FRACTURE_VISUAL_HALO_RADIUS..=FRACTURE_VISUAL_HALO_RADIUS {
+        for second in -FRACTURE_VISUAL_HALO_RADIUS..=FRACTURE_VISUAL_HALO_RADIUS {
+            let sample = world.voxel(add(position, planar_offset(wall_axis, first, second)));
+            if sample.material == material && sample.integrity < u8::MAX {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn surface_crossing_t(voxel: Voxel) -> f32 {
     if is_natural(voxel.material) {
         return 0.5;
@@ -455,6 +527,32 @@ const fn surface_edge_basis(direction: IVec3) -> (usize, IVec3, IVec3) {
         (1, IVec3::new(0, 0, 1), IVec3::new(1, 0, 0))
     } else {
         (2, IVec3::new(1, 0, 0), IVec3::new(0, 1, 0))
+    }
+}
+
+const fn cardinal_axis(direction: IVec3) -> usize {
+    if direction.x != 0 {
+        0
+    } else if direction.y != 0 {
+        1
+    } else {
+        2
+    }
+}
+
+const fn integer_axis(position: IVec3, axis: usize) -> i32 {
+    match axis {
+        0 => position.x,
+        1 => position.y,
+        _ => position.z,
+    }
+}
+
+const fn planar_offset(wall_axis: usize, first: i32, second: i32) -> IVec3 {
+    match wall_axis {
+        0 => IVec3::new(0, first, second),
+        1 => IVec3::new(first, 0, second),
+        _ => IVec3::new(first, second, 0),
     }
 }
 
@@ -573,6 +671,7 @@ fn append_voxel(
                 metallic: base_color[4],
                 material: u32::from(voxel.material as u8),
                 damage: voxel_damage(voxel),
+                fracture_depth: -1.0,
             });
         }
         mesh.indices
@@ -642,11 +741,12 @@ const fn material_surface(material: Material) -> [f32; 5] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Voxel;
+    use crate::{DemoSession, FireMode, Voxel};
+    use glam::Vec3;
 
     #[test]
     fn gpu_vertex_layout_is_stable_and_tightly_packed() {
-        assert_eq!(size_of::<Vertex>(), 56);
+        assert_eq!(size_of::<Vertex>(), 60);
         assert_eq!(core::mem::offset_of!(Vertex, position), 0);
         assert_eq!(core::mem::offset_of!(Vertex, normal), 12);
         assert_eq!(core::mem::offset_of!(Vertex, albedo_roughness), 24);
@@ -654,6 +754,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(Vertex, metallic), 44);
         assert_eq!(core::mem::offset_of!(Vertex, material), 48);
         assert_eq!(core::mem::offset_of!(Vertex, damage), 52);
+        assert_eq!(core::mem::offset_of!(Vertex, fracture_depth), 56);
     }
 
     #[test]
@@ -703,7 +804,8 @@ mod tests {
         assert!(
             mesh.vertices
                 .iter()
-                .all(|vertex| vertex.damage.abs() < f32::EPSILON)
+                .all(|vertex| vertex.damage.abs() < f32::EPSILON
+                    && (vertex.fracture_depth + 1.0).abs() < f32::EPSILON)
         );
     }
 
@@ -772,6 +874,221 @@ mod tests {
             previous = crossing;
         }
         assert!((surface_crossing_t(Voxel::new(Material::Stone)) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fracture_cross_sections_require_a_thin_same_material_wall() {
+        let damaged_brick = Voxel {
+            material: Material::Brick,
+            integrity: FRACTURE_SURFACE_INTEGRITY_MAX,
+        };
+        let mut side_world = World::default();
+        side_world.fill_box(IVec3::new(-1, -1, 0), IVec3::new(0, 1, 0), damaged_brick);
+        assert_eq!(
+            fracture_cross_section_axis(
+                &side_world,
+                IVec3::new(0, 0, 0),
+                face(IVec3::new(1, 0, 0)),
+                damaged_brick,
+            ),
+            Some(2)
+        );
+
+        let mut top_world = World::default();
+        top_world.fill_box(IVec3::new(-1, -1, 0), IVec3::new(1, 0, 0), damaged_brick);
+        assert_eq!(
+            fracture_cross_section_axis(
+                &top_world,
+                IVec3::new(0, 0, 0),
+                face(IVec3::new(0, 1, 0)),
+                damaged_brick,
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            fracture_cross_section_axis(
+                &top_world,
+                IVec3::new(0, 0, 0),
+                face(IVec3::new(0, 0, 1)),
+                damaged_brick,
+            ),
+            None,
+            "the ordinary exterior face is not a fracture cross-section"
+        );
+
+        let mut isolated = World::default();
+        isolated.set_voxel(IVec3::new(0, 0, 0), damaged_brick);
+        assert_eq!(
+            fracture_cross_section_axis(
+                &isolated,
+                IVec3::new(0, 0, 0),
+                face(IVec3::new(1, 0, 0)),
+                damaged_brick,
+            ),
+            None
+        );
+
+        let mut mixed = side_world.clone();
+        mixed.set_voxel(IVec3::new(-1, 0, 0), Voxel::new(Material::Concrete));
+        assert_eq!(
+            fracture_cross_section_axis(
+                &mixed,
+                IVec3::new(0, 0, 0),
+                face(IVec3::new(1, 0, 0)),
+                damaged_brick,
+            ),
+            None
+        );
+
+        let mut thick = World::default();
+        thick.fill_box(IVec3::new(-1, -1, 0), IVec3::new(0, 1, 1), damaged_brick);
+        assert_eq!(
+            fracture_cross_section_axis(
+                &thick,
+                IVec3::new(0, 0, 1),
+                face(IVec3::new(1, 0, 0)),
+                damaged_brick,
+            ),
+            None,
+            "the one-voxel cross-section contract does not guess through thick walls"
+        );
+
+        let mut two_axis_candidate = World::default();
+        two_axis_candidate.set_voxel(IVec3::new(0, 0, 0), damaged_brick);
+        two_axis_candidate.set_voxel(IVec3::new(-1, 0, 0), damaged_brick);
+        assert_eq!(
+            fracture_cross_section_axis(
+                &two_axis_candidate,
+                IVec3::new(0, 0, 0),
+                face(IVec3::new(1, 0, 0)),
+                damaged_brick,
+            ),
+            Some(1),
+            "when both thin axes qualify, the lowest cardinal axis wins deterministically"
+        );
+    }
+
+    #[test]
+    fn glass_never_receives_a_masonry_fracture_depth() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Glass));
+
+        let mesh = mesh_chunk(&world, IVec3::new(0, 0, 0));
+
+        assert!(!mesh.vertices.is_empty());
+        assert!(
+            mesh.vertices
+                .iter()
+                .all(|vertex| vertex.fracture_depth < 0.0)
+        );
+    }
+
+    #[test]
+    fn bounded_damage_halo_smooths_only_nearby_breach_edges() {
+        let damaged = Voxel {
+            material: Material::Brick,
+            integrity: FRACTURE_SURFACE_INTEGRITY_MAX,
+        };
+        let mut world = World::default();
+        world.fill_box(
+            IVec3::new(-1, -1, 0),
+            IVec3::new(3, 1, 0),
+            Voxel::new(Material::Brick),
+        );
+        world.set_voxel(IVec3::new(0, 0, 0), damaged);
+        world.set_voxel(IVec3::new(1, 0, 0), Voxel::AIR);
+        let near = IVec3::new(2, 0, 0);
+        assert_eq!(
+            fracture_cross_section_axis(
+                &world,
+                near,
+                face(IVec3::new(-1, 0, 0)),
+                world.voxel(near),
+            ),
+            Some(2)
+        );
+        assert!(uses_derived_surface_at(&world, near, world.voxel(near)));
+
+        world.fill_box(
+            IVec3::new(9, -1, 0),
+            IVec3::new(12, 1, 0),
+            Voxel::new(Material::Brick),
+        );
+        world.set_voxel(IVec3::new(10, 0, 0), Voxel::AIR);
+        let far = IVec3::new(11, 0, 0);
+        assert_eq!(
+            fracture_cross_section_axis(&world, far, face(IVec3::new(-1, 0, 0)), world.voxel(far),),
+            None
+        );
+        assert!(!uses_derived_surface_at(&world, far, world.voxel(far)));
+    }
+
+    #[test]
+    fn fracture_depth_is_bounded_per_quad_at_a_chunk_edge() {
+        let damaged_concrete = Voxel {
+            material: Material::Concrete,
+            integrity: FRACTURE_SURFACE_INTEGRITY_MAX,
+        };
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(15, 0, 0), damaged_concrete);
+        world.set_voxel(IVec3::new(15, -1, 0), damaged_concrete);
+        world.set_voxel(IVec3::new(15, 0, -1), damaged_concrete);
+        world.set_voxel(IVec3::new(15, 0, 1), damaged_concrete);
+
+        let first = mesh_chunk(&world, IVec3::new(0, 0, 0));
+        let second = mesh_chunk(&world, IVec3::new(0, 0, 0));
+        assert!(
+            first
+                .vertices
+                .iter()
+                .any(|vertex| vertex.fracture_depth >= 0.0)
+        );
+        assert!(first.vertices.iter().all(|vertex| {
+            vertex.fracture_depth.is_finite() && (-1.0..=1.0).contains(&vertex.fracture_depth)
+        }));
+        assert!(first.vertices.chunks_exact(4).all(|quad| {
+            quad.iter().all(|vertex| vertex.fracture_depth < 0.0)
+                || quad.iter().all(|vertex| vertex.fracture_depth >= 0.0)
+        }));
+        assert!(
+            first
+                .vertices
+                .iter()
+                .zip(&second.vertices)
+                .all(|(left, right)| {
+                    left.fracture_depth.to_bits() == right.fracture_depth.to_bits()
+                })
+        );
+    }
+
+    #[test]
+    fn showcase_breach_exposes_layered_cross_section_vertices() {
+        let mut session = DemoSession::default();
+        session
+            .fire(Vec3::new(0.5, 1.5, 40.0), -Vec3::Z, FireMode::Rifle)
+            .expect("authoritative showcase support shot")
+            .expect("fragile support hit");
+        let breach = session
+            .fire(Vec3::new(0.5, 3.1, 40.0), -Vec3::Z, FireMode::Explosive)
+            .expect("authoritative showcase explosion")
+            .expect("facade hit");
+        assert_eq!(breach.target, IVec3::new(0, 3, 16));
+        assert!(breach.report.damaged_voxels > 0);
+
+        let depths = session
+            .world()
+            .chunk_positions()
+            .into_iter()
+            .flat_map(|chunk| mesh_chunk(session.world(), chunk).vertices)
+            .filter_map(|vertex| (vertex.fracture_depth >= 0.0).then_some(vertex.fracture_depth))
+            .collect::<Vec<_>>();
+
+        assert!(
+            depths.len() >= 8,
+            "showcase must exercise layered fracture shading"
+        );
+        assert!(depths.iter().copied().fold(1.0_f32, f32::min) < 0.40);
+        assert!(depths.iter().copied().fold(0.0_f32, f32::max) > 0.60);
     }
 
     #[test]
@@ -865,6 +1182,7 @@ mod tests {
         assert!(first.vertices.iter().all(|vertex| {
             vertex.material == u32::from(Material::Stone as u8)
                 && vertex.damage.abs() < f32::EPSILON
+                && (vertex.fracture_depth + 1.0).abs() < f32::EPSILON
                 && vertex
                     .position
                     .iter()
@@ -1091,8 +1409,17 @@ mod tests {
                 .mesh
                 .vertices
                 .iter()
-                .all(|vertex| vertex.position[0] >= 0.0 && vertex.position[0] <= 2.0)
+                .all(|vertex| vertex.position[0] >= 0.0
+                    && vertex.position[0] <= 2.0
+                    && (vertex.fracture_depth + 1.0).abs() < f32::EPSILON)
         );
+    }
+
+    fn face(direction: IVec3) -> &'static Face {
+        FACES
+            .iter()
+            .find(|face| face.neighbor == direction)
+            .expect("cardinal face")
     }
 
     fn subtract(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {

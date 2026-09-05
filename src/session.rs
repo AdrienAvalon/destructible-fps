@@ -12,6 +12,8 @@ use core::fmt;
 use glam::Vec3;
 use std::collections::{BTreeMap, HashSet};
 
+use crate::mesh::FRACTURE_RENDER_DEPENDENCY_RADIUS_VOXELS;
+
 const CLIENT_ID: u64 = 1;
 const DATAGRAM_MTU: usize = 1_200;
 
@@ -319,13 +321,21 @@ fn local_build_context(eye: Vec3) -> Option<PlayerBuildContext> {
 pub fn dirty_chunks(changes: &[VoxelChange]) -> Vec<IVec3> {
     let mut chunks = HashSet::new();
     for change in changes {
-        // A Surface Nets vertex samples the eight voxel centres of its cell. At a chunk edge, one
-        // changed voxel can therefore alter meshes across a face, edge, or corner. Sampling the
-        // 3^3 voxel neighborhood yields at most 2^3 distinct chunks and also covers exact cube-face
-        // culling without separate boundary rules.
-        for x in -1_i32..=1 {
-            for y in -1_i32..=1 {
-                for z in -1_i32..=1 {
+        let touches_masonry = [change.before.material, change.after.material]
+            .into_iter()
+            .any(|material| matches!(material, Material::Brick | Material::Concrete));
+        // Ordinary topology can change a neighboring masonry classification, whose derived cells
+        // add one more voxel of dependency. A masonry change can additionally toggle cut surfaces
+        // throughout the bounded visual halo. Both radii are shorter than CHUNK_EDGE, so one
+        // isolated change still invalidates at most 2^3 chunks.
+        let radius = if touches_masonry {
+            FRACTURE_RENDER_DEPENDENCY_RADIUS_VOXELS
+        } else {
+            2
+        };
+        for x in -radius..=radius {
+            for y in -radius..=radius {
+                for z in -radius..=radius {
                     chunks.insert(chunk_position(IVec3::new(
                         change.position.x.saturating_add(x),
                         change.position.y.saturating_add(y),
@@ -343,7 +353,7 @@ pub fn dirty_chunks(changes: &[VoxelChange]) -> Vec<IVec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DEFAULT_CONSTRUCTION_UNITS, Material, Voxel};
+    use crate::{DEFAULT_CONSTRUCTION_UNITS, Material, Voxel, mesh::mesh_chunk};
 
     #[test]
     fn playable_shot_crosses_codec_and_preserves_replica() {
@@ -418,15 +428,54 @@ mod tests {
     }
 
     #[test]
-    fn remeshing_only_crosses_touched_chunk_boundaries() {
+    fn ordinary_remeshing_only_crosses_bounded_chunk_boundaries() {
         let change = |position| VoxelChange {
             position,
-            before: Voxel::new(Material::Brick),
+            before: Voxel::new(Material::Wood),
             after: Voxel::AIR,
         };
         assert_eq!(dirty_chunks(&[change(IVec3::new(4, 5, 6))]).len(), 1);
         assert_eq!(dirty_chunks(&[change(IVec3::new(15, 5, 6))]).len(), 2);
         assert_eq!(dirty_chunks(&[change(IVec3::new(15, 0, 6))]).len(), 4);
         assert_eq!(dirty_chunks(&[change(IVec3::new(15, 0, -16))]).len(), 8);
+    }
+
+    #[test]
+    fn masonry_damage_invalidates_a_cross_chunk_fracture_halo() {
+        let intact = Voxel::new(Material::Brick);
+        let damaged = Voxel {
+            material: Material::Brick,
+            integrity: 224,
+        };
+        let damage_position = IVec3::new(10, 0, 0);
+        let mut world = World::default();
+        world.fill_box(IVec3::new(9, -1, 0), IVec3::new(18, 1, 0), intact);
+        world.set_voxel(IVec3::new(15, 0, 0), Voxel::AIR);
+
+        let neighboring_chunk = IVec3::new(1, 0, 0);
+        let before = mesh_chunk(&world, neighboring_chunk);
+        assert!(
+            before
+                .vertices
+                .iter()
+                .all(|vertex| vertex.fracture_depth < 0.0)
+        );
+
+        let change = VoxelChange {
+            position: damage_position,
+            before: intact,
+            after: damaged,
+        };
+        world.set_voxel(damage_position, damaged);
+        let after = mesh_chunk(&world, neighboring_chunk);
+
+        assert!(dirty_chunks(&[change]).contains(&neighboring_chunk));
+        assert!(
+            after
+                .vertices
+                .iter()
+                .any(|vertex| vertex.fracture_depth >= 0.0),
+            "damage in chunk zero must refresh the layered cut surface in chunk one"
+        );
     }
 }

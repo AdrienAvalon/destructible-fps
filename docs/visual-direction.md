@@ -47,6 +47,13 @@ Generation prompt (built-in image generation):
 - exact integer integrity is converted only after meshing into a render-only GPU damage ratio;
   deterministic aggregate, fracture, soot and crack synthesis changes damaged masonry and detached
   debris without adding a replicated field or altering collision;
+- exposed thin brick and concrete cuts within a fixed six-voxel, same-material damage halo reuse the
+  derived silhouette and carry a deterministic local depth in `[0, 1]`; the shader uses it to
+  distinguish the outer shell, mineral core, aggregate chips and a sparse rusty reinforcement
+  response without changing the authoritative voxel;
+- topology edits invalidate a conservative two-voxel render neighborhood, extended to seven around
+  masonry damage so a layered edge cannot remain stale across a chunk boundary; one isolated edit
+  still reaches at most eight chunks and all meshing remains off the presentation thread;
 - deterministic quarry banks make the smoother silhouette visible without changing the building,
   spawn, authoritative shot corridor, voxel fingerprints, physics, or network formats.
 
@@ -55,12 +62,13 @@ free and deterministic at the visual-input boundary.
 
 ## Promotion order
 
-1. Hybrid surface extraction (terrain and coarse static masonry fractures delivered): retain exact
-   cubes for intact authored architecture, derive smooth crack-free soil and stone from the same
-   voxel field, then add sub-voxel fracture contours and extend the derived representation to
-   detached bodies.
-2. Layered destruction: distinguish facade, aggregate, reinforcement, insulation and interior
-   surfaces; generate bounded local rubble and dust from authoritative fracture inputs.
+1. Hybrid surface extraction (terrain, coarse static masonry fractures and layered thin cut shading
+   delivered): retain exact cubes for intact authored architecture, derive smooth crack-free soil
+   and stone from the same voxel field, then add true sub-voxel fracture contours and extend the
+   derived representation to detached bodies.
+2. Layered destruction (render-only cut-depth foundation delivered): replace the procedural layer
+   approximation with authored facade, reinforcement, insulation and interior geometry; generate
+   bounded local rubble and dust from authoritative fracture inputs.
 3. Asset/material pipeline: versioned texture arrays, calibrated color/normal/roughness/metalness,
    mip generation, compression and aggressive LOD with deterministic fallbacks.
 4. Lighting/post: cascaded sun shadows, image-based sky lighting, reflection probes, HDR exposure,

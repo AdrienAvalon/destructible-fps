@@ -111,7 +111,7 @@ struct Game {
     accumulator: f32,
     fixed_step_index: u64,
     last_action: String,
-    showcase: bool,
+    showcase_view: Option<ShowcaseView>,
     mesh_scheduler: MeshScheduler,
     mesh_snapshot: Arc<World>,
     mesh_phase: MeshPhase,
@@ -123,7 +123,8 @@ struct Game {
 }
 
 impl Game {
-    fn new(window: Arc<Window>, showcase: bool) -> Result<Self, String> {
+    fn new(window: Arc<Window>, showcase_view: Option<ShowcaseView>) -> Result<Self, String> {
+        let showcase = showcase_view.is_some();
         let mut session = DemoSession::default();
         let last_action = if showcase {
             let detached = session
@@ -188,7 +189,7 @@ impl Game {
             accumulator: 0.0,
             fixed_step_index: 0,
             last_action,
-            showcase,
+            showcase_view,
             mesh_scheduler: MeshScheduler::new(),
             mesh_snapshot,
             mesh_phase: MeshPhase::InitialStreaming,
@@ -454,7 +455,7 @@ impl Game {
         let input = self.movement_input();
         let mut steps = 0;
         while self.accumulator >= FIXED_STEP_SECONDS && steps < 12 {
-            if !self.showcase {
+            if self.showcase_view.is_none() {
                 self.player
                     .step(self.session.world(), input, FIXED_STEP_SECONDS);
             }
@@ -474,10 +475,10 @@ impl Game {
             steps += 1;
         }
         let elapsed_seconds = now.duration_since(self.started).as_secs_f32();
-        let (camera_position, view_direction) = if self.showcase {
-            showcase_camera(elapsed_seconds)
-        } else {
-            (self.player.camera_position(), self.player.view_direction())
+        let (camera_position, view_direction) = match self.showcase_view {
+            Some(ShowcaseView::Orbit) => showcase_camera(elapsed_seconds),
+            Some(ShowcaseView::BreachCloseup) => breach_closeup_camera(elapsed_seconds),
+            None => (self.player.camera_position(), self.player.view_direction()),
         };
         self.pump_meshing(camera_position);
         match self
@@ -568,13 +569,15 @@ impl Game {
                 render.bodies,
                 self.session.bodies().len()
             ))
-        } else if self.showcase && render.players != showcase_players().len() {
+        } else if self.showcase_view.is_some() && render.players != showcase_players().len() {
             Some(format!(
                 "rendu joueur incomplet: {} avatars GPU pour {} attendus",
                 render.players,
                 showcase_players().len()
             ))
-        } else if self.showcase && sleeping_bodies != self.session.body_states().len() {
+        } else if self.showcase_view.is_some()
+            && sleeping_bodies != self.session.body_states().len()
+        {
             Some(format!(
                 "simulation physique incomplete: {sleeping_bodies}/{} corps endormis",
                 self.session.body_states().len()
@@ -594,7 +597,7 @@ impl Game {
 struct App {
     game: Option<Game>,
     exit_after: Option<Duration>,
-    showcase: bool,
+    showcase_view: Option<ShowcaseView>,
     failure: Option<String>,
 }
 
@@ -612,7 +615,7 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         };
-        match Game::new(Arc::new(window), self.showcase) {
+        match Game::new(Arc::new(window), self.showcase_view) {
             Ok(game) => self.game = Some(game),
             Err(error) => {
                 eprintln!("initialisation impossible: {error}");
@@ -722,18 +725,25 @@ fn prioritized_chunks(pending: &HashSet<IVec3>, focus: IVec3, limit: usize) -> V
 
 struct LaunchOptions {
     exit_after: Option<Duration>,
-    showcase: bool,
+    showcase_view: Option<ShowcaseView>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShowcaseView {
+    Orbit,
+    BreachCloseup,
 }
 
 fn launch_options() -> Result<LaunchOptions, Box<dyn Error>> {
     let mut arguments = std::env::args().skip(1);
     let mut options = LaunchOptions {
         exit_after: None,
-        showcase: false,
+        showcase_view: None,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--showcase" => options.showcase = true,
+            "--showcase" => options.showcase_view = Some(ShowcaseView::Orbit),
+            "--showcase-closeup" => options.showcase_view = Some(ShowcaseView::BreachCloseup),
             "--smoke-seconds" => {
                 let seconds: f64 = arguments
                     .next()
@@ -754,6 +764,13 @@ fn showcase_camera(elapsed_seconds: f32) -> (Vec3, Vec3) {
     let angle = elapsed_seconds.mul_add(0.105, -0.20);
     let position = Vec3::new(angle.sin() * 41.0, 11.5, angle.cos() * 41.0);
     let direction = (Vec3::new(0.0, 7.0, 0.0) - position).normalize();
+    (position, direction)
+}
+
+fn breach_closeup_camera(elapsed_seconds: f32) -> (Vec3, Vec3) {
+    let drift = (elapsed_seconds * 0.16).sin() * 0.45;
+    let position = Vec3::new(8.2 + drift, 6.4, 28.0);
+    let direction = (Vec3::new(-0.5, 4.4, 15.7) - position).normalize();
     (position, direction)
 }
 
@@ -786,7 +803,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App {
         game: None,
         exit_after: options.exit_after,
-        showcase: options.showcase,
+        showcase_view: options.showcase_view,
         failure: None,
     };
     event_loop.run_app(&mut app)?;
@@ -822,5 +839,16 @@ mod tests {
             prioritized_chunks(&pending, IVec3::default(), 2),
             vec![IVec3::new(-1, 0, 0), IVec3::new(1, 0, 0)]
         );
+    }
+
+    #[test]
+    fn breach_closeup_is_finite_normalized_and_closer_than_the_orbit() {
+        let (close_position, close_direction) = breach_closeup_camera(3.0);
+        let (orbit_position, _orbit_direction) = showcase_camera(3.0);
+
+        assert!(close_position.is_finite());
+        assert!(close_direction.is_finite());
+        assert!((close_direction.length() - 1.0).abs() < 0.000_001);
+        assert!(close_position.length() < orbit_position.length());
     }
 }

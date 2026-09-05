@@ -67,8 +67,9 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
 - hybrid chunk meshing with fixed-cache Surface Nets for soil/stone, exact authored architecture,
   six-direction seam proofs, adaptive diagonals and corner-aware remeshing (delivered for static
   terrain), plus integrity-thresholded derived brick/concrete breach edges, a fixed render-only GPU
-  damage channel and unique exact-side transition ownership (delivered as a coarse static fracture
-  pass); sub-voxel layered interiors, smooth detached fracture surfaces and mesh-buffer
+  damage channel, unique exact-side transition ownership, and bounded cross-chunk damage-halo cuts
+  with local-depth shell/core/aggregate/reinforcement shading (delivered as a coarse static fracture
+  pass); true sub-voxel layered geometry, smooth detached fracture surfaces and mesh-buffer
   deduplication remain;
 - deterministic screenshot scenes and image-difference regression thresholds.
 
@@ -239,7 +240,8 @@ documented tools and source assets.
 
 - calibrated physically based materials and physically plausible sun, sky, exposure, and atmosphere
   (procedural material/atmosphere foundation, hybrid natural terrain and coarse integrity-driven
-  masonry fracture shading delivered; calibration, authored inputs and HDR exposure remain);
+  masonry fracture plus layered cross-section shading delivered; calibration, authored geometry,
+  scanned inputs and HDR exposure remain);
 - terrain blending, decals, vegetation, weather, water, particles, volumetric dust, and destruction
   residue;
 - scalable indirect lighting/reflections with explicit quality tiers and stable temporal behavior;

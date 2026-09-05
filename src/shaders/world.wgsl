@@ -24,6 +24,7 @@ struct VertexInput {
     @location(4) metallic: f32,
     @location(5) material: u32,
     @location(10) damage: f32,
+    @location(11) fracture_depth: f32,
 };
 
 struct VertexOutput {
@@ -39,6 +40,7 @@ struct VertexOutput {
     @location(8) world_tangent: vec3<f32>,
     @location(9) world_bitangent: vec3<f32>,
     @location(10) @interpolate(flat) damage: f32,
+    @location(11) fracture_depth: f32,
 };
 
 struct BodyInstanceInput {
@@ -96,6 +98,7 @@ fn fill_vertex_output(
     output.world_tangent = normalize((model * vec4<f32>(tangent, 0.0)).xyz);
     output.world_bitangent = normalize((model * vec4<f32>(bitangent, 0.0)).xyz);
     output.damage = input.damage;
+    output.fracture_depth = input.fracture_depth;
     return output;
 }
 
@@ -208,6 +211,7 @@ fn sample_material(
     base_roughness: f32,
     base_metallic: f32,
     damage: f32,
+    fracture_depth: f32,
 ) -> SurfaceSample {
     let broad = fbm(uv * 0.8);
     let footprint = max(length(dpdx(uv)), length(dpdy(uv)));
@@ -288,6 +292,45 @@ fn sample_material(
         surface.albedo = mix(surface.albedo, fractured_albedo, exposed * 0.78);
         surface.albedo = surface.albedo * mix(1.0, 0.24, cracks * clamp(damage * 2.4, 0.0, 1.0));
         surface.roughness = max(surface.roughness, mix(surface.roughness, 0.98, exposed + cracks * 0.35));
+    }
+
+    if fracture_depth >= 0.0 && (material == 4u || material == 5u) {
+        let cut_damage = max(damage, 0.32);
+        let depth = clamp(fracture_depth, 0.0, 1.0);
+        let distance_from_core = abs(depth - 0.5);
+        let shell = smoothstep(0.085, 0.19, distance_from_core);
+        let coarse = value_noise(uv * 11.0 + vec2<f32>(13.7, -6.4));
+        let chips = smoothstep(0.61, 0.87, coarse);
+        let layer_noise = fbm(uv * 3.1 + vec2<f32>(7.3, -12.8));
+        var core_albedo = mix(
+            vec3<f32>(0.31, 0.28, 0.24),
+            vec3<f32>(0.46, 0.25, 0.14),
+            chips * 0.62,
+        );
+        if material == 5u {
+            core_albedo = mix(
+                vec3<f32>(0.29, 0.30, 0.30),
+                vec3<f32>(0.53, 0.49, 0.41),
+                chips * 0.74,
+            );
+        }
+        let ragged_shell = clamp(
+            shell + (layer_noise - 0.5) * mix(0.16, 0.42, cut_damage),
+            0.0,
+            1.0,
+        );
+        surface.albedo = mix(core_albedo, surface.albedo, ragged_shell);
+        surface.roughness = mix(0.98, surface.roughness, ragged_shell);
+
+        if material == 5u {
+            let bar_distance = abs(fract(uv.y * 0.42 + 0.5) - 0.5);
+            let rebar = (1.0 - smoothstep(0.018, 0.047, bar_distance))
+                * (1.0 - shell)
+                * clamp(cut_damage * 2.2, 0.0, 1.0);
+            surface.albedo = mix(surface.albedo, vec3<f32>(0.25, 0.075, 0.022), rebar * 0.92);
+            surface.roughness = mix(surface.roughness, 0.62, rebar);
+            surface.metallic = mix(surface.metallic, 0.48, rebar);
+        }
     }
     return surface;
 }
@@ -445,6 +488,7 @@ fn world_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
         input.albedo_roughness.w,
         input.metallic,
         input.damage,
+        input.fracture_depth,
     );
     let normal = perturb_normal(input, sampled.height);
     let light_direction = normalize(-globals.sun_fog.xyz);

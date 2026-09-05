@@ -1562,3 +1562,65 @@ rebar/interiors, scanned material assets, temporal reconstruction, image-based l
 dressing remain promotion gates. Graphify reported 2,244 nodes, 6,282 post-build edges, zero
 unverified code nodes and a fully fresh index; the affected view of `mesh_chunk` remained confined to
 meshing, rendering clients and their tests.
+
+## 2026-09-05 — bounded layered masonry cross-sections
+
+Source state: parent `d359075` plus the layered cross-section increment. The authoritative world,
+two-byte voxel, integer damage, collision, physics, fingerprints, snapshots and network formats are
+unchanged. An exposed brick or concrete voxel is classified as a fracture cut only when its opposite
+neighbor has the same material, one deterministic tangent axis is one voxel thick, and matching
+damaged masonry exists inside a fixed six-voxel planar halo. The selected axis is the lowest cardinal
+axis when two qualify. Each duplicated derived quad receives either the sentinel `-1` or a finite
+local-depth value in `[0, 1]`, so no triangle interpolates between the two contracts.
+
+The GPU vertex grew from 56 to 60 bytes. Its additional render-only depth drives deterministic outer
+shell, mineral core, aggregate-chip and sparse rusty reinforcement responses for masonry cuts. This
+is a shading and silhouette approximation, not actual facade/rebar geometry. A dedicated
+`--showcase-closeup` camera makes the distinction inspectable in
+[`07-layered-fracture-cross-sections.png`](screenshots/07-layered-fracture-cross-sections.png).
+
+The same halo is part of the remeshing contract. Masonry edits invalidate seven voxels in each axis
+(six for classification plus one derived-cell/exact-face dependency); other topology edits invalidate
+two. Since both radii are shorter than the 16-voxel chunk edge, one isolated edit still reaches no
+more than eight chunks. A regression constructs damage in chunk zero and proves that the newly
+layered cut in chunk one is both scheduled and regenerated. Glass remains on the exact, sentinel-only
+path. The 512-chunk bounded queues and off-thread immutable-snapshot worker remain unchanged.
+
+The representative release runs used a 1,440×900 logical window on the NVIDIA GeForce RTX 4050
+Laptop GPU through Vulkan. The close-up rendered 98,078 solid voxels, 48,684 quads, one detached body
+and two players; it submitted 72 world draws and 130 shadow draws. Its initial asynchronous streaming
+completed in 61.3 ms. The deterministic orbit of the same world streamed in 53.8 ms and submitted 90
+world draws plus 130 shadow draws. A separate ordinary-world Vulkan smoke passed with all pipelines.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 196 passed debug; 196 passed release |
+| Binary tests | 11 passed debug; 11 passed release |
+| Integration tests | 70 passed debug; 70 passed release |
+| Destruction p99, 500 events | 0.379 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.462 ms |
+| Physics p99, 1,024 bodies | 1.164 ms |
+| Snapshot encode + decode + install p99 | 13.395 ms |
+| Snapshot wire size | 1,181 frames / 1.351 MiB |
+| Close-up CPU frame-work p50 / p95 / p99 | 2.940 / 12.961 / 16.745 ms |
+| Close-up GPU shadows p50 / p95 / p99 | 0.066 / 0.095 / 0.096 ms |
+| Close-up GPU world + HUD p50 / p95 / p99 | 1.740 / 2.565 / 2.683 ms |
+| Close-up Vulkan GPU total p50 / p95 / p99 | 1.817 / 2.676 / 2.773 ms |
+| Close-up Vulkan GPU maximum | 2.855 ms |
+| Close-up Vulkan timestamp samples dropped | 0 |
+| Orbit Vulkan GPU total p50 / p95 / p99 | 3.834 / 4.056 / 4.097 ms |
+
+The close-up GPU p99 uses 16.6% of one 60 Hz frame and the orbit p99 uses 24.6%. These are
+point-in-time validation captures, not a controlled clock/power-normalized comparison with the
+parent. They demonstrate bounded cost, stable timestamps and visible breach layers; they do not
+establish photorealism. True sub-voxel fracture/reinforcement geometry, scanned calibrated materials,
+rubble and dust, temporal reconstruction, image-based lighting and world dressing remain explicit
+promotion gates.
+
+Claude Code's independent analysis initially blocked the design over ownership, interpolation and
+cache concerns. Codex retained per-quad ownership, finite sentinel separation and immutable complete
+world reads; the final Claude review accepted those points but found that the six-voxel visual halo
+was absent from render invalidation. The seven-voxel masonry radius and cross-chunk regression above
+close that finding. Graphify then reported 2,259 nodes, 6,345 post-build edges, zero unverified code
+nodes and a fresh index; `dirty_chunks` reaches only the two rendering demos and their tests, with no
+directed path to `AuthoritativeServer`.

@@ -86,7 +86,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
   fixed 17³-cell cache per chunk, distance-prioritized asynchronous initial streaming, and bounded
   background remeshing across every affected face, edge, or corner; sufficiently damaged brick and
   concrete reuse that bounded derived path for irregular static breach silhouettes while intact
-  architecture remains exact;
+  architecture remains exact; exposed one-voxel masonry cuts near the same authoritative damage
+  inherit that derived silhouette across chunk boundaries and carry a deterministic local depth;
 - bounded off-thread body meshing in local space, with fixed-capacity GPU instance transforms,
   independent body frustum culling, and participation in both world and shadow passes;
 - 60 Hz server-authoritative body motion in deterministic micrometre units, mass-weighted blast
@@ -102,7 +103,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map with 3×3 PCF filtering,
   energy-aware Cook-Torrance GGX, stable per-material procedural albedo/roughness/metalness and
-  micro-normal synthesis, an integrity-derived fracture/aggregate/crack response for masonry,
+  micro-normal synthesis, an integrity-derived fracture/aggregate/crack response for masonry, and
+  render-only facade, mineral-core, aggregate-chip and sparse reinforcement responses through
+  exposed breach thickness,
   screen-footprint detail fading, a view-correct atmospheric sky, altitude haze, single-transfer
   tone mapping, and a crosshair;
 - non-blocking real-GPU timestamp queries and bounded CPU/GPU p50/p95/p99 frame telemetry;
@@ -110,9 +113,10 @@ The Linux demo now combines the authoritative core with a real-time first-person
 
 This is a **first playable engineering slice**, not yet a photorealistic or production multiplayer
 game. The first realistic-material, atmosphere, and smooth hybrid-terrain foundations are live, but
-the new static masonry fracture silhouette is only a first coarse layer. Smooth detached fracture
-bodies, sub-voxel interiors/rebar, calibrated authored or scanned assets, vegetation, reflections,
-temporal anti-aliasing and post-processing remain visual gates. Exact convex contact manifolds,
+the new static masonry silhouette and layered cut shader are still a coarse procedural foundation.
+Smooth detached fracture bodies, true sub-voxel interiors and reinforcement geometry, calibrated
+authored or scanned assets, vegetation, reflections, temporal anti-aliasing and post-processing
+remain visual gates. Exact convex contact manifolds,
 gyroscopic response, deeper constraint-island convergence, progressive structural stress,
 remote-authority exposure, automated certificate issuance, first-person arms/weapon presentation,
 transport pacing and congestion control, audio, and large-world residency streaming also remain
@@ -156,6 +160,8 @@ constraint-island convergence are not claimed yet.
 ![Hybrid Surface Nets terrain around exact architecture](docs/screenshots/05-hybrid-natural-surface.png)
 
 ![Integrity-derived irregular masonry breach](docs/screenshots/06-irregular-masonry-fracture.png)
+
+![Layered procedural masonry cross-sections at the authoritative breach](docs/screenshots/07-layered-fracture-cross-sections.png)
 
 ## Run
 
@@ -331,6 +337,12 @@ For a reproducible orbit around an already damaged authoritative world (useful f
 
 ```bash
 cargo run --release --bin playable-demo -- --showcase
+```
+
+For the deterministic close view used to inspect breach thickness and material layers:
+
+```bash
+cargo run --release --bin playable-demo -- --showcase-closeup
 ```
 
 The window title reports FPS, frame time, solid voxel count, cursor state, and the most recent

@@ -101,6 +101,8 @@ pub enum SecureAuthorityLaunchError {
     },
     InvalidFileType(&'static str),
     UnsafeFilePermissions(&'static str),
+    UnsafeFileOwnership(&'static str),
+    PrivilegedProcess,
     OversizedFile {
         purpose: &'static str,
         bytes: u64,
@@ -127,6 +129,15 @@ impl fmt::Display for SecureAuthorityLaunchError {
             Self::InvalidFileType(purpose) => write!(formatter, "{purpose} is not a regular file"),
             Self::UnsafeFilePermissions(purpose) => {
                 write!(formatter, "unsafe permissions on {purpose}")
+            }
+            Self::UnsafeFileOwnership(purpose) => {
+                write!(formatter, "unsafe ownership on {purpose}")
+            }
+            Self::PrivilegedProcess => {
+                write!(
+                    formatter,
+                    "secure authority refuses a privileged process identity"
+                )
             }
             Self::OversizedFile {
                 purpose,
@@ -181,6 +192,7 @@ impl SecureAuthorityLaunchConfig {
     /// relative credential paths, non-loopback binds, invalid TLS material, invalid OIDC policy,
     /// and JWKS validity windows outside one minute to 24 hours.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, SecureAuthorityLaunchError> {
+        validate_runtime_identity()?;
         let config_bytes = read_bounded_file(
             path.as_ref(),
             "secure authority configuration",
@@ -584,7 +596,7 @@ fn validate_permissions(
     purpose: &'static str,
     permission_policy: FilePermissionPolicy,
 ) -> Result<(), SecureAuthorityLaunchError> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let disallowed = match permission_policy {
         FilePermissionPolicy::Integrity => 0o022,
@@ -593,7 +605,36 @@ fn validate_permissions(
     if metadata.permissions().mode() & disallowed != 0 {
         return Err(SecureAuthorityLaunchError::UnsafeFilePermissions(purpose));
     }
+    let effective_uid = rustix::process::geteuid().as_raw();
+    if !unix_file_owner_allowed(metadata.uid(), effective_uid, permission_policy) {
+        return Err(SecureAuthorityLaunchError::UnsafeFileOwnership(purpose));
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+const fn unix_file_owner_allowed(
+    owner_uid: u32,
+    effective_uid: u32,
+    permission_policy: FilePermissionPolicy,
+) -> bool {
+    match permission_policy {
+        FilePermissionPolicy::Integrity => owner_uid == 0 || owner_uid == effective_uid,
+        FilePermissionPolicy::Private => owner_uid == effective_uid,
+    }
+}
+
+#[cfg(unix)]
+fn validate_runtime_identity() -> Result<(), SecureAuthorityLaunchError> {
+    if !unix_process_identity_allowed(rustix::process::geteuid().as_raw()) {
+        return Err(SecureAuthorityLaunchError::PrivilegedProcess);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+const fn unix_process_identity_allowed(effective_uid: u32) -> bool {
+    effective_uid != 0
 }
 
 #[cfg(not(unix))]
@@ -602,6 +643,11 @@ fn validate_permissions(
     _purpose: &'static str,
     _permission_policy: FilePermissionPolicy,
 ) -> Result<(), SecureAuthorityLaunchError> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+const fn validate_runtime_identity() -> Result<(), SecureAuthorityLaunchError> {
     Ok(())
 }
 
@@ -1069,6 +1115,39 @@ mod tests {
         symlink(&fixture.key, &link).expect("private-key symlink");
 
         assert!(open_no_follow(&link).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_service_account_policy_rejects_root_and_foreign_file_owners() {
+        let service_uid = 1_000;
+        assert!(!unix_process_identity_allowed(0));
+        assert!(unix_process_identity_allowed(service_uid));
+        assert!(unix_file_owner_allowed(
+            service_uid,
+            service_uid,
+            FilePermissionPolicy::Private
+        ));
+        assert!(!unix_file_owner_allowed(
+            0,
+            service_uid,
+            FilePermissionPolicy::Private
+        ));
+        assert!(!unix_file_owner_allowed(
+            2_000,
+            service_uid,
+            FilePermissionPolicy::Private
+        ));
+        assert!(unix_file_owner_allowed(
+            0,
+            service_uid,
+            FilePermissionPolicy::Integrity
+        ));
+        assert!(!unix_file_owner_allowed(
+            2_000,
+            service_uid,
+            FilePermissionPolicy::Integrity
+        ));
     }
 
     #[test]

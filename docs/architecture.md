@@ -245,10 +245,10 @@ paths, non-regular files, certificates over 256 KiB or eight entries, private ke
 JWKS over 64 KiB. It requires exactly one PEM private key, verifies key/certificate compatibility
 through rustls, and parses the complete X.509 chain before opening the endpoint. Every certificate
 must be currently valid with at least 60 seconds remaining; the earliest expiry becomes a monotonic
-process shutdown deadline. On Unix, configuration, certificate, and JWKS files may
-not be group/world writable; the private key may have no group/world access. Credential content is
-never accepted through argv or printed. Windows remains loopback-only while installer-owned DACL
-validation is designed.
+process shutdown deadline. On Unix the standalone process refuses UID 0, the private key must belong
+to the service UID, and public trust inputs may belong only to root or that UID; their existing mode
+constraints remain mandatory. Credential content is never accepted through argv or printed. Windows
+remains loopback-only while installer-owned DACL validation is designed.
 
 Optional TLS reload retains only the fixed certificate/key paths, a bounded interval, and a shared
 monotonic deadline. Its worker performs the complete startup validation again before giving a narrow

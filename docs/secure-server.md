@@ -29,10 +29,11 @@ fields.
 | `max_ticks` | Optional positive fixed-tick limit; intended for bounded validation runs. |
 | `stop_after_commands` | Optional positive applied-command limit; intended for bounded validation runs. |
 
-On Unix, the configuration, certificate, JWKS, and optional discovery root bundle must not be
-group/world writable. The private key must have no group/world permissions, normally mode `0600`.
-Every file is opened only after link and regular-file type checks, then read through a second size
-bound. On Windows the current
+On Unix, the standalone authority refuses effective UID 0. The configuration, certificate, JWKS,
+and optional discovery root bundle must be owned by either root or the service UID and must not be
+group/world writable. The private key must be owned exactly by the service UID with no group/world
+permissions, normally mode `0600`. Every file is opened only after link and regular-file type
+checks, then read through a second size bound. On Windows the current
 standard-library implementation cannot validate DACL ownership; the loopback restriction remains a
 mandatory boundary until an installer-owned service ACL check is implemented.
 

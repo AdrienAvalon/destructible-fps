@@ -19,7 +19,7 @@ non-loopback variant. Configuration fields or operator assertions alone do not c
 | Resource abuse | Per-session datagram burst, queue pressure, pending handshake cap, and authority capacity | Secure authority rate-limit test plus bounded constants and unit tests | Partial: add concurrent hostile-process load |
 | Loss and reordering | Distinct delay, duplication, and loss traces with bounded repair | Four-client real-process trace replay | Pass for deterministic loopback; add WAN profiles |
 | Trust outage | Discovery or renewal repeatedly fails until monotonic expiry | Refresh controller tests and deadline shutdown logic | Partial: add process-level expiry outage cases |
-| Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix permission and no-follow tests | Partial: Windows service DACL validation missing |
+| Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix non-root service identity, owner, mode, and no-follow tests | Partial: parent-directory policy and Windows service DACL validation missing |
 
 Every executable row is part of the normal test suite; no network namespace, firewall exception, or
 remote bind is needed to rehearse it. A failure in any row blocks promotion.

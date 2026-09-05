@@ -1156,3 +1156,28 @@ This makes stalled certificate automation distinguishable from effective renewal
 pretend to issue certificates. The authority remains loopback-only until the external provisioner,
 expiry-outage rehearsal, platform ACLs, hostile-load matrix, and reviewed private-network policy are
 all proven.
+
+## 2026-09-05 — Unix service identity and trust ownership
+
+Source state: parent `ab9d53c` plus the Unix account-policy increment. The file-configured standalone
+authority now rejects effective UID 0 before reading its configuration. Every opened trust input must
+belong to either root or the effective service UID; the private key is stricter and must belong
+exactly to the service UID. Existing no-follow, regular-file, size, and mode checks still run on the
+opened descriptor. This prevents a writable directory from substituting a foreign-owned JWKS or
+configuration file that merely has non-writable mode bits.
+
+The policy is Unix-specific and leaves the server loopback-only. Rootless local fixture and real
+process tests pass under UID 1000. Windows remains blocked pending installer-owned DACL and reparse
+point validation; parent-directory ownership and replacement rights also remain an explicit gate.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 154 passed debug; 154 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 51 passed debug; 51 passed release |
+| Destruction p99, 500 events | 0.344 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.318 ms |
+| Physics p99, 1,024 bodies | 1.191 ms |
+| Snapshot encode + decode + install p99 | 9.459 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.247 ms |
+| Vulkan timestamp samples dropped | 0 |

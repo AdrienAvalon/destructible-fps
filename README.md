@@ -220,9 +220,10 @@ runtime now connects QUIC admissions and encrypted datagrams to the same authori
 fail-closed file configuration. It still rejects non-loopback binds pending trusted online key
 provisioning, automated certificate issuance, platform ACL checks, and the remote-exposure test gate.
 Startup parses every certificate in the bounded chain, requires its current validity and at least 60
-seconds remaining, then maps the earliest expiry to a monotonic shutdown deadline. On Unix every
-trust file is opened with kernel `O_NOFOLLOW` protection before the opened descriptor is validated,
-closing final-component link-swap races. An optional
+seconds remaining, then maps the earliest expiry to a monotonic shutdown deadline. On Unix the
+standalone process refuses effective UID 0, requires the private key to belong to its service UID,
+accepts other trust files only from root or that UID, and opens every trust file with kernel
+`O_NOFOLLOW` protection before validating the opened descriptor. An optional
 bounded file watcher atomically validates replacement certificate/key pairs and changes only future
 QUIC handshakes; existing sessions are not disrupted. It distinguishes an unchanged valid check from
 a newly installed public certificate chain without hashing or logging private-key material. The secure

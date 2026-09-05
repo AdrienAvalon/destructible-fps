@@ -2,8 +2,9 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use crate::{CHUNK_EDGE, IVec3, Material, World};
+use crate::{CHUNK_EDGE, IVec3, Material, RigidBodyDescriptor, Voxel, World};
 use bytemuck::{Pod, Zeroable};
+use std::collections::HashSet;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -19,6 +20,14 @@ pub struct Vertex {
 pub struct CpuMesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+}
+
+#[derive(Debug)]
+pub struct CpuBodyMesh {
+    pub body_id: u128,
+    pub origin: IVec3,
+    pub maximum: IVec3,
+    pub mesh: CpuMesh,
 }
 
 impl CpuMesh {
@@ -129,48 +138,9 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
                 if !voxel.is_solid() {
                     continue;
                 }
-                let base_color = material_surface(voxel.material);
-                let integrity = 0.65 + 0.35 * f32::from(voxel.integrity) / 255.0;
-                let surface = [
-                    base_color[0] * integrity,
-                    base_color[1] * integrity,
-                    base_color[2] * integrity,
-                    base_color[3],
-                ];
-                for face in &FACES {
-                    let neighbor = IVec3::new(
-                        position.x + face.neighbor.x,
-                        position.y + face.neighbor.y,
-                        position.z + face.neighbor.z,
-                    );
-                    if world.voxel(neighbor).is_solid() {
-                        continue;
-                    }
-                    let Ok(first) = u32::try_from(mesh.vertices.len()) else {
-                        return mesh;
-                    };
-                    for corner in face.corners {
-                        mesh.vertices.push(Vertex {
-                            position: [
-                                position.x as f32 + corner[0],
-                                position.y as f32 + corner[1],
-                                position.z as f32 + corner[2],
-                            ],
-                            normal: face.normal,
-                            albedo_roughness: surface,
-                            ambient_occlusion: vertex_ambient_occlusion(
-                                world, position, face, corner,
-                            ),
-                        });
-                    }
-                    mesh.indices.extend_from_slice(&[
-                        first,
-                        first + 1,
-                        first + 2,
-                        first,
-                        first + 2,
-                        first + 3,
-                    ]);
+                let occupied = |sample| world.voxel(sample).is_solid();
+                if !append_voxel(&mut mesh, position, position, voxel, &occupied) {
+                    return mesh;
                 }
             }
         }
@@ -178,13 +148,98 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
     mesh
 }
 
-fn vertex_ambient_occlusion(world: &World, position: IVec3, face: &Face, corner: [f32; 3]) -> f32 {
+/// Builds an immutable local-space mesh for a detached body. Its origin is kept separately so the
+/// renderer can move it by updating a compact instance transform instead of rewriting vertices.
+#[must_use]
+pub fn mesh_body(body: &RigidBodyDescriptor) -> CpuBodyMesh {
+    let occupied: HashSet<_> = body
+        .voxels
+        .iter()
+        .map(|body_voxel| body_voxel.position)
+        .collect();
+    let is_occupied = |sample| occupied.contains(&sample);
+    let mut mesh = CpuMesh::default();
+    for body_voxel in &body.voxels {
+        let local = IVec3::new(
+            body_voxel.position.x - body.minimum.x,
+            body_voxel.position.y - body.minimum.y,
+            body_voxel.position.z - body.minimum.z,
+        );
+        if !append_voxel(
+            &mut mesh,
+            body_voxel.position,
+            local,
+            body_voxel.voxel,
+            &is_occupied,
+        ) {
+            break;
+        }
+    }
+    CpuBodyMesh {
+        body_id: body.id,
+        origin: body.minimum,
+        maximum: body.maximum,
+        mesh,
+    }
+}
+
+fn append_voxel(
+    mesh: &mut CpuMesh,
+    occupancy_position: IVec3,
+    vertex_position: IVec3,
+    voxel: Voxel,
+    occupied: &impl Fn(IVec3) -> bool,
+) -> bool {
+    let base_color = material_surface(voxel.material);
+    let integrity = 0.65 + 0.35 * f32::from(voxel.integrity) / 255.0;
+    let surface = [
+        base_color[0] * integrity,
+        base_color[1] * integrity,
+        base_color[2] * integrity,
+        base_color[3],
+    ];
+    for face in &FACES {
+        if occupied(add(occupancy_position, face.neighbor)) {
+            continue;
+        }
+        let Ok(first) = u32::try_from(mesh.vertices.len()) else {
+            return false;
+        };
+        for corner in face.corners {
+            mesh.vertices.push(Vertex {
+                position: [
+                    vertex_position.x as f32 + corner[0],
+                    vertex_position.y as f32 + corner[1],
+                    vertex_position.z as f32 + corner[2],
+                ],
+                normal: face.normal,
+                albedo_roughness: surface,
+                ambient_occlusion: vertex_ambient_occlusion(
+                    occupancy_position,
+                    face,
+                    corner,
+                    occupied,
+                ),
+            });
+        }
+        mesh.indices
+            .extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+    }
+    true
+}
+
+fn vertex_ambient_occlusion(
+    position: IVec3,
+    face: &Face,
+    corner: [f32; 3],
+    occupied: &impl Fn(IVec3) -> bool,
+) -> f32 {
     let outside = add(position, face.neighbor);
     let side_u = signed_tangent(face.tangent_u, corner);
     let side_v = signed_tangent(face.tangent_v, corner);
-    let occupied_u = world.voxel(add(outside, side_u)).is_solid();
-    let occupied_v = world.voxel(add(outside, side_v)).is_solid();
-    let occupied_corner = world.voxel(add(add(outside, side_u), side_v)).is_solid();
+    let occupied_u = occupied(add(outside, side_u));
+    let occupied_v = occupied(add(outside, side_v));
+    let occupied_corner = occupied(add(add(outside, side_u), side_v));
     let level = if occupied_u && occupied_v {
         0
     } else {
@@ -211,7 +266,11 @@ fn signed_tangent(tangent: IVec3, corner: [f32; 3]) -> IVec3 {
 }
 
 const fn add(left: IVec3, right: IVec3) -> IVec3 {
-    IVec3::new(left.x + right.x, left.y + right.y, left.z + right.z)
+    IVec3::new(
+        left.x.saturating_add(right.x),
+        left.y.saturating_add(right.y),
+        left.z.saturating_add(right.z),
+    )
 }
 
 const fn material_surface(material: Material) -> [f32; 4] {
@@ -260,5 +319,33 @@ mod tests {
         let mesh = mesh_chunk(&world, IVec3::new(0, 0, 0));
         assert!((mesh.vertices[0].ambient_occlusion - 0.42).abs() < f32::EPSILON);
         assert!((mesh.vertices[2].ambient_occlusion - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn body_mesh_is_local_and_culls_only_its_internal_faces() {
+        use crate::{BodyLimits, structural::describe_island};
+
+        let mut world = World::default();
+        world.fill_box(
+            IVec3::new(10, 20, -4),
+            IVec3::new(11, 20, -4),
+            Voxel::new(Material::Wood),
+        );
+        let island = describe_island(&world, vec![IVec3::new(10, 20, -4), IVec3::new(11, 20, -4)]);
+        let body =
+            RigidBodyDescriptor::from_detached_island(&world, &island, BodyLimits::default())
+                .expect("connected body");
+
+        let body_mesh = mesh_body(&body);
+        assert_eq!(body_mesh.origin, IVec3::new(10, 20, -4));
+        assert_eq!(body_mesh.maximum, IVec3::new(11, 20, -4));
+        assert_eq!(body_mesh.mesh.exposed_faces(), 10);
+        assert!(
+            body_mesh
+                .mesh
+                .vertices
+                .iter()
+                .all(|vertex| vertex.position[0] >= 0.0 && vertex.position[0] <= 2.0)
+        );
     }
 }

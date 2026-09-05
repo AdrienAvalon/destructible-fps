@@ -71,6 +71,15 @@ pub fn demo_world() -> World {
         IVec3::new(-1, 7, 14),
         Voxel::new(Material::Wood),
     );
+
+    // A deliberately fragile test column lets the showcase and GPU smoke exercise authoritative
+    // structural detachment and rigid-body rendering before the main facade is breached.
+    world.set_voxel(IVec3::new(0, 1, 24), Voxel::new(Material::Glass));
+    world.fill_box(
+        IVec3::new(0, 2, 24),
+        IVec3::new(0, 6, 24),
+        Voxel::new(Material::Wood),
+    );
     world
 }
 

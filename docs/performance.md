@@ -61,8 +61,8 @@ cargo run --release --bin destruction-benchmark -- --events 500
 
 The representative multi-material scene completed 500 server-authoritative destruction, structural
 analysis, body promotion, protocol-v2 fragmentation, reordering, decode, reassembly,
-client-application, and final-verification cycles at 20,330 events/s. Event latency was 0.013 ms
-p50, 0.226 ms p95, and 0.451 ms p99, or 2.7% of one 60 Hz frame budget. The run produced 847
+client-application, and final-verification cycles at 19,293 events/s. Event latency was 0.014 ms
+p50, 0.250 ms p95, and 0.400 ms p99, or 2.4% of one 60 Hz frame budget. The run produced 847
 application datagrams (0.525 MiB), fractured 13,009 voxels, detached 1,361 voxels into 32 active
 bodies, and ended with identical static-world and body-set state on server and client.
 
@@ -80,20 +80,36 @@ foundation path, computes mass/bounds, and reproduces the same 128-bit island fi
 
 | Measurement | Result |
 |---|---:|
-| Combined throughput | 256 analyses and promotions/s |
-| Topology analysis p50 | 2.592 ms |
-| Topology analysis p95 | 2.624 ms |
-| Topology analysis p99 | 2.691 ms |
-| Body promotion p50 | 1.285 ms |
-| Body promotion p95 | 1.327 ms |
-| Body promotion p99 | 1.333 ms |
-| Combined p50 | 3.880 ms |
-| Combined p95 | 3.940 ms |
-| Combined p99 | 3.995 ms |
-| Combined max | 4.007 ms |
+| Combined throughput | 247 analyses and promotions/s |
+| Topology analysis p50 | 2.651 ms |
+| Topology analysis p95 | 2.798 ms |
+| Topology analysis p99 | 2.917 ms |
+| Body promotion p50 | 1.347 ms |
+| Body promotion p95 | 1.424 ms |
+| Body promotion p99 | 1.510 ms |
+| Combined p50 | 4.009 ms |
+| Combined p95 | 4.209 ms |
+| Combined p99 | 4.371 ms |
+| Combined max | 4.613 ms |
 
 The promotion step revalidates the read-only island proof, canonical material voxels, six-neighbour
 connectivity and identity before computing fixed-unit centre of mass and diagonal inertia. The
 combined result is below the 12 ms server-work target on this fixture. Static-world detachment and
 replication are integrated separately in the end-to-end benchmark; fixed-step motion, collision
 solving, sleeping, and progressive stress remain later promotion gates.
+
+## 2026-09-05 — replicated body rendering
+
+Command:
+
+```bash
+cargo run --release --bin playable-demo -- --showcase --smoke-seconds 5
+```
+
+The deterministic showcase first severed a fragile support to guarantee one replicated body, then
+breached the main facade. Body geometry was built by the same single-queue bounded background worker
+as chunk geometry, in local coordinates, and uploaded into a fixed 1,024-instance transform arena.
+The Vulkan run reported 1/1 body visible, 90/128 chunks visible, 91 world draws, and 129 shadow draws.
+GPU total was 0.177 ms p50, 0.207 ms p95, 0.211 ms p99, and 0.227 ms maximum across 2,161 completed
+samples, with zero dropped timestamp samples. The scene is intentionally small: this validates the
+body shader, upload, culling, and draw paths, not the final active-body budget.

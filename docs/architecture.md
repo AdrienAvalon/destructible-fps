@@ -73,6 +73,8 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
   bounds, canonical geometry, and stable identity (delivered);
 - atomic static-world detachment and protocol-v2 body replication with independent fingerprints,
   hostile-input limits, and replica reconstruction (delivered);
+- local-space body meshes produced by the bounded background worker, fixed-capacity GPU transform
+  instances, body frustum culling, and world/shadow rendering (delivered);
 - persistent foundation and material constraint graph integrated into authoritative transactions;
 - compression, tension, shear, and connection limits by material;
 - local stress propagation after damage;

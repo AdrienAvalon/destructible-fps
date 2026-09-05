@@ -4,7 +4,8 @@
 
 use crate::{
     CHUNK_EDGE, IVec3,
-    mesh::{CpuMesh, Vertex},
+    mesh::{CpuBodyMesh, CpuMesh, Vertex},
+    replication::MAX_ACTIVE_BODIES,
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -21,6 +22,7 @@ const GPU_TIMESTAMP_COUNT: u32 = 4;
 const GPU_TIMESTAMP_BYTES: u64 = 4 * 8;
 const GPU_READBACK_SLOTS: usize = 4;
 const MAX_COMPLETED_GPU_SAMPLES: usize = 16;
+const BODY_INSTANCE_BYTES: u64 = 64;
 const SHADER: &str = include_str!("shaders/world.wgsl");
 
 #[repr(C)]
@@ -33,17 +35,35 @@ struct Globals {
     display: [f32; 4],
 }
 
-struct GpuChunk {
+struct GpuMesh {
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
     index_count: u32,
 }
+
+struct GpuBody {
+    mesh: GpuMesh,
+    instance_slot: u32,
+    world_minimum: Vec3,
+    world_maximum: Vec3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BodyInstance {
+    model: [[f32; 4]; 4],
+}
+
+const _: () = assert!(size_of::<BodyInstance>() == 64);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderStats {
     pub chunks: usize,
     pub exposed_faces: usize,
     pub visible_chunks: usize,
+    pub bodies: usize,
+    pub body_faces: usize,
+    pub visible_bodies: usize,
     pub world_draw_calls: usize,
     pub shadow_draw_calls: usize,
 }
@@ -225,13 +245,17 @@ pub struct Renderer {
     _shadow_texture: wgpu::Texture,
     shadow_view: wgpu::TextureView,
     shadow_pipeline: wgpu::RenderPipeline,
+    body_shadow_pipeline: wgpu::RenderPipeline,
     world_pipeline: wgpu::RenderPipeline,
+    body_world_pipeline: wgpu::RenderPipeline,
     crosshair_pipeline: wgpu::RenderPipeline,
     globals_buffer: wgpu::Buffer,
+    body_instance_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
     shadow_sampling_bind_group: wgpu::BindGroup,
     gpu_profiler: Option<GpuProfiler>,
-    chunks: HashMap<IVec3, GpuChunk>,
+    chunks: HashMap<IVec3, GpuMesh>,
+    bodies: HashMap<u128, GpuBody>,
     stats: RenderStats,
 }
 
@@ -307,6 +331,12 @@ impl Renderer {
             label: Some("camera and lighting globals"),
             contents: bytemuck::bytes_of(&globals),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let body_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rigid body instance transforms"),
+            size: u64::try_from(MAX_ACTIVE_BODIES).unwrap_or(u64::MAX) * BODY_INSTANCE_BYTES,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         let (shadow_texture, shadow_view) = create_shadow_map(&device);
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -403,6 +433,17 @@ impl Renderer {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &vertex_attributes,
         };
+        let body_instance_attributes = wgpu::vertex_attr_array![
+            4 => Float32x4,
+            5 => Float32x4,
+            6 => Float32x4,
+            7 => Float32x4
+        ];
+        let body_instance_layout = wgpu::VertexBufferLayout {
+            array_stride: size_of::<BodyInstance>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &body_instance_attributes,
+        };
         let color_target = wgpu::ColorTargetState {
             format: config.format,
             blend: None,
@@ -440,6 +481,45 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let body_world_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rigid body world pipeline"),
+            layout: Some(&world_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("body_vertex"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[
+                    Some(vertex_layout.clone()),
+                    Some(body_instance_layout.clone()),
+                ],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("world_fragment"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("directional shadow pipeline"),
             layout: Some(&globals_pipeline_layout),
@@ -447,7 +527,38 @@ impl Renderer {
                 module: &shader,
                 entry_point: Some("shadow_vertex"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(vertex_layout)],
+                buffers: &[Some(vertex_layout.clone())],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
+        let body_shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rigid body directional shadow pipeline"),
+            layout: Some(&globals_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("body_shadow_vertex"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Some(vertex_layout), Some(body_instance_layout)],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -514,14 +625,18 @@ impl Renderer {
             _shadow_texture: shadow_texture,
             shadow_view,
             shadow_pipeline,
+            body_shadow_pipeline,
             config,
             world_pipeline,
+            body_world_pipeline,
             crosshair_pipeline,
             globals_buffer,
+            body_instance_buffer,
             globals_bind_group,
             shadow_sampling_bind_group,
             gpu_profiler,
             chunks: HashMap::new(),
+            bodies: HashMap::new(),
             stats: RenderStats::default(),
         };
         Ok(renderer)
@@ -563,29 +678,85 @@ impl Renderer {
             self.chunks.remove(&chunk);
             return;
         }
-        let index_count = u32::try_from(mesh.indices.len()).expect("chunk index count fits in u32");
+        self.chunks
+            .insert(chunk, self.create_gpu_mesh(mesh, "chunk"));
+    }
+
+    /// Uploads body meshes already produced by the bounded background worker.
+    ///
+    /// # Errors
+    ///
+    /// Rejects more bodies than the fixed GPU instance arena can address.
+    pub fn upload_body_meshes(&mut self, meshes: Vec<CpuBodyMesh>) -> Result<(), String> {
+        for body in meshes {
+            if body.mesh.indices.is_empty() {
+                continue;
+            }
+            let instance_slot = if let Some(existing) = self.bodies.get(&body.body_id) {
+                existing.instance_slot
+            } else {
+                u32::try_from(self.bodies.len()).map_err(|_| "too many rendered bodies")?
+            };
+            if usize::try_from(instance_slot).unwrap_or(usize::MAX) >= MAX_ACTIVE_BODIES {
+                return Err(format!(
+                    "rigid-body instance arena exhausted at {MAX_ACTIVE_BODIES} bodies"
+                ));
+            }
+            let origin = Vec3::new(
+                body.origin.x as f32,
+                body.origin.y as f32,
+                body.origin.z as f32,
+            );
+            let maximum = Vec3::new(
+                body.maximum.x.saturating_add(1) as f32,
+                body.maximum.y.saturating_add(1) as f32,
+                body.maximum.z.saturating_add(1) as f32,
+            );
+            let instance = BodyInstance {
+                model: Mat4::from_translation(origin).to_cols_array_2d(),
+            };
+            let offset = u64::from(instance_slot) * BODY_INSTANCE_BYTES;
+            self.queue.write_buffer(
+                &self.body_instance_buffer,
+                offset,
+                bytemuck::bytes_of(&instance),
+            );
+            self.bodies.insert(
+                body.body_id,
+                GpuBody {
+                    mesh: self.create_gpu_mesh(&body.mesh, "rigid body"),
+                    instance_slot,
+                    world_minimum: origin,
+                    world_maximum: maximum,
+                },
+            );
+        }
+        self.refresh_stats();
+        Ok(())
+    }
+
+    fn create_gpu_mesh(&self, mesh: &CpuMesh, label: &str) -> GpuMesh {
+        let index_count =
+            u32::try_from(mesh.indices.len()).expect("bounded mesh index count fits in u32");
         let vertex = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("chunk vertices"),
+                label: Some(label),
                 contents: bytemuck::cast_slice(&mesh.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
         let index = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("chunk indices"),
+                label: Some(label),
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        self.chunks.insert(
-            chunk,
-            GpuChunk {
-                vertex,
-                index,
-                index_count,
-            },
-        );
+        GpuMesh {
+            vertex,
+            index,
+            index_count,
+        }
     }
 
     fn refresh_stats(&mut self) {
@@ -594,6 +765,12 @@ impl Renderer {
             .chunks
             .values()
             .map(|chunk| chunk.index_count as usize / 6)
+            .sum();
+        self.stats.bodies = self.bodies.len();
+        self.stats.body_faces = self
+            .bodies
+            .values()
+            .map(|body| body.mesh.index_count as usize / 6)
             .sum();
     }
 
@@ -674,9 +851,17 @@ impl Renderer {
             .filter(|(position, _chunk)| chunk_intersects_frustum(**position, view_projection))
             .map(|(_position, chunk)| chunk)
             .collect();
+        let visible_bodies: Vec<_> = self
+            .bodies
+            .values()
+            .filter(|body| {
+                aabb_intersects_frustum(body.world_minimum, body.world_maximum, view_projection)
+            })
+            .collect();
         self.stats.visible_chunks = visible_chunks.len();
-        self.stats.world_draw_calls = visible_chunks.len();
-        self.stats.shadow_draw_calls = self.chunks.len();
+        self.stats.visible_bodies = visible_bodies.len();
+        self.stats.world_draw_calls = visible_chunks.len() + visible_bodies.len();
+        self.stats.shadow_draw_calls = self.chunks.len() + self.bodies.len();
         let shadow_timestamp_writes = self
             .gpu_profiler
             .as_ref()
@@ -702,6 +887,16 @@ impl Renderer {
                 shadow_pass.set_vertex_buffer(0, chunk.vertex.slice(..));
                 shadow_pass.set_index_buffer(chunk.index.slice(..), wgpu::IndexFormat::Uint32);
                 shadow_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+            }
+            shadow_pass.set_pipeline(&self.body_shadow_pipeline);
+            for body in self.bodies.values() {
+                shadow_pass.set_vertex_buffer(0, body.mesh.vertex.slice(..));
+                shadow_pass.set_vertex_buffer(
+                    1,
+                    body_instance_slice(&self.body_instance_buffer, body.instance_slot),
+                );
+                shadow_pass.set_index_buffer(body.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                shadow_pass.draw_indexed(0..body.mesh.index_count, 0, 0..1);
             }
         }
         let world_timestamp_writes = self
@@ -743,6 +938,16 @@ impl Renderer {
                 pass.set_vertex_buffer(0, chunk.vertex.slice(..));
                 pass.set_index_buffer(chunk.index.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+            }
+            pass.set_pipeline(&self.body_world_pipeline);
+            for body in &visible_bodies {
+                pass.set_vertex_buffer(0, body.mesh.vertex.slice(..));
+                pass.set_vertex_buffer(
+                    1,
+                    body_instance_slice(&self.body_instance_buffer, body.instance_slot),
+                );
+                pass.set_index_buffer(body.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..body.mesh.index_count, 0, 0..1);
             }
             pass.set_pipeline(&self.crosshair_pipeline);
             pass.draw(0..12, 0..1);
@@ -786,6 +991,10 @@ fn chunk_intersects_frustum(chunk: IVec3, view_projection: Mat4) -> bool {
     let edge = CHUNK_EDGE as f32;
     let minimum = Vec3::new(chunk.x as f32, chunk.y as f32, chunk.z as f32) * edge;
     let maximum = minimum + Vec3::splat(edge);
+    aabb_intersects_frustum(minimum, maximum, view_projection)
+}
+
+fn aabb_intersects_frustum(minimum: Vec3, maximum: Vec3, view_projection: Mat4) -> bool {
     let corners = [
         Vec3::new(minimum.x, minimum.y, minimum.z),
         Vec3::new(maximum.x, minimum.y, minimum.z),
@@ -804,6 +1013,11 @@ fn chunk_intersects_frustum(chunk: IVec3, view_projection: Mat4) -> bool {
         || corners.iter().all(|corner| corner.y > corner.w)
         || corners.iter().all(|corner| corner.z < 0.0)
         || corners.iter().all(|corner| corner.z > corner.w))
+}
+
+fn body_instance_slice(buffer: &wgpu::Buffer, instance_slot: u32) -> wgpu::BufferSlice<'_> {
+    let start = u64::from(instance_slot) * BODY_INSTANCE_BYTES;
+    buffer.slice(start..start + BODY_INSTANCE_BYTES)
 }
 
 fn non_zero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {

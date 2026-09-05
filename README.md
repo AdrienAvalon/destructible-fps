@@ -26,6 +26,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
 - face-culled chunk meshes, distance-prioritized asynchronous initial streaming, and bounded
   background remeshing limited to chunks whose visible boundary changed;
+- bounded off-thread body meshing in local space, with fixed-capacity GPU instance transforms,
+  independent body frustum culling, and participation in both world and shadow passes;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map, procedural material
@@ -42,7 +44,8 @@ The first server-side structural pipeline is now integrated. A deterministic bou
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
 canonical detached-island proofs. The server revalidates each proof, derives integer-millimetre mass
 properties, removes its voxels from the static world, and replicates the new body atomically. The
-body still remains at its spawn transform until the fixed-step solver is added.
+body is rendered from its preserved material voxels but remains at its spawn transform until the
+fixed-step solver is added.
 
 ## Screenshots
 

@@ -31,6 +31,17 @@ struct VertexOutput {
     @location(4) light_clip_position: vec4<f32>,
 };
 
+struct BodyInstanceInput {
+    @location(4) model_0: vec4<f32>,
+    @location(5) model_1: vec4<f32>,
+    @location(6) model_2: vec4<f32>,
+    @location(7) model_3: vec4<f32>,
+};
+
+fn body_model(input: BodyInstanceInput) -> mat4x4<f32> {
+    return mat4x4<f32>(input.model_0, input.model_1, input.model_2, input.model_3);
+}
+
 @vertex
 fn world_vertex(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
@@ -44,8 +55,30 @@ fn world_vertex(input: VertexInput) -> VertexOutput {
 }
 
 @vertex
+fn body_vertex(input: VertexInput, instance: BodyInstanceInput) -> VertexOutput {
+    let model = body_model(instance);
+    let world_position = model * vec4<f32>(input.position, 1.0);
+    var output: VertexOutput;
+    output.clip_position = globals.view_projection * world_position;
+    output.world_position = world_position.xyz;
+    output.normal = normalize((model * vec4<f32>(input.normal, 0.0)).xyz);
+    output.albedo_roughness = input.albedo_roughness;
+    output.ambient_occlusion = input.ambient_occlusion;
+    output.light_clip_position = globals.light_view_projection * world_position;
+    return output;
+}
+
+@vertex
 fn shadow_vertex(input: VertexInput) -> @builtin(position) vec4<f32> {
     return globals.light_view_projection * vec4<f32>(input.position, 1.0);
+}
+
+@vertex
+fn body_shadow_vertex(
+    input: VertexInput,
+    instance: BodyInstanceInput,
+) -> @builtin(position) vec4<f32> {
+    return globals.light_view_projection * body_model(instance) * vec4<f32>(input.position, 1.0);
 }
 
 fn hash(position: vec3<f32>) -> f32 {

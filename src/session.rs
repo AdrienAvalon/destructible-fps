@@ -2,12 +2,12 @@
 
 use crate::{
     AuthoritativeServer, CHUNK_EDGE, ClientReplica, CodecError, CommandError, DestructionReport,
-    ExplosionCommand, FrameAssembler, IVec3, ReplicationError, VoxelChange, World, chunk_position,
-    decode_frame, demo_world, encode_frames, player::raycast,
+    ExplosionCommand, FrameAssembler, IVec3, ReplicationError, RigidBodyDescriptor, VoxelChange,
+    World, chunk_position, decode_frame, demo_world, encode_frames, player::raycast,
 };
 use core::fmt;
 use glam::Vec3;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 const CLIENT_ID: u64 = 1;
 const DATAGRAM_MTU: usize = 1_200;
@@ -25,7 +25,7 @@ pub struct ShotResult {
     pub datagrams: usize,
     pub encoded_bytes: usize,
     pub dirty_chunks: Vec<IVec3>,
-    pub spawned_bodies: usize,
+    pub spawned_body_ids: Vec<u128>,
     pub active_bodies: usize,
 }
 
@@ -103,6 +103,11 @@ impl DemoSession {
         self.client.world()
     }
 
+    #[must_use]
+    pub const fn bodies(&self) -> &BTreeMap<u128, RigidBodyDescriptor> {
+        self.client.bodies()
+    }
+
     /// Finds the targeted voxel, executes destruction on the authority, serializes it to bounded
     /// datagrams, and applies the reassembled delta to the rendered replica.
     ///
@@ -150,16 +155,17 @@ impl DemoSession {
             return Err(SessionError::DivergedReplica);
         }
 
+        let mut spawned_body_ids = packet
+            .body_assignments
+            .iter()
+            .map(|assignment| assignment.body_id)
+            .collect::<Vec<_>>();
+        spawned_body_ids.dedup();
         Ok(Some(ShotResult {
             target: hit.voxel,
             dirty_chunks: dirty_chunks(&packet.changes),
             report,
-            spawned_bodies: packet
-                .body_assignments
-                .iter()
-                .map(|assignment| assignment.body_id)
-                .collect::<HashSet<_>>()
-                .len(),
+            spawned_body_ids,
             active_bodies: self.client.bodies().len(),
             datagrams,
             encoded_bytes,

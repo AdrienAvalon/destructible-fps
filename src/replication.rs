@@ -18,7 +18,7 @@ const MAX_DATAGRAM_BYTES: usize = 1_200;
 const MAX_FRAGMENTS: u16 = 1_024;
 const MAX_PENDING_PACKETS: usize = 64;
 const MAX_PENDING_BYTES: usize = 8 * 1_024 * 1_024;
-const MAX_ACTIVE_BODIES: usize = 1_024;
+pub const MAX_ACTIVE_BODIES: usize = 1_024;
 const MAX_ACTIVE_BODY_VOXELS: usize = 262_144;
 const MAX_SPAWNED_BODY_VOXELS: usize = 16_384;
 

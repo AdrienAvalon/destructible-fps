@@ -75,6 +75,8 @@ streaming, with no synchronous world meshing on the presentation thread.
 - atomic explosion/topology/body transactions and protocol-v2 body membership replication with
   independent body fingerprints, bounded reassembly memory, and hostile-input rejection
   (delivered);
+- preserved-material body rendering through bounded off-thread local-space meshing and a
+  fixed-capacity GPU transform arena (delivered);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
@@ -177,10 +179,10 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. render replicated bodies from their preserved material voxels without returning them to the
-   static world;
-2. add fixed-step gravity, body state replication, sleeping, and broad-phase collisions;
-3. add collision response against static voxels and deterministic settling/clustering.
+1. add fixed-step gravity, body state replication, sleeping, and broad-phase collisions;
+2. add collision response against static voxels and deterministic settling/clustering;
+3. replace the spawn-position body identity with a separate monotonic entity identity before
+   allowing structures to be rebuilt and detached repeatedly at the same coordinates.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

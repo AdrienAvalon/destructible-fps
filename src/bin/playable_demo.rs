@@ -2,13 +2,22 @@
 
 use destructible_fps::{
     DemoSession, FireMode, IVec3, World, chunk_position,
-    mesh_scheduler::{MAX_CHUNKS_PER_MESH_JOB, MeshScheduler},
+    mesh_scheduler::{
+        CompletedMeshJob, MAX_BODIES_PER_MESH_JOB, MAX_BODY_VOXELS_PER_MESH_JOB,
+        MAX_CHUNKS_PER_MESH_JOB, MeshScheduler,
+    },
     player::{MovementInput, Player},
     render::{RenderOutcome, Renderer},
     telemetry::{DistributionSummary, SampleWindow},
 };
 use glam::Vec3;
-use std::{collections::HashSet, error::Error, sync::Arc, time::Duration, time::Instant};
+use std::{
+    collections::{BTreeSet, HashSet},
+    error::Error,
+    sync::Arc,
+    time::Duration,
+    time::Instant,
+};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -105,6 +114,7 @@ struct Game {
     mesh_snapshot: Arc<World>,
     mesh_phase: MeshPhase,
     pending_mesh_chunks: HashSet<IVec3>,
+    pending_body_ids: BTreeSet<u128>,
     mesh_job_in_flight: bool,
     mesh_started: Option<Instant>,
     telemetry: RuntimeTelemetry,
@@ -114,13 +124,22 @@ impl Game {
     fn new(window: Arc<Window>, showcase: bool) -> Result<Self, String> {
         let mut session = DemoSession::default();
         let last_action = if showcase {
-            let result = session
+            let detached = session
+                .fire(Vec3::new(0.5, 1.5, 40.0), -Vec3::Z, FireMode::Rifle)
+                .map_err(|error| format!("preparation showcase structure: {error}"))?
+                .ok_or_else(|| "preparation showcase: le support n a pas ete atteint".to_owned())?;
+            let breach = session
                 .fire(Vec3::new(0.5, 3.1, 40.0), -Vec3::Z, FireMode::Explosive)
                 .map_err(|error| format!("preparation showcase: {error}"))?
                 .ok_or_else(|| "preparation showcase: la facade n a pas ete atteinte".to_owned())?;
+            if detached.spawned_body_ids.is_empty() {
+                return Err("preparation showcase: aucun corps detache".to_owned());
+            }
             format!(
-                "showcase: {} voxels fractures, {} datagrammes",
-                result.report.fractured_voxels, result.datagrams
+                "showcase: {} voxels detaches, {} voxels de facade fractures, {} datagrammes",
+                detached.report.detached_voxels,
+                breach.report.fractured_voxels,
+                detached.datagrams + breach.datagrams
             )
         } else {
             "pret".to_owned()
@@ -130,6 +149,7 @@ impl Game {
             .chunk_positions()
             .into_iter()
             .collect::<HashSet<_>>();
+        let pending_body_ids = session.bodies().keys().copied().collect::<BTreeSet<_>>();
         let initial_chunk_count = pending_mesh_chunks.len();
         if initial_chunk_count > MAX_PENDING_MESH_CHUNKS {
             return Err(format!(
@@ -167,6 +187,7 @@ impl Game {
             mesh_snapshot,
             mesh_phase: MeshPhase::InitialStreaming,
             pending_mesh_chunks,
+            pending_body_ids,
             mesh_job_in_flight: false,
             mesh_started: None,
             telemetry: RuntimeTelemetry::new(),
@@ -218,6 +239,7 @@ impl Game {
         ) {
             Ok(Some(result)) => {
                 let dirty_count = result.dirty_chunks.len();
+                self.pending_body_ids.extend(&result.spawned_body_ids);
                 self.mesh_snapshot = Arc::new(self.session.world().clone());
                 self.queue_dirty_chunks(result.dirty_chunks);
                 self.last_action = format!(
@@ -258,26 +280,7 @@ impl Game {
 
     fn pump_meshing(&mut self, focus: Vec3) {
         match self.mesh_scheduler.poll() {
-            Ok(Some(completed)) => {
-                self.mesh_job_in_flight = false;
-                let elapsed_ms = self
-                    .mesh_started
-                    .take()
-                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1_000.0);
-                if completed.world_fingerprint == self.session.world().fingerprint() {
-                    let count = completed.meshes.len();
-                    self.renderer.upload_chunk_meshes(completed.meshes);
-                    self.last_action =
-                        format!("remeshing asynchrone: {count} chunks en {elapsed_ms:.2} ms");
-                } else {
-                    let stale_chunks = completed
-                        .meshes
-                        .into_iter()
-                        .map(|(chunk, _mesh)| chunk)
-                        .collect();
-                    self.queue_dirty_chunks(stale_chunks);
-                }
-            }
+            Ok(Some(completed)) => self.finish_mesh_job(completed),
             Ok(None) => {}
             Err(error) => {
                 self.mesh_job_in_flight = true;
@@ -285,7 +288,10 @@ impl Game {
             }
         }
 
-        if !self.mesh_job_in_flight && self.pending_mesh_chunks.is_empty() {
+        if !self.mesh_job_in_flight
+            && self.pending_mesh_chunks.is_empty()
+            && self.pending_body_ids.is_empty()
+        {
             if self.mesh_phase == MeshPhase::InitialStreaming {
                 self.mesh_phase = MeshPhase::Live;
                 self.last_action = format!(
@@ -299,6 +305,9 @@ impl Game {
             return;
         }
         if self.mesh_job_in_flight {
+            return;
+        }
+        if self.queue_body_mesh_job() {
             return;
         }
         let batch_limit = if self.mesh_phase == MeshPhase::InitialStreaming {
@@ -321,6 +330,72 @@ impl Game {
             }
             Err(error) => self.last_action = format!("remeshing non planifie: {error}"),
         }
+    }
+
+    fn finish_mesh_job(&mut self, completed: CompletedMeshJob) {
+        self.mesh_job_in_flight = false;
+        let elapsed_ms = self
+            .mesh_started
+            .take()
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1_000.0);
+        match completed {
+            CompletedMeshJob::Chunks {
+                world_fingerprint,
+                meshes,
+            } => {
+                if world_fingerprint == self.session.world().fingerprint() {
+                    let count = meshes.len();
+                    self.renderer.upload_chunk_meshes(meshes);
+                    self.last_action =
+                        format!("remeshing asynchrone: {count} chunks en {elapsed_ms:.2} ms");
+                } else {
+                    let stale_chunks = meshes.into_iter().map(|(chunk, _mesh)| chunk).collect();
+                    self.queue_dirty_chunks(stale_chunks);
+                }
+            }
+            CompletedMeshJob::Bodies(meshes) => {
+                let count = meshes.len();
+                if let Err(error) = self.renderer.upload_body_meshes(meshes) {
+                    self.last_action = format!("upload de corps refuse: {error}");
+                } else {
+                    self.last_action =
+                        format!("maillage asynchrone: {count} corps en {elapsed_ms:.2} ms");
+                }
+            }
+        }
+    }
+
+    fn queue_body_mesh_job(&mut self) -> bool {
+        if self.pending_body_ids.is_empty() {
+            return false;
+        }
+        let mut bodies = Vec::new();
+        let mut body_ids = Vec::new();
+        let mut voxel_count = 0_usize;
+        for &body_id in &self.pending_body_ids {
+            let Some(body) = self.session.bodies().get(&body_id) else {
+                continue;
+            };
+            if bodies.len() == MAX_BODIES_PER_MESH_JOB
+                || voxel_count.saturating_add(body.voxels.len()) > MAX_BODY_VOXELS_PER_MESH_JOB
+            {
+                break;
+            }
+            voxel_count += body.voxels.len();
+            bodies.push(body.clone());
+            body_ids.push(body_id);
+        }
+        match self.mesh_scheduler.submit_bodies(bodies) {
+            Ok(()) => {
+                for body_id in body_ids {
+                    self.pending_body_ids.remove(&body_id);
+                }
+                self.mesh_job_in_flight = true;
+                self.mesh_started = Some(Instant::now());
+            }
+            Err(error) => self.last_action = format!("maillage de corps non planifie: {error}"),
+        }
+        true
     }
 
     fn redraw(
@@ -382,10 +457,12 @@ impl Game {
             let world = self.session.world().stats();
             let render = self.renderer.stats();
             self.window.set_title(&format!(
-                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {}/{} chunks visibles | {} | {}",
+                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {}/{} chunks + {}/{} corps visibles | {} | {}",
                 world.solid_voxels,
                 render.visible_chunks,
                 render.chunks,
+                render.visible_bodies,
+                render.bodies,
                 if self.cursor_captured {
                     "souris capturee"
                 } else {
@@ -397,29 +474,44 @@ impl Game {
             self.stats_since = now;
         }
         if exit_after.is_some_and(|duration| now.duration_since(self.started) >= duration) {
-            self.telemetry.print_report(&self.renderer);
-            let render = self.renderer.stats();
-            println!(
-                "Culling: {}/{} chunks visibles; {} draws monde, {} draws ombres",
-                render.visible_chunks,
-                render.chunks,
-                render.world_draw_calls,
-                render.shadow_draw_calls
-            );
-            if self.mesh_phase != MeshPhase::Live {
-                let error = format!(
-                    "streaming initial incomplet: {} chunks en attente, worker actif={}",
-                    self.pending_mesh_chunks.len(),
-                    self.mesh_job_in_flight
-                );
-                eprintln!("{error}");
-                event_loop.exit();
-                return Some(error);
-            }
-            println!("smoke test graphique termine proprement");
-            event_loop.exit();
+            return self.finish_smoke(event_loop);
         }
         None
+    }
+
+    fn finish_smoke(&self, event_loop: &ActiveEventLoop) -> Option<String> {
+        self.telemetry.print_report(&self.renderer);
+        let render = self.renderer.stats();
+        println!(
+            "Culling: {}/{} chunks et {}/{} corps visibles; {} draws monde, {} draws ombres",
+            render.visible_chunks,
+            render.chunks,
+            render.visible_bodies,
+            render.bodies,
+            render.world_draw_calls,
+            render.shadow_draw_calls
+        );
+        let failure = if self.mesh_phase != MeshPhase::Live {
+            Some(format!(
+                "streaming initial incomplet: {} chunks en attente, worker actif={}",
+                self.pending_mesh_chunks.len(),
+                self.mesh_job_in_flight
+            ))
+        } else if render.bodies != self.session.bodies().len() {
+            Some(format!(
+                "rendu de corps incomplet: {} corps GPU pour {} corps autoritaires",
+                render.bodies,
+                self.session.bodies().len()
+            ))
+        } else {
+            println!("smoke test graphique termine proprement");
+            None
+        };
+        if let Some(error) = &failure {
+            eprintln!("{error}");
+        }
+        event_loop.exit();
+        failure
     }
 }
 

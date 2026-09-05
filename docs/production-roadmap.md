@@ -67,7 +67,11 @@ streaming, with no synchronous world meshing on the presentation thread.
 
 ### Stage 2 — structural destruction and rigid bodies
 
-- authored and inferred support graph with material compression, tension, shear, and joint limits;
+- deterministic bounded topology analysis around edits, foundation/authored anchors, canonical
+  islands, mass, bounds, fingerprints, negative tests, and an 8,192-voxel benchmark (delivered as an
+  isolated primitive);
+- persistent authored and inferred support graph with material compression, tension, shear, and
+  joint limits;
 - incremental stress propagation restricted to affected graph islands;
 - unsupported component extraction with mass, centre of mass, and inertia from voxel geometry;
 - deterministic server rigid-body integration, collision islands, sleeping, and continuous collision
@@ -168,8 +172,8 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. implement the first incremental support graph and a deterministic unsupported-island fixture;
-2. promote unsupported islands into bounded authoritative rigid-body descriptors;
+1. promote unsupported islands into bounded authoritative rigid-body descriptors;
+2. integrate topology analysis and detachment into one atomic authoritative transaction;
 3. replicate structural detachments through fingerprinted server transactions.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,

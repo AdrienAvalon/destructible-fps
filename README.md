@@ -32,6 +32,11 @@ This is a **first playable engineering slice**, not a photorealistic or producti
 game. Structural collapse, detached rigid bodies, remote sessions, audio, asset-quality PBR,
 temporal anti-aliasing, and large-world residency streaming remain explicit later gates.
 
+The first server-side structural primitive is also available: a deterministic bounded topology
+analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
+canonical detached-island descriptors with mass, bounds, and a 128-bit fingerprint. It is benchmarked
+but not yet wired into the playable explosion transaction or rigid-body simulation.
+
 ## Screenshots
 
 ![First-person approach to the intact test building](docs/screenshots/01-approach.png)
@@ -45,6 +50,7 @@ temporal anti-aliasing, and large-world residency streaming remain explicit late
 ```bash
 cargo test --all-targets
 cargo run --release --bin destruction-benchmark -- --events 500
+cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin playable-demo
 ```
 

@@ -64,3 +64,27 @@ fragmentation, reordering, decode, reassembly, client-application, and final-ver
 77,742 events/s. Event latency was 0.009 ms p50, 0.035 ms p95, and 0.060 ms p99. The run produced
 768 application datagrams (0.468 MiB), fractured 14,321 voxels, and ended with identical server and
 client fingerprints.
+
+## 2026-09-05 — structural island extraction
+
+Command:
+
+```bash
+cargo run --release --bin structural-benchmark -- --iterations 100
+```
+
+The fixture severs a single connector below a concrete slab of 8,192 voxels. Each analysis validates
+the canonical after-state, searches only components adjacent to the edit, proves the slab has no
+foundation path, computes mass/bounds, and reproduces the same 128-bit island fingerprint.
+
+| Measurement | Result |
+|---|---:|
+| Throughput | 381 analyses/s |
+| Analysis p50 | 2.618 ms |
+| Analysis p95 | 2.632 ms |
+| Analysis p99 | 2.662 ms |
+| Analysis max | 2.891 ms |
+
+The result is below the 12 ms server-work target on this fixture. It is not yet a full collapse tick:
+rigid-body creation, collision solving, transaction integration, and replication remain separate
+promotion gates.

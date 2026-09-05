@@ -65,7 +65,9 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 
 ### Milestone 2 — structural physics
 
-- foundation and support graph;
+- bounded incremental topology analysis around changed voxels, foundation/authored anchors, and
+  canonical detached-island descriptors (delivered as an isolated server-side primitive);
+- persistent foundation and material constraint graph integrated into authoritative transactions;
 - compression, tension, shear, and connection limits by material;
 - local stress propagation after damage;
 - unsupported island extraction;

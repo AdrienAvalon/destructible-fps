@@ -12,6 +12,7 @@ pub mod player;
 pub mod render;
 pub mod replication;
 pub mod session;
+pub mod structural;
 pub mod telemetry;
 pub mod world;
 
@@ -23,4 +24,9 @@ pub use replication::{
     DeltaPacket, ExplosionCommand, FrameAssembler, ReplicationError, decode_frame, encode_frames,
 };
 pub use session::{DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
+pub use structural::{
+    DetachedIsland, StructuralAnchors, StructuralError, StructuralLimits, StructuralReport,
+    analyze_structural_changes,
+};
+pub use telemetry::{DistributionSummary, SampleWindow};
 pub use world::{CHUNK_EDGE, IVec3, VoxelChange, World, WorldError, WorldStats, chunk_position};

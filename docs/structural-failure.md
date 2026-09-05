@@ -2,8 +2,9 @@
 
 This PHYS-01 increment connects actual equilibrium forces to server-owned static-to-body
 transactions. It is deliberately not a claim of realistic building collapse, calibrated material
-presets, automatic dedicated-server integration or a visual improvement. The existing game's
-ordinary loop does not enable this optional policy yet.
+presets or a visual improvement. The [shared tick runtime and playable lab](structural-runtime.md)
+now enable this policy explicitly in local, loopback UDP and authenticated QUIC authority paths;
+the ordinary unconfigured scene still does not use synthetic load-failure presets automatically.
 
 ## Ownership and lifecycle
 
@@ -22,12 +23,13 @@ or stale job, failed solve, descriptor failure and live capacity rejection are e
 In particular, `OutsideLinearRegime` is unresolved, never permission to cut automatically or quietly
 label the structure supported. Automatic scheduling must expose failures/backlog and implement a
 bounded retry/alternative strategy; repeated capacity rejection is not a valid final destruction
-policy. No error counter or UI backlog has been integrated into the ordinary server yet.
+policy. The opt-in runtime now reports pending work, lifetime errors, overflow and stopped workers;
+automatic recovery/decomposition beyond its explicit bounds remains incomplete.
 
 The caller must schedule commits at authoritative tick boundaries and feed returned deltas into
 its ordinary broadcast/retained-repair path. There is no new client command or client-selected
-fracture outcome. The standalone benchmark and tests exercise this API explicitly; full process/
-graphical gameplay integration remains subsequent work.
+fracture outcome. The shared runtime supplies this ordering to the configured core and local demo;
+the core's existing broadcast path retains fracture transactions for repair and late joining.
 
 ## Section model and explicit strengths
 

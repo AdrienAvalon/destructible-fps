@@ -118,6 +118,17 @@ impl SecureTlsConfigUpdater {
 }
 
 impl SecureDedicatedServer {
+    /// Enables an explicit structural policy before the first tick, with unchanged QUIC admission.
+    /// # Errors
+    /// Rejects late/repeated configuration, oversized seeds or an OS worker-creation failure.
+    pub fn with_structural_simulation(
+        mut self,
+        config: &crate::structural_runtime::StructuralSimulationConfig,
+    ) -> io::Result<Self> {
+        self.authority.enable_structural_simulation(config)?;
+        Ok(self)
+    }
+
     /// Binds a QUIC endpoint and starts a bounded admission supervisor on the current Tokio runtime.
     ///
     /// # Errors

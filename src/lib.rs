@@ -33,6 +33,8 @@ pub mod snapshot;
 pub mod structural;
 pub mod structural_failure;
 pub mod structural_jobs;
+pub mod structural_lab;
+pub mod structural_runtime;
 pub mod telemetry;
 pub mod transport;
 pub mod world;

@@ -1,4 +1,6 @@
-use destructible_fps::{DedicatedServer, SERVER_PHYSICS_HZ, demo_world};
+use destructible_fps::{
+    AuthorityCore, DedicatedServer, SERVER_PHYSICS_HZ, demo_world, structural_lab::structural_lab,
+};
 use std::{
     error::Error,
     io::{self, Write},
@@ -16,11 +18,18 @@ struct Options {
     exit_after_repairs: Option<usize>,
     exit_after_snapshots: Option<usize>,
     exit_after_catchups: Option<usize>,
+    structural_lab: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
-    let mut server = DedicatedServer::bind(options.bind, demo_world())?;
+    let mut server = if options.structural_lab {
+        let (world, config) = structural_lab();
+        let core = AuthorityCore::new(world, 1200)?.with_structural_simulation(&config)?;
+        DedicatedServer::bind_core(options.bind, core)?
+    } else {
+        DedicatedServer::bind(options.bind, demo_world())?
+    };
     println!("READY {}", server.local_addr()?);
     io::stdout().flush()?;
 
@@ -35,8 +44,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut ticks = 0_u64;
     let mut inbound = 0_usize;
     let mut outbound = 0_usize;
+    let mut structural = destructible_fps::structural_runtime::StructuralRuntimeStatus::default();
     while ticks < options.max_ticks {
         let report = server.tick()?;
+        if report.structural != structural {
+            structural = report.structural;
+            println!("STRUCTURAL {structural:?}");
+        }
         ticks += 1;
         applied_commands = applied_commands.saturating_add(report.commands_applied);
         served_repairs = served_repairs.saturating_add(report.repairs_served);
@@ -81,9 +95,11 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut exit_after_repairs = None;
     let mut exit_after_snapshots = None;
     let mut exit_after_catchups = None;
+    let mut structural_lab = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "--structural-lab" => structural_lab = true,
             "--bind" => {
                 bind = arguments
                     .next()
@@ -156,6 +172,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         exit_after_repairs,
         exit_after_snapshots,
         exit_after_catchups,
+        structural_lab,
     })
 }
 

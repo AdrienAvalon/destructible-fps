@@ -132,7 +132,10 @@ shear-aware bending and torsion, and measures load redistribution after losing s
 six-DOF solver is validated against analytical cases and a 64×32 wall. A bounded worker extracts
 complete domains; the opt-in [coarse failure adapter](docs/structural-failure.md) assesses explicit
 strengths, prepares mass-preserving fragments and commits ordinary replicated static-to-body
-transactions. Automatic game-loop scheduling, calibrated material response, crushing geometry and
+transactions. The [shared tick runtime](docs/structural-runtime.md) drives a playable lab, including
+automatic remeshing, retained network repair and authenticated QUIC replication. Try
+`cargo run --release --bin playable-demo -- --structural-lab` and press F at the beam root for a
+partial test charge. Calibrated material response, crushing geometry, large-map recovery and
 nonlinear/contact coupling remain required before realistic progressive collapse is playable.
 Run `cargo run --release --bin structural-failure-benchmark -- --iterations 20` for the two-stage
 support-failure fixture, or `structural-load-benchmark` for the separate numerical cases.

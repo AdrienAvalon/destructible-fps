@@ -227,6 +227,102 @@ async fn two_authenticated_quic_clients_receive_one_authoritative_transaction() 
     client.wait_idle().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn authenticated_lab_charge_is_followed_by_automatic_replicated_fracture_and_motion() {
+    let (certificate, private_key) = test_identity();
+    let server_config = secure_server_config(vec![certificate.clone()], private_key).unwrap();
+    let (world, config) = destructible_fps::structural_lab::structural_lab();
+    let mut replicas = [
+        destructible_fps::ClientReplica::new(world.clone()),
+        destructible_fps::ClientReplica::new(world.clone()),
+    ];
+    let mut server = SecureDedicatedServer::bind(
+        LOOPBACK_EPHEMERAL,
+        server_config,
+        Arc::new(TestVerifier),
+        world,
+    )
+    .unwrap()
+    .with_structural_simulation(&config)
+    .unwrap();
+    let client = trusted_client(certificate);
+    let first = connect(&client, server.local_addr().unwrap()).await;
+    let second = connect(&client, server.local_addr().unwrap()).await;
+    let (first_welcome, second_welcome) = tokio::join!(
+        establish_session(&first, 301, &TEST_CREDENTIAL),
+        establish_session(&second, 303, &TEST_CREDENTIAL)
+    );
+    let first_id = first_welcome.unwrap().session_id;
+    assert_ne!(first_id, second_welcome.unwrap().session_id);
+    for _ in 0..200 {
+        let report = server.tick().unwrap();
+        if server.active_sessions() == 2 && report.authority.structural.assessed > 0 {
+            break;
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(server.active_sessions(), 2);
+    send_gameplay_datagram(
+        &first,
+        encode_explosion_request(
+            first_id,
+            ExplosionCommand {
+                command_id: 1,
+                center: destructible_fps::structural_lab::LAB_SEED,
+                radius_voxels: 1,
+                peak_energy: 1000,
+            },
+        ),
+    )
+    .unwrap();
+    let mut committed = 0;
+    for _ in 0..300 {
+        let report = server.tick().unwrap();
+        assert_eq!(report.authority.structural.failed, 0);
+        committed = report.authority.structural.committed;
+        if committed == 1 {
+            break;
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(committed, 1);
+    let next_sequence = server.authority().next_sequence();
+    assert!(next_sequence >= 4, "damage, creation, then motion");
+    for (connection, replica) in [&first, &second].into_iter().zip(&mut replicas) {
+        let mut inbox = OrderedDeltaInbox::default();
+        for _ in 0..256 {
+            let bytes = timeout(
+                Duration::from_secs(2),
+                receive_gameplay_datagram(connection),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if !is_delta_datagram(&bytes) {
+                continue;
+            }
+            for packet in inbox.push(&bytes).unwrap() {
+                replica.receive(&packet).unwrap();
+            }
+            if inbox.expected_sequence() == next_sequence {
+                break;
+            }
+        }
+        assert_eq!(inbox.expected_sequence(), next_sequence);
+        assert_eq!(
+            replica.world().fingerprint(),
+            server.authority().world().fingerprint()
+        );
+        assert_eq!(replica.bodies(), server.authority().bodies());
+        assert_eq!(replica.body_states(), server.authority().body_states());
+        assert_eq!(replica.bodies().len(), 2);
+    }
+    first.close(VarInt::from_u32(0), b"lab complete");
+    second.close(VarInt::from_u32(0), b"lab complete");
+    server.shutdown().await;
+    client.wait_idle().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authenticated_quic_client_builds_one_authoritative_voxel() {
     let (certificate, private_key) = test_identity();

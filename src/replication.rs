@@ -359,6 +359,16 @@ impl AuthoritativeServer {
         &self.structural_anchors
     }
 
+    pub(crate) fn configure_structural_simulation(
+        &mut self,
+        config: &crate::structural_runtime::StructuralSimulationConfig,
+    ) {
+        self.structural_anchors = config.anchors.clone();
+        self.structural_context.configure(config.materials);
+        self.structural_context
+            .configure_strengths(config.strengths);
+    }
+
     /// Revalidates the originating authority, material/anchor configuration and every read chunk.
     /// The returned borrow prevents mutation through this authority while the result is inspected.
     ///

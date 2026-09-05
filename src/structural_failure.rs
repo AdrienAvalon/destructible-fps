@@ -63,6 +63,7 @@ pub enum StructuralFailureError {
     InvalidPlan,
     TooManyFragments,
     SequenceExhausted,
+    DeadlineExceeded,
     Job(StructuralJobError),
     Body(BodyError),
     Commit(CommandError),

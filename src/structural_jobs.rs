@@ -172,6 +172,15 @@ impl StructuralContext {
         world: &World,
         completed: &'a CompletedStructuralJob,
     ) -> Result<&'a ElasticSolution, StructuralJobError> {
+        self.validate_domain(world, completed)?;
+        completed.result.as_ref().map_err(|error| *error)
+    }
+
+    pub(crate) fn validate_domain<'a>(
+        &self,
+        world: &World,
+        completed: &'a CompletedStructuralJob,
+    ) -> Result<&'a [IVec3], StructuralJobError> {
         if !Arc::ptr_eq(&self.identity, &completed.identity)
             || completed
                 .observations
@@ -180,7 +189,10 @@ impl StructuralContext {
         {
             return Err(StructuralJobError::StaleOrForeign);
         }
-        completed.result.as_ref().map_err(|error| *error)
+        if matches!(completed.result, Err(StructuralJobError::Cancelled)) {
+            return Err(StructuralJobError::Cancelled);
+        }
+        Ok(&completed.domain_positions)
     }
 }
 
@@ -200,6 +212,8 @@ pub struct CompletedStructuralJob {
     observations: Vec<ChunkObservation>,
     result: Result<ElasticSolution, StructuralJobError>,
     failure: Result<Option<PreparedStructuralFailure>, StructuralFailureError>,
+    // Only populated after complete extraction, including when the subsequent solve fails.
+    domain_positions: Vec<IVec3>,
 }
 
 impl CompletedStructuralJob {
@@ -290,11 +304,14 @@ fn extract_domain(
 
 fn run_request(request: StructuralRequest, cancelled: &AtomicBool) -> CompletedStructuralJob {
     let mut observed = BTreeSet::new();
+    let mut domain_positions = Vec::new();
     let result = (|| {
         if cancelled.load(Ordering::Relaxed) {
             return Err(StructuralJobError::Cancelled);
         }
         let nodes = extract_domain(&request, &mut observed, cancelled)?;
+        // extract_domain consumes its BTreeMap in canonical position order, not BFS order.
+        domain_positions = nodes.iter().map(|node| node.position).collect();
         let model = ElasticModel::new(&nodes, 1.0, [0.0, -9.81, 0.0])?;
         let mut job = ElasticJob::new(model, ElasticOptions::default())?;
         loop {
@@ -326,6 +343,7 @@ fn run_request(request: StructuralRequest, cancelled: &AtomicBool) -> CompletedS
         observations,
         result,
         failure,
+        domain_positions,
     }
 }
 

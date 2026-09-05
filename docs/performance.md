@@ -2003,3 +2003,126 @@ Initial streaming took 59.9 ms. CPU frame-wall p50/p95/p99 was 16.662 / 16.905 /
 1.114 / 1.123 / 1.141 ms (340 samples; maximum total 1.163 ms; zero dropped GPU samples).
 This checks startup and compatibility, not the new opt-in fracture path, sustained destruction,
 CPU active-time or photorealistic quality.
+
+## 2026-09-06 — shared tick runtime and playable structural lab
+
+Source state: `49f0a33` plus this shared-runtime increment. The existing worker is now driven by
+local and network ticks, not just an explicit benchmark caller. Accepted partial damage schedules
+assessment, the resulting ordinary body-creation delta is retained/broadcast before motion, and
+local presentation receives dirty chunks and body IDs through the same framed replication boundary.
+The small authored laboratory remains synthetic and opt-in; the ordinary unconfigured scene's
+material policy and weapon strengths have not been silently replaced. See
+[`structural-runtime.md`](structural-runtime.md) for operation and incomplete states.
+
+The final debug and release matrices each passed 260 library, 11 binary and 83 ordinary integration
+tests. Nine runtime tests cover FIFO fairness, complete-domain coalescing (including numerical
+failure), canonical ordering from a middle seed, bounded skip/overflow and full-queue stale requeue,
+five-second deadline latching, explicit submit-error location, and rejection at the domain cap.
+Four public runtime integration tests cover local mesh notifications, startup-only guards, actual
+UDP sockets with dropped creation/retained repair, and core replica recovery/late join at both MTU
+limits. The new real QUIC case explicitly enables the policy and verifies damage, automatic creation
+and motion at two authenticated connections. Dedicated network, secure transport/authority/process
+and six OIDC tests passed separately. The normally ignored shader-projection test also passed
+explicitly on Vulkan; strict all-target Clippy and formatting passed.
+
+These are functional proofs, not evidence that whole-cube compression now crushes materials,
+that the initial seed set covers an arbitrary saved world, or that this is the final photorealistic
+environment. Queue overflow, an earlier rejected assessment and stopped workers remain observable
+incomplete states. In-match persistent-map reseeding/decomposition, calibrated materials, contact
+loads and body-slot reclamation remain open.
+
+### Review and scope
+
+Claude's analysis and one final review completed. The review received complete new runtime/lab
+sources and production integration diffs; tests and the scheduled benchmark were summarized, not
+independently reviewed in full. It informed the deadline, local startup guard, explicit incomplete
+status/failed-seed diagnostics, and additional canonical-order, submission-failure and exact
+full-queue tests. The current-domain ordering concern was confirmed against the existing BTreeMap
+extraction and tested; no arbitrary BFS order was accepted. Runtime admission errors deliberately
+do not trigger an endless per-tick retry: `incomplete()` and the exact last failed seed retain the
+unresolved assessment. No second external-review loop was run; Codex confirmed subsequent changes
+in source and reran the final matrices. Later GPU smoke failure propagation also latches tick errors.
+
+The measurement host is the Intel i7-13700H / RTX 4050 Laptop, NVIDIA 610.57.04, CachyOS Linux
+7.2.2-1, Rust 1.97.1, release profile. Clocks are not locked. A rerun briefly overlapped the local
+Graphify update, so the primary CPU batch below was repeated serially after index completion,
+with all binaries already built and no other game benchmark or compiler deliberately active.
+No OS-cache clearing or controlled cold-start measurement is claimed.
+
+### CPU, cascade latency and memory
+
+The scheduled fixture retains the prior synthetic 964-node, 960-cell brick panel on two weak
+timber supports (`E=100 GPa`, not calibrated timber). Each of 20 repetitions begins intact with
+all fixture cells seeded; ticks at 60 Hz automatically produce two cuts, leaving only the two
+fixed static cells, three bodies and unchanged mass. Two replicas agree after each transaction.
+This tests progressive scheduling, not crushing or a sustained combat scene. Values are
+p50 / p95 / p99 milliseconds; idle and work-bearing ticks are both retained.
+
+| Primary serial measurement | Samples | p50 / p95 / p99 | Maximum |
+| --- | ---: | --- | ---: |
+| Structural runtime tick, including bookkeeping/commit | 120 | 0.002 / 0.367 / 0.475 | 0.475 |
+| Runtime plus rigid-body physics | 120 | 0.005 / 0.378 / 0.485 | 0.488 |
+| Start to first rupture | 20 | 33.714 / 33.832 / 33.837 | 33.837 |
+| First to second rupture | 20 | 50.729 / 50.914 / 51.244 | 51.244 |
+| Whole two-rupture cascade | 20 | 84.356 / 84.709 / 84.809 | 84.809 |
+| Destruction loopback | 500 events | 0.013 / 0.231 / 0.388 | — |
+| 8,192-cell slab analysis | 100 | 2.537 / 2.548 / 2.724 | — |
+| Same slab promotion | 100 | 1.658 / 1.694 / 1.699 | — |
+| Same slab combined | 100 | 4.197 / 4.231 / 4.418 | 4.518 |
+| 1,024-body stacking physics | 300 ticks | 0.518 / 1.129 / 1.153 | 1.196 |
+| Snapshot encode | 20 | 5.197 / 5.762 / 6.145 | 6.145 |
+| Snapshot reassemble/decode | 20 | 6.124 / 6.431 / 6.717 | 6.717 |
+| Snapshot validate/install | 20 | 0.364 / 0.379 / 0.390 | 0.390 |
+| Snapshot total | 20 | 11.693 / 12.423 / 13.237 | 13.237 |
+
+Off-thread worker execution is not part of runtime tick CPU time. Replica validation is outside the
+scheduled tick timer; networking/encoding and rendering are not measured there. Physics settled
+all 1,024 bodies in its separate stacking fixture, with 768 maximum broad-phase pairs. Destruction
+replicas matched after 29,631 changes and 908 frames / 0.567 MiB. Snapshot wire size remained
+1,181 frames / 1.351 MiB.
+
+Variation is retained, not selected away: the initial pre-review scheduled batch had tick p99
+0.494 ms and cascade p99 84.972 ms. The rerun overlapping Graphify had tick p99 0.478 ms and
+cascade p99 84.810 ms. A separate warm/RSS run with no indexer/compiler had **121** ticks instead
+of 120: one first rupture arrived a tick later. Its first-rupture p99 was 50.404 ms and total
+cascade p99 **100.972 ms**, despite tick p99 0.468 ms (maximum 0.472 ms). These short samples
+do not prove an 85 ms worst-case guarantee, nor constant cascade latency under many dirty domains.
+
+That warm child process peaked at 11,812 KiB RSS (11.54 MiB), measured through Python
+`resource.getrusage(RUSAGE_CHILDREN)` after successful exit. It includes the authority, worker
+and both replicas together, not isolated worker RSS or persistent-match memory. Allocation counts,
+full 8,192-seed queue peaks and 32-player bandwidth/correction behaviour remain unmeasured.
+The direct preparation benchmark also passed: first/second worker completion p99 was
+22.659 / 39.260 ms and direct commit p99 0.076 / 0.283 ms. Those omit the runtime's 60 Hz
+polling boundary and therefore cannot stand in for the scheduled cascade latencies.
+
+### Actual GPU and negative-path checks
+
+Both normal and lab release Vulkan smokes passed at the default 1,440×900 logical window on the
+RTX 4050 Laptop. The normal five-second scene had 98,394 cells / 128 chunks / 48,736 faces,
+no bodies or players, and 59.6 ms initial streaming. The twelve-second lab had 1,791 initial cells /
+12 chunks / 3,775 initial faces and 11.6 ms streaming. Its real test charge ran at 1.005 seconds,
+partially damaged three cells without detaching anything itself, then the runtime automatically
+committed one cut. At exit all structural/mesh work was drained, both GPU bodies were present and
+both physics bodies slept; no failure, overflow or stale job was recorded. Three total assessments
+include the intact beam and the post branch neighbouring the partially damaged authored clamp.
+
+| Frame timing | Normal scene p50 / p95 / p99 | Lab p50 / p95 / p99 |
+| --- | --- | --- |
+| CPU frame wall | 16.652 / 16.854 / 33.509 | 16.664 / 16.842 / 33.421 |
+| GPU shadows | 0.097 / 0.481 / 0.502 | 0.073 / 0.083 / 0.083 |
+| GPU world/HUD | 0.837 / 2.649 / 2.714 | 1.458 / 1.695 / 1.700 |
+| GPU total | 0.947 / 3.155 / 3.222 | 1.566 / 1.818 / 1.823 |
+
+CPU sample counts were 349 and 769, GPU counts 347 and 767, with zero dropped GPU samples.
+Maximum GPU totals were 3.231 and 1.826 ms. CPU frame wall includes acquisition/presentation waits,
+not just active CPU work. The earlier eight-second lab run recorded GPU-total p99 0.445 ms and
+CPU-wall p99 12.564 ms. This substantial short-run variation is retained; GPU clocks were not
+locked or sampled alongside each frame, and no causal explanation or graphics speedup is claimed.
+The lab is much smaller than the ordinary scene and neither proves photorealistic combat performance.
+
+An additional XWayland twelve-second run passed and a capture of only the owned game's window
+was visually inspected: the stone support and fallen timber geometry rendered, with no blank scene.
+Capture-run timing is not mixed into the tables. A process-local invalid `VK_DRIVER_FILES` path
+forced Vulkan surface initialization to fail; the application returned exit 1 with the actual
+initialization error, rather than reporting a successful smoke. No driver or host setting changed.

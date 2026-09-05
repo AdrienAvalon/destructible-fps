@@ -39,6 +39,12 @@ enum MeshPhase {
     Live,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LabPhase {
+    Ready,
+    Triggered,
+}
+
 struct RuntimeTelemetry {
     frame_interval: SampleWindow,
     cpu_frame_work: SampleWindow,
@@ -120,12 +126,25 @@ struct Game {
     mesh_job_in_flight: bool,
     mesh_started: Option<Instant>,
     telemetry: RuntimeTelemetry,
+    lab: Option<LabPhase>,
+    simulation_error: Option<String>,
 }
 
 impl Game {
-    fn new(window: Arc<Window>, showcase_view: Option<ShowcaseView>) -> Result<Self, String> {
+    fn new(
+        window: Arc<Window>,
+        showcase_view: Option<ShowcaseView>,
+        structural_lab: bool,
+    ) -> Result<Self, String> {
         let showcase = showcase_view.is_some();
-        let mut session = DemoSession::default();
+        let mut session = if structural_lab {
+            let (world, config) = destructible_fps::structural_lab::structural_lab();
+            DemoSession::new(world)
+                .with_structural_simulation(&config)
+                .map_err(|error| error.to_string())?
+        } else {
+            DemoSession::default()
+        };
         let last_action = if showcase {
             let detached = session
                 .fire(Vec3::new(0.5, 1.5, 40.0), -Vec3::Z, FireMode::Rifle)
@@ -175,11 +194,19 @@ impl Game {
         println!(
             "Commandes: clic pour capturer | ZQSD/WASD deplacement | Maj sprint | Espace saut | gauche tir | droit explosif | milieu construit du bois | Echap libere"
         );
+        let mut player = Player::default();
+        if structural_lab {
+            player.position = Vec3::new(1.5, 1.01, 12.0);
+            player.pitch = 0.16;
+            println!(
+                "LAB structure: F applique une charge partielle au point vise. Materiaux synthetiques, pas un modele calibre. Visez la racine gauche de la poutre."
+            );
+        }
         Ok(Self {
             window,
             renderer,
             session,
-            player: Player::default(),
+            player,
             pressed: HashSet::new(),
             cursor_captured: false,
             previous_frame: now,
@@ -198,6 +225,8 @@ impl Game {
             mesh_job_in_flight: false,
             mesh_started: None,
             telemetry: RuntimeTelemetry::new(),
+            lab: structural_lab.then_some(LabPhase::Ready),
+            simulation_error: None,
         })
     }
 
@@ -238,12 +267,16 @@ impl Game {
     }
 
     fn fire(&mut self, mode: FireMode) {
-        let before = Instant::now();
-        match self.session.fire(
+        self.fire_at(
             self.player.camera_position(),
             self.player.view_direction(),
             mode,
-        ) {
+        );
+    }
+
+    fn fire_at(&mut self, origin: Vec3, direction: Vec3, mode: FireMode) {
+        let before = Instant::now();
+        match self.session.fire(origin, direction, mode) {
             Ok(Some(result)) => {
                 let dirty_count = result.dirty_chunks.len();
                 self.pending_body_ids.extend(&result.spawned_body_ids);
@@ -439,6 +472,40 @@ impl Game {
         true
     }
 
+    fn advance_simulation(&mut self, frame_interval: Duration) {
+        self.accumulator += frame_interval.as_secs_f32().min(0.1);
+        let input = self.movement_input();
+        let mut steps = 0;
+        while self.accumulator >= FIXED_STEP_SECONDS && steps < 12 {
+            if self.showcase_view.is_none() {
+                self.player
+                    .step(self.session.world(), input, FIXED_STEP_SECONDS);
+            }
+            self.fixed_step_index = self.fixed_step_index.wrapping_add(1);
+            if self.fixed_step_index.is_multiple_of(2) {
+                match self.session.tick() {
+                    Ok(report) => {
+                        if !report.dirty_chunks.is_empty() {
+                            self.mesh_snapshot = Arc::new(self.session.world().clone());
+                            self.queue_dirty_chunks(report.dirty_chunks);
+                        }
+                        self.pending_body_ids.extend(report.spawned_body_ids);
+                        if report.physics.updated_bodies > 0 {
+                            self.renderer
+                                .update_body_transforms(self.session.body_states());
+                        }
+                    }
+                    Err(error) => {
+                        self.last_action = format!("erreur physique autoritaire: {error}");
+                        self.simulation_error = Some(self.last_action.clone());
+                    }
+                }
+            }
+            self.accumulator -= FIXED_STEP_SECONDS;
+            steps += 1;
+        }
+    }
+
     fn redraw(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -450,31 +517,18 @@ impl Game {
         self.telemetry
             .frame_interval
             .record_ms(frame_interval.as_secs_f64() * 1_000.0);
-        self.accumulator += frame_interval.as_secs_f32().min(0.1);
         self.previous_frame = now;
-        let input = self.movement_input();
-        let mut steps = 0;
-        while self.accumulator >= FIXED_STEP_SECONDS && steps < 12 {
-            if self.showcase_view.is_none() {
-                self.player
-                    .step(self.session.world(), input, FIXED_STEP_SECONDS);
-            }
-            self.fixed_step_index = self.fixed_step_index.wrapping_add(1);
-            if self.fixed_step_index.is_multiple_of(2) {
-                match self.session.advance_physics() {
-                    Ok(report) if report.updated_bodies > 0 => self
-                        .renderer
-                        .update_body_transforms(self.session.body_states()),
-                    Ok(_report) => {}
-                    Err(error) => {
-                        self.last_action = format!("erreur physique autoritaire: {error}");
-                    }
-                }
-            }
-            self.accumulator -= FIXED_STEP_SECONDS;
-            steps += 1;
-        }
+        self.advance_simulation(frame_interval);
         let elapsed_seconds = now.duration_since(self.started).as_secs_f32();
+        if self.lab == Some(LabPhase::Ready)
+            && exit_after.is_some()
+            && elapsed_seconds >= 1.0
+            && self.session.structural_status().assessed > 0
+        {
+            self.lab = Some(LabPhase::Triggered);
+            println!("LAB charge automatique a {elapsed_seconds:.3} secondes");
+            self.fire_at(Vec3::new(1.5, 4.5, 12.0), -Vec3::Z, FireMode::TestCharge);
+        }
         let (camera_position, view_direction) = match self.showcase_view {
             Some(ShowcaseView::Orbit) => showcase_camera(elapsed_seconds),
             Some(ShowcaseView::BreachCloseup) => breach_closeup_camera(elapsed_seconds),
@@ -509,8 +563,21 @@ impl Game {
             let frame_ms = 1_000.0 / fps.max(0.001);
             let world = self.session.world().stats();
             let render = self.renderer.stats();
+            let structural = self.session.structural_status();
+            let structural_label = if self.lab.is_some() {
+                format!(
+                    " | structure: {} attente, actif={}, {} ruptures, {} echecs, incomplete={}",
+                    structural.queued,
+                    structural.busy,
+                    structural.committed,
+                    structural.failed,
+                    structural.incomplete()
+                )
+            } else {
+                String::new()
+            };
             self.window.set_title(&format!(
-                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {}/{} chunks + {}/{} corps + {} joueurs | {} | {}",
+                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {}/{} chunks + {}/{} corps + {} joueurs | {} | {}{structural_label}",
                 world.solid_voxels,
                 render.visible_chunks,
                 render.chunks,
@@ -535,6 +602,11 @@ impl Game {
 
     fn finish_smoke(&self, event_loop: &ActiveEventLoop) -> Option<String> {
         self.telemetry.print_report(&self.renderer);
+        if let Some(error) = &self.simulation_error {
+            eprintln!("{error}");
+            event_loop.exit();
+            return Some(error.clone());
+        }
         let render = self.renderer.stats();
         println!(
             "Culling: {}/{} chunks, {}/{} corps et {}/{} joueurs visibles; {} draws monde, {} draws ombres",
@@ -557,7 +629,28 @@ impl Game {
             "Physique: {sleeping_bodies}/{} corps endormis",
             self.session.body_states().len()
         );
-        let failure = if self.mesh_phase != MeshPhase::Live {
+        let structural = self.session.structural_status();
+        if self.lab.is_some() {
+            println!(
+                "LAB structure: {structural:?}, erreur={:?}",
+                self.session.structural_error()
+            );
+        }
+        let failure = if self.lab.is_some()
+            && (self.lab != Some(LabPhase::Triggered)
+                || structural.committed != 1
+                || structural.failed != 0
+                || structural.overflowed
+                || structural.stopped
+                || structural.busy
+                || structural.queued != 0
+                || render.bodies != 2
+                || sleeping_bodies != 2
+                || !self.pending_mesh_chunks.is_empty()
+                || self.mesh_job_in_flight)
+        {
+            Some("lab structure incomplet: charge, rupture, replication, maillages ou chute non valides avant la limite du smoke".to_owned())
+        } else if self.mesh_phase != MeshPhase::Live {
             Some(format!(
                 "streaming initial incomplet: {} chunks en attente, worker actif={}",
                 self.pending_mesh_chunks.len(),
@@ -599,6 +692,7 @@ struct App {
     exit_after: Option<Duration>,
     showcase_view: Option<ShowcaseView>,
     failure: Option<String>,
+    structural_lab: bool,
 }
 
 impl ApplicationHandler for App {
@@ -612,13 +706,15 @@ impl ApplicationHandler for App {
             .with_min_inner_size(LogicalSize::new(800.0, 500.0));
         let Ok(window) = event_loop.create_window(attributes) else {
             eprintln!("impossible de creer la fenetre");
+            self.failure = Some("impossible de creer la fenetre".to_owned());
             event_loop.exit();
             return;
         };
-        match Game::new(Arc::new(window), self.showcase_view) {
+        match Game::new(Arc::new(window), self.showcase_view, self.structural_lab) {
             Ok(game) => self.game = Some(game),
             Err(error) => {
                 eprintln!("initialisation impossible: {error}");
+                self.failure = Some(error);
                 event_loop.exit();
             }
         }
@@ -645,6 +741,13 @@ impl ApplicationHandler for App {
                     match event.state {
                         ElementState::Pressed => {
                             game.pressed.insert(code);
+                            if code == KeyCode::KeyF
+                                && game.lab.is_some()
+                                && game.cursor_captured
+                                && !event.repeat
+                            {
+                                game.fire(FireMode::TestCharge);
+                            }
                             if code == KeyCode::Escape {
                                 if game.cursor_captured {
                                     game.release_cursor();
@@ -726,6 +829,7 @@ fn prioritized_chunks(pending: &HashSet<IVec3>, focus: IVec3, limit: usize) -> V
 struct LaunchOptions {
     exit_after: Option<Duration>,
     showcase_view: Option<ShowcaseView>,
+    structural_lab: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -739,9 +843,11 @@ fn launch_options() -> Result<LaunchOptions, Box<dyn Error>> {
     let mut options = LaunchOptions {
         exit_after: None,
         showcase_view: None,
+        structural_lab: false,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "--structural-lab" => options.structural_lab = true,
             "--showcase" => options.showcase_view = Some(ShowcaseView::Orbit),
             "--showcase-closeup" => options.showcase_view = Some(ShowcaseView::BreachCloseup),
             "--smoke-seconds" => {
@@ -756,6 +862,9 @@ fn launch_options() -> Result<LaunchOptions, Box<dyn Error>> {
             }
             _ => return Err(format!("argument inconnu: {argument}").into()),
         }
+    }
+    if options.structural_lab && options.showcase_view.is_some() {
+        return Err("--structural-lab est incompatible avec --showcase".into());
     }
     Ok(options)
 }
@@ -805,6 +914,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         exit_after: options.exit_after,
         showcase_view: options.showcase_view,
         failure: None,
+        structural_lab: options.structural_lab,
     };
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.failure {

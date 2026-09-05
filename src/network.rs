@@ -1,5 +1,8 @@
 //! Transport-independent bounded authority core, loopback UDP adapter, and client delta inbox.
 
+use crate::structural_runtime::{
+    StructuralRuntime, StructuralRuntimeStatus, StructuralSimulationConfig,
+};
 use crate::{
     AuthenticatedPrincipal, AuthoritativePlayer, AuthoritativePlayerState, AuthoritativeServer,
     BuildCommand, ClientControlMessage, CodecError, DeltaPacket, ExplosionCommand,
@@ -92,6 +95,7 @@ pub struct NetworkTickReport {
     pub outbound_datagrams: usize,
     pub outbound_drops: usize,
     pub physics: PhysicsTickReport,
+    pub structural: StructuralRuntimeStatus,
 }
 
 #[derive(Debug)]
@@ -215,6 +219,7 @@ struct CachedSnapshot {
 /// Bounded deterministic authority state independent from any concrete network transport.
 pub struct AuthorityCore<PeerId> {
     authority: AuthoritativeServer,
+    structural: Option<StructuralRuntime>,
     peers: BTreeMap<PeerId, Peer>,
     players: BTreeMap<u64, AuthoritativePlayer>,
     commands: VecDeque<QueuedCommand>,
@@ -252,6 +257,7 @@ where
         }
         Ok(Self {
             authority: AuthoritativeServer::new(world),
+            structural: None,
             peers: BTreeMap::new(),
             players: BTreeMap::new(),
             commands: VecDeque::new(),
@@ -265,6 +271,40 @@ where
             application_datagram_bytes,
             received_datagrams_this_tick: 0,
         })
+    }
+
+    /// Enables explicit load-driven failure at startup. No worker waits occur in `complete_tick`.
+    /// # Errors
+    /// Returns seed-limit or OS worker-creation errors before changing the authority policy.
+    pub fn with_structural_simulation(
+        mut self,
+        config: &StructuralSimulationConfig,
+    ) -> io::Result<Self> {
+        self.enable_structural_simulation(config)?;
+        Ok(self)
+    }
+
+    pub(crate) fn enable_structural_simulation(
+        &mut self,
+        config: &StructuralSimulationConfig,
+    ) -> io::Result<()> {
+        if self.tick != 0 || self.structural.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "structural policy is startup-only",
+            ));
+        }
+        let runtime = StructuralRuntime::new(&config.initial_seeds)?;
+        self.authority.configure_structural_simulation(config);
+        self.structural = Some(runtime);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn structural_error(&self) -> Option<&crate::structural_failure::StructuralFailureError> {
+        self.structural
+            .as_ref()
+            .and_then(StructuralRuntime::last_error)
     }
 
     /// Starts one deterministic simulation tick and expires idle transport peers.
@@ -434,6 +474,13 @@ where
         self.simulate_players(&mut report);
         self.broadcast_player_states(sender, &mut report)?;
         self.simulate_commands(sender, &mut report)?;
+        if let Some(runtime) = &mut self.structural {
+            let packet = runtime.tick(&mut self.authority);
+            report.structural = runtime.status();
+            if let Some(packet) = packet {
+                self.broadcast(&packet, sender, &mut report)?;
+            }
+        }
         let (physics_packet, physics) = self.authority.advance_physics();
         report.physics = physics;
         if let Some(packet) = physics_packet {
@@ -990,6 +1037,9 @@ where
             match result {
                 Ok(packet) => {
                     report.commands_applied += 1;
+                    if let Some(runtime) = &mut self.structural {
+                        runtime.observe_changes(&self.authority, &packet.changes);
+                    }
                     self.broadcast(&packet, sender, report)?;
                 }
                 Err(_error) => report.commands_rejected += 1,
@@ -1184,6 +1234,18 @@ impl DedicatedServer {
     ///
     /// Returns socket resolution, bind, nonblocking-configuration, or core-configuration failures.
     pub fn bind(address: impl ToSocketAddrs, world: World) -> io::Result<Self> {
+        let core = AuthorityCore::new(world, LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+        Self::bind_core(address, core)
+    }
+
+    /// Binds an explicitly configured authority without changing loopback-only transport policy.
+    /// # Errors
+    /// Returns socket resolution, bind or nonblocking-configuration failures.
+    pub fn bind_core(
+        address: impl ToSocketAddrs,
+        core: AuthorityCore<SocketAddr>,
+    ) -> io::Result<Self> {
         let socket = UdpSocket::bind(address)?;
         if !socket.local_addr()?.ip().is_loopback() {
             return Err(io::Error::new(
@@ -1192,8 +1254,6 @@ impl DedicatedServer {
             ));
         }
         socket.set_nonblocking(true)?;
-        let core = AuthorityCore::new(world, LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
         Ok(Self { socket, core })
     }
 

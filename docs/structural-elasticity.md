@@ -4,8 +4,8 @@
 loads redistribute through surviving connections instead of treating every ground-connected
 component as infinitely strong. `src/structural_jobs.rs` now extracts authoritative world domains
 and runs immutable calculations on a bounded worker. The server exposes an explicit scheduling/
-revalidation API; the normal game loop does not automatically schedule or commit structural load
-failures yet. The opt-in [coarse failure adapter](structural-failure.md) can now prepare a
+revalidation API; the [shared tick runtime](structural-runtime.md) now automatically schedules and
+commits load failures when explicitly configured. The opt-in [coarse failure adapter](structural-failure.md) prepares a
 mass-preserving fracture and commit it as an ordinary replicated transaction. The numerical kernel
 does not animate deformation or establish that realistic progressive collapse is already playable.
 
@@ -163,14 +163,14 @@ convergence, force balance and analytical long-cantilever agreement, not merely 
 
 Next promotion work remains explicit:
 
-1. Extend the explicit complete-domain worker to fair automatic dirty-domain scheduling and bounded
+1. Extend the new bounded FIFO dirty-domain runtime to automatic coverage recovery and bounded
    decomposition/residency for real maps. Preserve shared-clamp reaction semantics and stale-state
    rejection under distant new-chunk churn, not only edits in existing chunks.
 2. Calibrate strength and direction-dependent material response beyond the new explicit isotropic
    brittle section envelope; add crushing geometry and contact feedback while preserving mass.
-3. Integrate automatic worker scheduling outside receive/presentation paths and broadcast/retain
-   the new atomic coarse fracture transactions; never treat unresolved jobs as stable support or
-   automatic collapse. Load continuation/nonlinear handling must cover over-range configurations.
+3. Extend the opt-in tick/retained-broadcast integration beyond the current small playable lab;
+   never treat unresolved jobs as stable support or automatic collapse. Load continuation/nonlinear
+   handling must cover over-range configurations.
 4. Exercise weak wood, explosive wall breach and overloaded remaining supports in the same two-client
    playable sequence, including repair/late join and repeated failure/rebuild. Validate multi-OS,
    sustained latency and memory before claiming realistic synchronized collapse.

@@ -1,5 +1,8 @@
 //! In-process playable session that still crosses the authoritative wire-format boundary.
 
+use crate::structural_runtime::{
+    StructuralRuntime, StructuralRuntimeStatus, StructuralSimulationConfig,
+};
 use crate::{
     AuthoritativeServer, BodyId, BuildCommand, BuildReport, ClientReplica, CodecError,
     CommandError, DestructionReport, ExplosionCommand, FixedMicrometers3, FrameAssembler, IVec3,
@@ -21,6 +24,8 @@ const DATAGRAM_MTU: usize = 1_200;
 pub enum FireMode {
     Rifle,
     Explosive,
+    /// Synthetic partial-damage probe for the structural lab, not calibrated rifle ballistics.
+    TestCharge,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +102,15 @@ pub struct DemoSession {
     client: ClientReplica,
     assembler: FrameAssembler,
     next_command_id: u64,
+    structural: Option<StructuralRuntime>,
+}
+
+#[derive(Debug, Default)]
+pub struct SessionTick {
+    pub physics: PhysicsTickReport,
+    pub structural: StructuralRuntimeStatus,
+    pub dirty_chunks: Vec<IVec3>,
+    pub spawned_body_ids: Vec<BodyId>,
 }
 
 impl Default for DemoSession {
@@ -113,7 +127,71 @@ impl DemoSession {
             client: ClientReplica::new(world),
             assembler: FrameAssembler::default(),
             next_command_id: 1,
+            structural: None,
         }
+    }
+
+    /// Enables the same dirty-domain runtime as the transport-independent server, at startup.
+    /// # Errors
+    /// Returns seed-limit or OS worker-creation errors without partially enabling the policy.
+    pub fn with_structural_simulation(
+        mut self,
+        config: &StructuralSimulationConfig,
+    ) -> std::io::Result<Self> {
+        if self.structural.is_some() || self.next_command_id != 1 || self.server.world().tick() != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "structural policy is startup-only",
+            ));
+        }
+        let runtime = StructuralRuntime::new(&config.initial_seeds)?;
+        self.server.configure_structural_simulation(config);
+        self.structural = Some(runtime);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn structural_status(&self) -> StructuralRuntimeStatus {
+        self.structural
+            .as_ref()
+            .map_or_else(StructuralRuntimeStatus::default, StructuralRuntime::status)
+    }
+
+    #[must_use]
+    pub fn structural_error(&self) -> Option<&crate::structural_failure::StructuralFailureError> {
+        self.structural
+            .as_ref()
+            .and_then(StructuralRuntime::last_error)
+    }
+
+    /// Advances structural commits before rigid-body physics, notifying the renderer of topology.
+    /// # Errors
+    /// Returns ordinary framed replication/consistency errors, not silent partial presentation.
+    pub fn tick(&mut self) -> Result<SessionTick, SessionError> {
+        let mut result = SessionTick::default();
+        if let Some(runtime) = &mut self.structural {
+            let packet = runtime.tick(&mut self.server);
+            result.structural = runtime.status();
+            if let Some(packet) = packet {
+                result.dirty_chunks = dirty_chunks(&packet.changes);
+                result.spawned_body_ids = packet
+                    .body_assignments
+                    .iter()
+                    .map(|entry| entry.body_id)
+                    .collect();
+                result.spawned_body_ids.sort_unstable();
+                result.spawned_body_ids.dedup();
+                let mut assembled = None;
+                for bytes in encode_frames(&packet, DATAGRAM_MTU)?.into_iter().rev() {
+                    assembled = self.assembler.push(decode_frame(&bytes)?)?.or(assembled);
+                }
+                self.client
+                    .receive(&assembled.ok_or(SessionError::MissingCompletePacket)?)?;
+            }
+        }
+        result.physics = self.advance_physics()?;
+        Ok(result)
     }
 
     #[must_use]
@@ -179,6 +257,7 @@ impl DemoSession {
         let (radius_voxels, peak_energy) = match mode {
             FireMode::Rifle => (2, 7_500),
             FireMode::Explosive => (6, 42_000),
+            FireMode::TestCharge => (1, 1_000),
         };
         let command = ExplosionCommand {
             command_id: self.next_command_id,
@@ -188,6 +267,9 @@ impl DemoSession {
         };
         self.next_command_id = self.next_command_id.wrapping_add(1);
         let (packet, report) = self.server.execute_explosion(CLIENT_ID, command)?;
+        if let Some(runtime) = &mut self.structural {
+            runtime.observe_changes(&self.server, &packet.changes);
+        }
         let mut encoded = encode_frames(&packet, DATAGRAM_MTU)?;
         let encoded_bytes = encoded.iter().map(Vec::len).sum();
         let datagrams = encoded.len();
@@ -257,6 +339,9 @@ impl DemoSession {
         };
         self.next_command_id = self.next_command_id.wrapping_add(1);
         let (packet, report) = self.server.execute_build(CLIENT_ID, command, player)?;
+        if let Some(runtime) = &mut self.structural {
+            runtime.observe_changes(&self.server, &packet.changes);
+        }
         let mut encoded = encode_frames(&packet, DATAGRAM_MTU)?;
         let encoded_bytes = encoded.iter().map(Vec::len).sum();
         let datagrams = encoded.len();

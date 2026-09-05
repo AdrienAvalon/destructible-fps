@@ -25,6 +25,10 @@ pub struct MaterialProperties {
     pub structural_strength: u16,
     /// Relative amount of energy preserved as fragment velocity.
     pub fragmentation: u8,
+    /// Tangential contact response in thousandths for deterministic Coulomb friction.
+    pub friction_per_mille: u16,
+    /// Normal impact speed retained after a collision, in thousandths.
+    pub restitution_per_mille: u16,
 }
 
 impl Material {
@@ -36,48 +40,64 @@ impl Material {
                 blast_resistance: 1,
                 structural_strength: 0,
                 fragmentation: 0,
+                friction_per_mille: 0,
+                restitution_per_mille: 0,
             },
             Self::Soil => MaterialProperties {
                 density_kg_m3: 1_600,
                 blast_resistance: 1_200,
                 structural_strength: 180,
                 fragmentation: 20,
+                friction_per_mille: 850,
+                restitution_per_mille: 30,
             },
             Self::Stone => MaterialProperties {
                 density_kg_m3: 2_650,
                 blast_resistance: 8_500,
                 structural_strength: 1_600,
                 fragmentation: 75,
+                friction_per_mille: 780,
+                restitution_per_mille: 100,
             },
             Self::Wood => MaterialProperties {
                 density_kg_m3: 650,
                 blast_resistance: 1_800,
                 structural_strength: 650,
                 fragmentation: 55,
+                friction_per_mille: 620,
+                restitution_per_mille: 220,
             },
             Self::Brick => MaterialProperties {
                 density_kg_m3: 1_900,
                 blast_resistance: 3_500,
                 structural_strength: 700,
                 fragmentation: 90,
+                friction_per_mille: 720,
+                restitution_per_mille: 80,
             },
             Self::Concrete => MaterialProperties {
                 density_kg_m3: 2_400,
                 blast_resistance: 6_500,
                 structural_strength: 2_000,
                 fragmentation: 85,
+                friction_per_mille: 820,
+                restitution_per_mille: 60,
             },
             Self::Steel => MaterialProperties {
                 density_kg_m3: 7_850,
                 blast_resistance: 28_000,
                 structural_strength: 8_000,
                 fragmentation: 35,
+                friction_per_mille: 420,
+                restitution_per_mille: 180,
             },
             Self::Glass => MaterialProperties {
                 density_kg_m3: 2_500,
                 blast_resistance: 500,
                 structural_strength: 120,
                 fragmentation: 100,
+                friction_per_mille: 280,
+                restitution_per_mille: 320,
             },
         }
     }

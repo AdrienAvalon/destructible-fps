@@ -1,8 +1,9 @@
 use crate::destruction::{DestructionReport, Explosion};
 use crate::material::{InvalidMaterial, Voxel};
 use crate::physics::{
-    BodyError, BodyId, BodyLimits, BodyVoxel, FixedMicrometers3, RigidBodyDescriptor,
-    RigidBodyState, step_rigid_bodies, valid_rigid_body_state,
+    BodyError, BodyId, BodyLimits, BodyVoxel, FixedImpulseMilliNewtonSeconds3, FixedMicrometers3,
+    RigidBodyDescriptor, RigidBodyState, apply_linear_impulse, step_rigid_bodies,
+    valid_rigid_body_state,
 };
 use crate::structural::{
     StructuralAnchors, StructuralError, StructuralLimits, analyze_structural_changes,
@@ -12,7 +13,7 @@ use core::fmt;
 use std::collections::{BTreeMap, HashMap};
 
 const MAGIC: [u8; 4] = *b"DFPS";
-const PROTOCOL_VERSION: u8 = 4;
+const PROTOCOL_VERSION: u8 = 5;
 const DELTA_KIND: u8 = 1;
 const HEADER_BYTES: usize = 96;
 const CHANGE_BYTES: usize = 16;
@@ -275,7 +276,13 @@ impl AuthoritativeServer {
             return Err(CommandError::TooManyActiveBodyVoxels(active_body_voxels));
         }
         let (changes, body_assignments) = merged_detachment_changes(&self.world, &report, &bodies);
-        if !payload_fits_protocol(changes.len(), body_assignments.len(), 0, MAX_DATAGRAM_BYTES) {
+        let (spawned_states, body_updates) = initial_blast_states(&bodies, command);
+        if !payload_fits_protocol(
+            changes.len(),
+            body_assignments.len(),
+            body_updates.len(),
+            MAX_DATAGRAM_BYTES,
+        ) {
             rollback_changes(&mut self.world, &report.changes);
             return Err(CommandError::TransactionTooLarge {
                 changes: changes.len(),
@@ -287,8 +294,7 @@ impl AuthoritativeServer {
         }
         report.detached_voxels = spawned_voxels;
         report.changes = changes;
-        for body in bodies {
-            let state = RigidBodyState::at_spawn(&body);
+        for (body, state) in bodies.into_iter().zip(spawned_states) {
             self.body_fingerprint ^= body_fingerprint_token(&body, state);
             self.body_states.insert(body.id, state);
             self.bodies.insert(body.id, body);
@@ -306,7 +312,7 @@ impl AuthoritativeServer {
             final_body_fingerprint: self.body_fingerprint,
             changes: report.changes.clone(),
             body_assignments,
-            body_updates: Vec::new(),
+            body_updates,
         };
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.last_command_id.insert(client_id, command.command_id);
@@ -437,6 +443,68 @@ impl AuthoritativeServer {
             bodies.push(body);
         }
         Ok(bodies)
+    }
+}
+
+fn initial_blast_states(
+    bodies: &[RigidBodyDescriptor],
+    command: ExplosionCommand,
+) -> (Vec<RigidBodyState>, Vec<BodyStateUpdate>) {
+    let states = bodies
+        .iter()
+        .map(|body| {
+            let mut state = RigidBodyState::at_spawn(body);
+            let _ = apply_linear_impulse(body, &mut state, blast_impulse(body, command));
+            state
+        })
+        .collect::<Vec<_>>();
+    let updates = bodies
+        .iter()
+        .zip(&states)
+        .filter_map(|(body, &state)| {
+            (state != RigidBodyState::at_spawn(body)).then_some(BodyStateUpdate {
+                body_id: body.id,
+                state,
+            })
+        })
+        .collect();
+    (states, updates)
+}
+
+fn blast_impulse(
+    body: &RigidBodyDescriptor,
+    command: ExplosionCommand,
+) -> FixedImpulseMilliNewtonSeconds3 {
+    const UPWARD_BIAS_MM: i128 = 500;
+    let center_mm = |coordinate: i32| {
+        i128::from(coordinate)
+            .saturating_mul(1_000)
+            .saturating_add(500)
+    };
+    let direction = [
+        i128::from(body.center_of_mass_mm.x).saturating_sub(center_mm(command.center.x)),
+        i128::from(body.center_of_mass_mm.y)
+            .saturating_sub(center_mm(command.center.y))
+            .saturating_add(UPWARD_BIAS_MM),
+        i128::from(body.center_of_mass_mm.z).saturating_sub(center_mm(command.center.z)),
+    ];
+    let normalizer = direction
+        .iter()
+        .fold(0_u128, |sum, value| {
+            sum.saturating_add(value.unsigned_abs())
+        })
+        .max(1);
+    let magnitude =
+        u128::from(command.peak_energy).saturating_mul(u128::from(body.fragmentation_per_mille));
+    let component = |value: i128| {
+        let absolute = magnitude.saturating_mul(value.unsigned_abs()) / normalizer;
+        let bounded = i64::try_from(absolute).unwrap_or(i64::MAX);
+        bounded.saturating_mul(i64::try_from(value.signum()).unwrap_or_default())
+    };
+    FixedImpulseMilliNewtonSeconds3 {
+        x: component(direction[0]),
+        y: component(direction[1]),
+        z: component(direction[2]),
     }
 }
 
@@ -792,11 +860,6 @@ impl ClientReplica {
                 .find(|body| body.id == update.body_id)
                 .or_else(|| self.bodies.get(&update.body_id))
                 .ok_or(ReplicationError::UnknownBody(update.body_id))?;
-            if update.state.translation_um.x != previous.translation_um.x
-                || update.state.translation_um.z != previous.translation_um.z
-            {
-                return Err(ReplicationError::InvalidBodyState(update.body_id));
-            }
             final_body_fingerprint ^=
                 body_fingerprint_token(body, previous) ^ body_fingerprint_token(body, update.state);
             if let Some(state) = spawned_states.get_mut(&update.body_id) {
@@ -945,11 +1008,7 @@ fn validate_snapshot(
             .get(&id)
             .copied()
             .ok_or(ReplicationError::SnapshotBodySetMismatch)?;
-        let spawn = RigidBodyState::at_spawn(body);
-        if !valid_rigid_body_state(state)
-            || state.translation_um.x != spawn.translation_um.x
-            || state.translation_um.z != spawn.translation_um.z
-        {
+        if !valid_rigid_body_state(state) {
             return Err(ReplicationError::InvalidBodyState(id));
         }
     }
@@ -1596,11 +1655,30 @@ mod tests {
             .expect("snapshot state")
             .translation_um
             .x += 1;
+        let mut moving_client = ClientReplica::new(World::default());
+        assert_eq!(
+            moving_client.install_snapshot(
+                snapshot_world.clone(),
+                bodies.clone(),
+                &displaced_states,
+                2,
+                7,
+            ),
+            Ok(())
+        );
+        assert_eq!(moving_client.body_states(), &displaced_states);
+
+        let mut invalid_states = states.clone();
+        invalid_states
+            .get_mut(&1)
+            .expect("snapshot state")
+            .translation_um
+            .x = i64::MAX;
         assert_eq!(
             client.install_snapshot(
                 snapshot_world.clone(),
                 bodies.clone(),
-                &displaced_states,
+                &invalid_states,
                 2,
                 7,
             ),

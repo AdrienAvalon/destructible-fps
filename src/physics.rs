@@ -5,7 +5,7 @@ use crate::{
     structural::{ISLAND_FINGERPRINT_SEED, describe_island, mix_island_fingerprint},
 };
 use core::fmt;
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 const MILLIMETERS_PER_VOXEL: i64 = 1_000;
 const SQUARE_MILLIMETERS_PER_VOXEL: u128 = 1_000_000;
@@ -14,6 +14,8 @@ pub const SERVER_PHYSICS_HZ: i64 = 60;
 const GRAVITY_UM_PER_SECOND_SQUARED: i64 = -9_810_000;
 const MAX_LINEAR_SPEED_UM_PER_SECOND: i64 = 250_000_000;
 const MAX_WORLD_TRANSLATION_UM: i64 = 3_000_000_000_000_000;
+const RESPONSE_SCALE: i64 = 1_000;
+const MIN_BOUNCE_SPEED_UM_PER_SECOND: i64 = 500_000;
 const SLEEP_TICKS: u16 = 30;
 pub const MAX_BROAD_PHASE_PAIRS: usize = 8_192;
 pub type BodyId = u64;
@@ -46,6 +48,13 @@ pub struct FixedMillimeters3 {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FixedMicrometers3 {
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FixedImpulseMilliNewtonSeconds3 {
     pub x: i64,
     pub y: i64,
     pub z: i64,
@@ -122,6 +131,15 @@ pub struct RigidBodyDescriptor {
     pub collision_bottom: Vec<IVec3>,
     /// Highest occupied voxel in each local X/Z column, in the same canonical column order.
     pub collision_top: Vec<IVec3>,
+    /// Extremal occupied voxels for swept lateral contacts, each in canonical column order.
+    pub collision_left: Vec<IVec3>,
+    pub collision_right: Vec<IVec3>,
+    pub collision_back: Vec<IVec3>,
+    pub collision_front: Vec<IVec3>,
+    /// Mass-weighted material response coefficients in thousandths.
+    pub friction_per_mille: u16,
+    pub restitution_per_mille: u16,
+    pub fragmentation_per_mille: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -271,11 +289,24 @@ impl RigidBodyDescriptor {
 
         let (minimum, maximum) = body_bounds(&voxels);
         let mut mass_kg = 0_u64;
+        let mut weighted_friction = 0_u128;
+        let mut weighted_restitution = 0_u128;
+        let mut weighted_fragmentation = 0_u128;
         let mut fingerprint = ISLAND_FINGERPRINT_SEED;
         for body_voxel in &voxels {
-            mass_kg = mass_kg.saturating_add(u64::from(
-                body_voxel.voxel.material.properties().density_kg_m3,
-            ));
+            let properties = body_voxel.voxel.material.properties();
+            let voxel_mass = u64::from(properties.density_kg_m3);
+            mass_kg = mass_kg.saturating_add(voxel_mass);
+            weighted_friction = weighted_friction.saturating_add(
+                u128::from(voxel_mass).saturating_mul(u128::from(properties.friction_per_mille)),
+            );
+            weighted_restitution = weighted_restitution.saturating_add(
+                u128::from(voxel_mass).saturating_mul(u128::from(properties.restitution_per_mille)),
+            );
+            weighted_fragmentation = weighted_fragmentation.saturating_add(
+                u128::from(voxel_mass)
+                    .saturating_mul(u128::from(properties.fragmentation).saturating_mul(10)),
+            );
             fingerprint =
                 mix_island_fingerprint(fingerprint, body_voxel.position, body_voxel.voxel);
         }
@@ -284,7 +315,10 @@ impl RigidBodyDescriptor {
         }
         let center_of_mass_mm = center_of_mass(&voxels, mass_kg)?;
         let inertia_diagonal_kg_mm2 = inertia_diagonal(&voxels, center_of_mass_mm);
-        let (collision_bottom, collision_top) = collision_surfaces(&voxels);
+        let collision = collision_surfaces(&voxels);
+        let friction_per_mille = weighted_response(weighted_friction, mass_kg);
+        let restitution_per_mille = weighted_response(weighted_restitution, mass_kg);
+        let fragmentation_per_mille = weighted_response(weighted_fragmentation, mass_kg);
         Ok(Self {
             id: body_id,
             geometry_fingerprint: fingerprint,
@@ -294,8 +328,15 @@ impl RigidBodyDescriptor {
             mass_kg,
             center_of_mass_mm,
             inertia_diagonal_kg_mm2,
-            collision_bottom,
-            collision_top,
+            collision_bottom: collision.bottom,
+            collision_top: collision.top,
+            collision_left: collision.left,
+            collision_right: collision.right,
+            collision_back: collision.back,
+            collision_front: collision.front,
+            friction_per_mille,
+            restitution_per_mille,
+            fragmentation_per_mille,
         })
     }
 }
@@ -346,15 +387,48 @@ pub fn valid_rigid_body_state(state: RigidBodyState) -> bool {
             .integration_remainder
             .iter()
             .all(|&remainder| i64::from(remainder) < SERVER_PHYSICS_HZ)
-        && state.linear_velocity_um_per_second.x == 0
-        && state.linear_velocity_um_per_second.z == 0
-        && state.integration_remainder[0] == 0
-        && state.integration_remainder[2] == 0
         && valid_sleep
 }
 
-/// Advances one axis-aligned body with integer semi-implicit Euler integration and a swept
-/// downward collision query against static voxels.
+/// Applies a world-space linear impulse using integer milli-newton seconds and wakes the body.
+///
+/// One milli-newton second changes one kilogram by 1,000 micrometres per second. Components are
+/// divided independently with truncation toward zero and clamped to the authoritative speed bound.
+#[must_use]
+pub fn apply_linear_impulse(
+    body: &RigidBodyDescriptor,
+    state: &mut RigidBodyState,
+    impulse: FixedImpulseMilliNewtonSeconds3,
+) -> bool {
+    let before = *state;
+    for (velocity, impulse) in [
+        (&mut state.linear_velocity_um_per_second.x, impulse.x),
+        (&mut state.linear_velocity_um_per_second.y, impulse.y),
+        (&mut state.linear_velocity_um_per_second.z, impulse.z),
+    ] {
+        let delta = i128::from(impulse)
+            .saturating_mul(1_000)
+            .checked_div(i128::from(body.mass_kg))
+            .and_then(|value| i64::try_from(value).ok())
+            .unwrap_or_else(|| {
+                impulse
+                    .signum()
+                    .saturating_mul(MAX_LINEAR_SPEED_UM_PER_SECOND)
+            });
+        *velocity = velocity.saturating_add(delta).clamp(
+            -MAX_LINEAR_SPEED_UM_PER_SECOND,
+            MAX_LINEAR_SPEED_UM_PER_SECOND,
+        );
+    }
+    if state.linear_velocity_um_per_second != FixedMicrometers3::default() {
+        state.sleep_ticks = 0;
+        state.sleeping = false;
+    }
+    *state != before
+}
+
+/// Advances one axis-aligned body with integer semi-implicit Euler integration and three-axis
+/// swept collision queries against static voxels.
 #[must_use]
 pub fn step_rigid_body(
     world: &World,
@@ -373,25 +447,60 @@ pub fn step_rigid_body(
             -MAX_LINEAR_SPEED_UM_PER_SECOND,
             MAX_LINEAR_SPEED_UM_PER_SECOND,
         );
-    let (delta_y, remainder_y) = integrate_axis(
-        state.linear_velocity_um_per_second.y,
-        state.integration_remainder[1],
+    state.linear_velocity_um_per_second.x = state.linear_velocity_um_per_second.x.clamp(
+        -MAX_LINEAR_SPEED_UM_PER_SECOND,
+        MAX_LINEAR_SPEED_UM_PER_SECOND,
     );
-    let proposed_y = state.translation_um.y.saturating_add(delta_y);
-    let collision_y = static_collision_height(world, body, state.translation_um, proposed_y);
-    let collided_with_static = collision_y.is_some_and(|height| proposed_y < height);
-    if let Some(height) = collision_y.filter(|height| proposed_y < *height) {
-        state.translation_um.y = height;
-        state.linear_velocity_um_per_second.y = 0;
-        state.integration_remainder[1] = 0;
-        state.sleep_ticks = state.sleep_ticks.saturating_add(1);
-        if state.sleep_ticks >= SLEEP_TICKS {
-            state.sleeping = true;
+    state.linear_velocity_um_per_second.z = state.linear_velocity_um_per_second.z.clamp(
+        -MAX_LINEAR_SPEED_UM_PER_SECOND,
+        MAX_LINEAR_SPEED_UM_PER_SECOND,
+    );
+    let mut collided_with_static = false;
+    for axis in [Axis::X, Axis::Z, Axis::Y] {
+        let velocity = axis.component(state.linear_velocity_um_per_second);
+        let remainder_index = axis.index();
+        let (delta, remainder) =
+            integrate_axis(velocity, state.integration_remainder[remainder_index]);
+        let current = axis.component(state.translation_um);
+        let proposed = current
+            .saturating_add(delta)
+            .clamp(-MAX_WORLD_TRANSLATION_UM, MAX_WORLD_TRANSLATION_UM);
+        let contact = sweep_static_axis(world, body, state.translation_um, axis, proposed);
+        if let Some(contact) = contact {
+            collided_with_static = true;
+            axis.set_component(&mut state.translation_um, contact.origin);
+            let incoming = axis.component(state.linear_velocity_um_per_second);
+            let restitution =
+                combined_response(body.restitution_per_mille, contact.restitution_per_mille);
+            let reflected = reflected_velocity(incoming, restitution);
+            axis.set_component(&mut state.linear_velocity_um_per_second, reflected);
+            state.integration_remainder[remainder_index] = 0;
+            if axis == Axis::Y && incoming < 0 {
+                let friction =
+                    combined_response(body.friction_per_mille, contact.friction_per_mille);
+                apply_ground_friction(state, incoming.unsigned_abs(), friction);
+            }
+        } else {
+            axis.set_component(&mut state.translation_um, proposed);
+            state.integration_remainder[remainder_index] = remainder;
         }
+    }
+
+    let supported = sweep_static_axis(
+        world,
+        body,
+        state.translation_um,
+        Axis::Y,
+        state.translation_um.y.saturating_sub(1),
+    )
+    .is_some();
+    if supported && state.linear_velocity_um_per_second == FixedMicrometers3::default() {
+        state.integration_remainder = [0; 3];
+        state.sleep_ticks = state.sleep_ticks.saturating_add(1).min(SLEEP_TICKS);
+        state.sleeping = state.sleep_ticks == SLEEP_TICKS;
     } else {
-        state.translation_um.y = proposed_y;
-        state.integration_remainder[1] = remainder_y;
         state.sleep_ticks = 0;
+        state.sleeping = false;
     }
     BodyStepResult {
         moved: *state != previous,
@@ -669,13 +778,63 @@ fn settle_on_dynamic_support(
     state.translation_um.y = height;
     state.linear_velocity_um_per_second.y = 0;
     state.integration_remainder[1] = 0;
-    if stable_contact {
+    let stopped_horizontally =
+        state.linear_velocity_um_per_second.x == 0 && state.linear_velocity_um_per_second.z == 0;
+    if stable_contact && stopped_horizontally {
         state.sleep_ticks = before.sleep_ticks.saturating_add(1).min(SLEEP_TICKS);
         state.sleeping = state.sleep_ticks == SLEEP_TICKS;
     } else {
         state.sleep_ticks = 0;
         state.sleeping = false;
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+impl Axis {
+    const fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+
+    const fn component(self, vector: FixedMicrometers3) -> i64 {
+        match self {
+            Self::X => vector.x,
+            Self::Y => vector.y,
+            Self::Z => vector.z,
+        }
+    }
+
+    const fn set_component(self, vector: &mut FixedMicrometers3, value: i64) {
+        match self {
+            Self::X => vector.x = value,
+            Self::Y => vector.y = value,
+            Self::Z => vector.z = value,
+        }
+    }
+
+    const fn orthogonal(self) -> [Self; 2] {
+        match self {
+            Self::X => [Self::Y, Self::Z],
+            Self::Y => [Self::X, Self::Z],
+            Self::Z => [Self::X, Self::Y],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StaticContact {
+    origin: i64,
+    friction_per_mille: u16,
+    restitution_per_mille: u16,
 }
 
 fn integrate_axis(velocity: i64, remainder: u8) -> (i64, u8) {
@@ -685,46 +844,201 @@ fn integrate_axis(velocity: i64, remainder: u8) -> (i64, u8) {
     (delta, u8::try_from(remainder).unwrap_or_default())
 }
 
-fn static_collision_height(
+fn sweep_static_axis(
     world: &World,
     body: &RigidBodyDescriptor,
     translation: FixedMicrometers3,
-    proposed_y: i64,
-) -> Option<i64> {
-    let mut highest_origin = None;
-    for bottom in &body.collision_bottom {
-        let local_x = i64::from(bottom.x - body.minimum.x) * MICROMETERS_PER_VOXEL;
-        let local_y = i64::from(bottom.y - body.minimum.y) * MICROMETERS_PER_VOXEL;
-        let local_z = i64::from(bottom.z - body.minimum.z) * MICROMETERS_PER_VOXEL;
-        let world_x = (translation.x.saturating_add(local_x)).div_euclid(MICROMETERS_PER_VOXEL);
-        let world_z = (translation.z.saturating_add(local_z)).div_euclid(MICROMETERS_PER_VOXEL);
-        let current_bottom = translation.y.saturating_add(local_y);
-        let proposed_bottom = proposed_y.saturating_add(local_y);
-        let first_y = current_bottom
-            .saturating_sub(1)
-            .div_euclid(MICROMETERS_PER_VOXEL);
-        let last_y = proposed_bottom.div_euclid(MICROMETERS_PER_VOXEL);
-        let (Ok(world_x), Ok(world_z)) = (i32::try_from(world_x), i32::try_from(world_z)) else {
-            continue;
+    axis: Axis,
+    proposed: i64,
+) -> Option<StaticContact> {
+    let current = axis.component(translation);
+    let direction = proposed.cmp(&current);
+    if direction == std::cmp::Ordering::Equal {
+        return None;
+    }
+    let positive = direction == std::cmp::Ordering::Greater;
+    let surface = match (axis, positive) {
+        (Axis::X, false) => &body.collision_left,
+        (Axis::X, true) => &body.collision_right,
+        (Axis::Y, false) => &body.collision_bottom,
+        (Axis::Y, true) => &body.collision_top,
+        (Axis::Z, false) => &body.collision_back,
+        (Axis::Z, true) => &body.collision_front,
+    };
+    let orthogonal = axis.orthogonal();
+    let mut nearest = None;
+    for &surface_voxel in surface {
+        let local = local_voxel_minimum(body, surface_voxel);
+        let local_axis = axis.component(local);
+        let local_face = if positive {
+            local_axis.saturating_add(MICROMETERS_PER_VOXEL)
+        } else {
+            local_axis
         };
-        for candidate_y in (last_y..=first_y).rev() {
-            let Ok(candidate_y) = i32::try_from(candidate_y) else {
-                continue;
+        let current_face = current.saturating_add(local_face);
+        let proposed_face = proposed.saturating_add(local_face);
+        let (first_candidate, last_candidate) =
+            swept_candidate_cells(current_face, proposed_face, positive);
+        let first_orthogonal = overlapped_cells(
+            orthogonal[0]
+                .component(translation)
+                .saturating_add(orthogonal[0].component(local)),
+        );
+        let second_orthogonal = overlapped_cells(
+            orthogonal[1]
+                .component(translation)
+                .saturating_add(orthogonal[1].component(local)),
+        );
+        let candidate_span = last_candidate.saturating_sub(first_candidate);
+        for offset in 0..=candidate_span {
+            let candidate = if positive {
+                first_candidate.saturating_add(offset)
+            } else {
+                last_candidate.saturating_sub(offset)
             };
-            if world
-                .voxel(IVec3::new(world_x, candidate_y, world_z))
-                .is_solid()
-            {
-                let support_top =
-                    i64::from(candidate_y.saturating_add(1)).saturating_mul(MICROMETERS_PER_VOXEL);
-                let origin_y = support_top.saturating_sub(local_y);
-                highest_origin =
-                    Some(highest_origin.map_or(origin_y, |height: i64| height.max(origin_y)));
+            let mut candidate_hit = false;
+            for first in first_orthogonal.0..=first_orthogonal.1 {
+                for second in second_orthogonal.0..=second_orthogonal.1 {
+                    let mut coordinates = [0_i64; 3];
+                    coordinates[axis.index()] = candidate;
+                    coordinates[orthogonal[0].index()] = first;
+                    coordinates[orthogonal[1].index()] = second;
+                    let Ok(x) = i32::try_from(coordinates[0]) else {
+                        return Some(out_of_bounds_contact(current));
+                    };
+                    let Ok(y) = i32::try_from(coordinates[1]) else {
+                        return Some(out_of_bounds_contact(current));
+                    };
+                    let Ok(z) = i32::try_from(coordinates[2]) else {
+                        return Some(out_of_bounds_contact(current));
+                    };
+                    let voxel = world.voxel(IVec3::new(x, y, z));
+                    if !voxel.is_solid() {
+                        continue;
+                    }
+                    candidate_hit = true;
+                    let boundary = if positive {
+                        candidate.saturating_mul(MICROMETERS_PER_VOXEL)
+                    } else {
+                        candidate
+                            .saturating_add(1)
+                            .saturating_mul(MICROMETERS_PER_VOXEL)
+                    };
+                    let contact = StaticContact {
+                        origin: boundary.saturating_sub(local_face),
+                        friction_per_mille: voxel.material.properties().friction_per_mille,
+                        restitution_per_mille: voxel.material.properties().restitution_per_mille,
+                    };
+                    merge_contact(&mut nearest, contact, positive);
+                }
+            }
+            if candidate_hit {
                 break;
             }
         }
     }
-    highest_origin
+    nearest
+}
+
+const fn swept_candidate_cells(
+    current_face: i64,
+    proposed_face: i64,
+    positive: bool,
+) -> (i64, i64) {
+    if positive {
+        (
+            current_face.div_euclid(MICROMETERS_PER_VOXEL),
+            proposed_face
+                .saturating_sub(1)
+                .div_euclid(MICROMETERS_PER_VOXEL),
+        )
+    } else {
+        (
+            proposed_face
+                .saturating_sub(1)
+                .div_euclid(MICROMETERS_PER_VOXEL),
+            current_face
+                .saturating_sub(1)
+                .div_euclid(MICROMETERS_PER_VOXEL),
+        )
+    }
+}
+
+fn local_voxel_minimum(body: &RigidBodyDescriptor, position: IVec3) -> FixedMicrometers3 {
+    FixedMicrometers3 {
+        x: i64::from(position.x.saturating_sub(body.minimum.x)) * MICROMETERS_PER_VOXEL,
+        y: i64::from(position.y.saturating_sub(body.minimum.y)) * MICROMETERS_PER_VOXEL,
+        z: i64::from(position.z.saturating_sub(body.minimum.z)) * MICROMETERS_PER_VOXEL,
+    }
+}
+
+const fn overlapped_cells(start: i64) -> (i64, i64) {
+    (
+        start.div_euclid(MICROMETERS_PER_VOXEL),
+        start
+            .saturating_add(MICROMETERS_PER_VOXEL - 1)
+            .div_euclid(MICROMETERS_PER_VOXEL),
+    )
+}
+
+fn merge_contact(nearest: &mut Option<StaticContact>, contact: StaticContact, positive: bool) {
+    match nearest {
+        Some(current) if current.origin == contact.origin => {
+            current.friction_per_mille = current.friction_per_mille.max(contact.friction_per_mille);
+            current.restitution_per_mille = current
+                .restitution_per_mille
+                .max(contact.restitution_per_mille);
+        }
+        Some(current)
+            if (positive && current.origin <= contact.origin)
+                || (!positive && current.origin >= contact.origin) => {}
+        _ => *nearest = Some(contact),
+    }
+}
+
+const fn out_of_bounds_contact(origin: i64) -> StaticContact {
+    StaticContact {
+        origin,
+        friction_per_mille: 1_000,
+        restitution_per_mille: 0,
+    }
+}
+
+fn reflected_velocity(incoming: i64, restitution_per_mille: u16) -> i64 {
+    if incoming.unsigned_abs() < MIN_BOUNCE_SPEED_UM_PER_SECOND.cast_unsigned()
+        || restitution_per_mille == 0
+    {
+        return 0;
+    }
+    let reflected = -i128::from(incoming).saturating_mul(i128::from(restitution_per_mille))
+        / i128::from(RESPONSE_SCALE);
+    i64::try_from(reflected).unwrap_or_else(|_| -incoming.signum() * MAX_LINEAR_SPEED_UM_PER_SECOND)
+}
+
+fn apply_ground_friction(state: &mut RigidBodyState, normal_speed: u64, friction_per_mille: u16) {
+    let reduction = u128::from(normal_speed).saturating_mul(u128::from(friction_per_mille))
+        / u128::from(RESPONSE_SCALE.cast_unsigned());
+    let reduction = i64::try_from(reduction).unwrap_or(i64::MAX);
+    for (axis, remainder_index) in [(Axis::X, 0), (Axis::Z, 2)] {
+        let velocity = axis.component(state.linear_velocity_um_per_second);
+        let slowed = approach_zero(velocity, reduction);
+        axis.set_component(&mut state.linear_velocity_um_per_second, slowed);
+        if slowed == 0 {
+            state.integration_remainder[remainder_index] = 0;
+        }
+    }
+}
+
+fn approach_zero(value: i64, amount: i64) -> i64 {
+    match value.cmp(&0) {
+        std::cmp::Ordering::Greater => value.saturating_sub(amount).max(0),
+        std::cmp::Ordering::Less => value.saturating_add(amount).min(0),
+        std::cmp::Ordering::Equal => 0,
+    }
+}
+
+const fn combined_response(body: u16, surface: u16) -> u16 {
+    u16::midpoint(body, surface)
 }
 
 fn body_aabb(
@@ -977,10 +1291,21 @@ fn body_bounds(voxels: &[BodyVoxel]) -> (IVec3, IVec3) {
     )
 }
 
-fn collision_surfaces(voxels: &[BodyVoxel]) -> (Vec<IVec3>, Vec<IVec3>) {
-    let mut columns = BTreeMap::<(i32, i32), (IVec3, IVec3)>::new();
+struct CollisionSurfaces {
+    bottom: Vec<IVec3>,
+    top: Vec<IVec3>,
+    left: Vec<IVec3>,
+    right: Vec<IVec3>,
+    back: Vec<IVec3>,
+    front: Vec<IVec3>,
+}
+
+fn collision_surfaces(voxels: &[BodyVoxel]) -> CollisionSurfaces {
+    let mut vertical = HashMap::<(i32, i32), (IVec3, IVec3)>::with_capacity(voxels.len());
+    let mut lateral_x = HashMap::<(i32, i32), (IVec3, IVec3)>::with_capacity(voxels.len());
+    let mut lateral_z = HashMap::<(i32, i32), (IVec3, IVec3)>::with_capacity(voxels.len());
     for body_voxel in voxels {
-        columns
+        vertical
             .entry((body_voxel.position.x, body_voxel.position.z))
             .and_modify(|(bottom, top)| {
                 if body_voxel.position.y < bottom.y {
@@ -991,8 +1316,51 @@ fn collision_surfaces(voxels: &[BodyVoxel]) -> (Vec<IVec3>, Vec<IVec3>) {
                 }
             })
             .or_insert((body_voxel.position, body_voxel.position));
+        lateral_x
+            .entry((body_voxel.position.y, body_voxel.position.z))
+            .and_modify(|(left, right)| {
+                if body_voxel.position.x < left.x {
+                    *left = body_voxel.position;
+                }
+                if body_voxel.position.x > right.x {
+                    *right = body_voxel.position;
+                }
+            })
+            .or_insert((body_voxel.position, body_voxel.position));
+        lateral_z
+            .entry((body_voxel.position.x, body_voxel.position.y))
+            .and_modify(|(back, front)| {
+                if body_voxel.position.z < back.z {
+                    *back = body_voxel.position;
+                }
+                if body_voxel.position.z > front.z {
+                    *front = body_voxel.position;
+                }
+            })
+            .or_insert((body_voxel.position, body_voxel.position));
     }
-    columns.into_values().unzip()
+    let (bottom, top) = sorted_collision_pair(vertical);
+    let (left, right) = sorted_collision_pair(lateral_x);
+    let (back, front) = sorted_collision_pair(lateral_z);
+    CollisionSurfaces {
+        bottom,
+        top,
+        left,
+        right,
+        back,
+        front,
+    }
+}
+
+fn sorted_collision_pair(columns: HashMap<(i32, i32), (IVec3, IVec3)>) -> (Vec<IVec3>, Vec<IVec3>) {
+    let mut columns = columns.into_iter().collect::<Vec<_>>();
+    columns.sort_unstable_by_key(|(key, _surfaces)| *key);
+    columns.into_iter().map(|(_key, surfaces)| surfaces).unzip()
+}
+
+fn weighted_response(weighted: u128, mass_kg: u64) -> u16 {
+    let response = weighted / u128::from(mass_kg);
+    u16::try_from(response.min(u128::from(RESPONSE_SCALE.cast_unsigned()))).unwrap_or(u16::MAX)
 }
 
 #[allow(clippy::missing_const_for_fn)]
@@ -1169,6 +1537,189 @@ mod tests {
     }
 
     #[test]
+    fn material_response_and_collision_surfaces_are_canonical() {
+        let voxels = vec![
+            BodyVoxel {
+                position: IVec3::new(0, 2, 0),
+                voxel: Voxel::new(Material::Steel),
+            },
+            BodyVoxel {
+                position: IVec3::new(1, 2, 0),
+                voxel: Voxel::new(Material::Wood),
+            },
+        ];
+
+        let body = RigidBodyDescriptor::from_replicated_voxels(1, voxels, BodyLimits::default())
+            .expect("connected mixed-material body");
+
+        assert_eq!(body.friction_per_mille, 435);
+        assert_eq!(body.restitution_per_mille, 183);
+        assert_eq!(body.fragmentation_per_mille, 365);
+        assert_eq!(
+            body.collision_bottom,
+            vec![IVec3::new(0, 2, 0), IVec3::new(1, 2, 0)]
+        );
+        assert_eq!(body.collision_top, body.collision_bottom);
+        assert_eq!(body.collision_left, vec![IVec3::new(0, 2, 0)]);
+        assert_eq!(body.collision_right, vec![IVec3::new(1, 2, 0)]);
+        assert_eq!(body.collision_back, body.collision_bottom);
+        assert_eq!(body.collision_front, body.collision_bottom);
+    }
+
+    #[test]
+    fn integer_impulse_changes_all_axes_and_wakes_a_sleeping_body() {
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![BodyVoxel {
+                position: IVec3::new(0, 2, 0),
+                voxel: Voxel::new(Material::Concrete),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("one concrete voxel");
+        let mut state = RigidBodyState::at_spawn(&body);
+        state.sleep_ticks = SLEEP_TICKS;
+        state.sleeping = true;
+
+        assert!(apply_linear_impulse(
+            &body,
+            &mut state,
+            FixedImpulseMilliNewtonSeconds3 {
+                x: 2_400,
+                y: -4_800,
+                z: 7_200,
+            },
+        ));
+        assert_eq!(
+            state.linear_velocity_um_per_second,
+            FixedMicrometers3 {
+                x: 1_000,
+                y: -2_000,
+                z: 3_000,
+            }
+        );
+        assert_eq!(state.sleep_ticks, 0);
+        assert!(!state.sleeping);
+    }
+
+    #[test]
+    fn three_axis_integration_is_repeatable_and_preserves_remainders() {
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![BodyVoxel {
+                position: IVec3::new(0, 100, 0),
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("airborne body");
+        let world = World::default();
+        let mut first = RigidBodyState::at_spawn(&body);
+        first.linear_velocity_um_per_second.x = 1_000_001;
+        first.linear_velocity_um_per_second.z = -2_000_003;
+        let mut second = first;
+
+        for _ in 0..120 {
+            let _ = step_rigid_body(&world, &body, &mut first);
+            let _ = step_rigid_body(&world, &body, &mut second);
+        }
+
+        assert_eq!(first, second);
+        assert_ne!(first.translation_um.x, 0);
+        assert_ne!(first.translation_um.z, 0);
+        let physics_hz = u8::try_from(SERVER_PHYSICS_HZ).expect("physics Hz fits wire remainder");
+        assert!(first.integration_remainder[0] < physics_hz);
+        assert!(first.integration_remainder[2] < physics_hz);
+    }
+
+    #[test]
+    fn high_speed_lateral_sweep_is_symmetric_across_negative_coordinates() {
+        let position = IVec3::new(0, 5, 0);
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![BodyVoxel {
+                position,
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("one wood voxel");
+        for (wall_x, velocity, expected_origin, expected_velocity) in [
+            (2, 120_000_000, MICROMETERS_PER_VOXEL, -32_400_000),
+            (-2, -120_000_000, -MICROMETERS_PER_VOXEL, 32_400_000),
+        ] {
+            let mut world = World::default();
+            world.set_voxel(IVec3::new(wall_x, 5, 0), Voxel::new(Material::Glass));
+            let mut state = RigidBodyState::at_spawn(&body);
+            state.linear_velocity_um_per_second.x = velocity;
+
+            let result = step_rigid_body(&world, &body, &mut state);
+
+            assert!(result.collided_with_static);
+            assert_eq!(state.translation_um.x, expected_origin);
+            assert_eq!(state.linear_velocity_um_per_second.x, expected_velocity);
+            assert!(state.translation_um.y < 5 * MICROMETERS_PER_VOXEL);
+        }
+    }
+
+    #[test]
+    fn upward_sweep_hits_ceiling_without_tunneling() {
+        let position = IVec3::new(0, 1, 0);
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![BodyVoxel {
+                position,
+                voxel: Voxel::new(Material::Concrete),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("one concrete voxel");
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 3, 0), Voxel::new(Material::Steel));
+        let mut state = RigidBodyState::at_spawn(&body);
+        state.linear_velocity_um_per_second.y = 120_000_000;
+
+        let result = step_rigid_body(&world, &body, &mut state);
+
+        assert!(result.collided_with_static);
+        assert_eq!(state.translation_um.y, 2 * MICROMETERS_PER_VOXEL);
+        assert!(state.linear_velocity_um_per_second.y < 0);
+    }
+
+    #[test]
+    fn grounded_friction_stops_horizontal_motion_and_allows_sleep() {
+        let position = IVec3::new(0, 1, 0);
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![BodyVoxel {
+                position,
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("one wood voxel");
+        let mut world = World::default();
+        world.fill_box(
+            IVec3::new(-32, 0, -2),
+            IVec3::new(32, 0, 2),
+            Voxel::new(Material::Soil),
+        );
+        let mut state = RigidBodyState::at_spawn(&body);
+        state.linear_velocity_um_per_second.x = 2_000_000;
+
+        for _ in 0..180 {
+            let _ = step_rigid_body(&world, &body, &mut state);
+        }
+
+        assert_eq!(
+            state.linear_velocity_um_per_second,
+            FixedMicrometers3::default()
+        );
+        assert!(state.translation_um.x > 0);
+        assert!(state.sleeping);
+    }
+
+    #[test]
     fn falling_body_sweeps_to_ground_and_sleeps_deterministically() {
         let mut world = World::default();
         world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
@@ -1315,7 +1866,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_or_incoherent_wire_states_are_invalid() {
+    fn bounded_horizontal_wire_states_are_valid_but_incoherent_sleep_is_not() {
         let mut state = RigidBodyState {
             translation_um: FixedMicrometers3::default(),
             linear_velocity_um_per_second: FixedMicrometers3::default(),
@@ -1325,11 +1876,16 @@ mod tests {
         };
         assert!(valid_rigid_body_state(state));
         state.linear_velocity_um_per_second.x = 1;
-        assert!(!valid_rigid_body_state(state));
-        state.linear_velocity_um_per_second.x = 0;
+        state.linear_velocity_um_per_second.z = -1;
+        assert!(valid_rigid_body_state(state));
         state.sleeping = true;
         assert!(!valid_rigid_body_state(state));
+        state.linear_velocity_um_per_second = FixedMicrometers3::default();
         state.sleep_ticks = SLEEP_TICKS;
         assert!(valid_rigid_body_state(state));
+        state.sleeping = false;
+        state.sleep_ticks = 0;
+        state.linear_velocity_um_per_second.x = MAX_LINEAR_SPEED_UM_PER_SECOND + 1;
+        assert!(!valid_rigid_body_state(state));
     }
 }

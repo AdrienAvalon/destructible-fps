@@ -119,6 +119,8 @@ fn structural_detachment_is_one_replicated_authoritative_transaction() {
         .expect("connector blast must detach the upper column");
     assert_eq!(report.detached_voxels, 2);
     assert_eq!(packet.body_assignments.len(), 2);
+    assert_eq!(packet.body_updates.len(), 1);
+    assert!(packet.body_updates[0].state.linear_velocity_um_per_second.y > 0);
     assert_eq!(server.bodies().len(), 1);
     assert_eq!(server.world().voxel(IVec3::new(0, 2, 0)), Voxel::AIR);
     assert_eq!(server.world().voxel(IVec3::new(0, 3, 0)), Voxel::AIR);
@@ -126,8 +128,8 @@ fn structural_detachment_is_one_replicated_authoritative_transaction() {
 
     let mut assembler = FrameAssembler::default();
     let mut complete = None;
-    for bytes in encode_frames(&packet, 118)
-        .expect("minimum body-assignment MTU")
+    for bytes in encode_frames(&packet, 158)
+        .expect("minimum body-state MTU")
         .into_iter()
         .rev()
     {
@@ -145,6 +147,50 @@ fn structural_detachment_is_one_replicated_authoritative_transaction() {
     assert_eq!(client.world().fingerprint(), server.world().fingerprint());
     assert_eq!(client.body_fingerprint(), server.body_fingerprint());
     assert_eq!(client.bodies(), server.bodies());
+}
+
+#[test]
+fn off_center_blast_impulse_moves_and_replicates_on_all_active_axes() {
+    let mut world = World::default();
+    world.set_voxel(IVec3::new(2, 0, 0), Voxel::new(Material::Steel));
+    world.set_voxel(IVec3::new(2, 1, 0), Voxel::new(Material::Glass));
+    world.fill_box(
+        IVec3::new(2, 2, 0),
+        IVec3::new(2, 3, 0),
+        Voxel::new(Material::Wood),
+    );
+    let mut server = AuthoritativeServer::new(world.clone());
+    let mut client = ClientReplica::new(world);
+
+    let (spawn, report) = server
+        .execute_explosion(
+            7,
+            ExplosionCommand {
+                command_id: 1,
+                center: IVec3::new(1, 1, 0),
+                radius_voxels: 1,
+                peak_energy: 1_200,
+            },
+        )
+        .expect("off-centre support blast");
+
+    assert_eq!(report.detached_voxels, 2);
+    assert_eq!(spawn.body_updates.len(), 1);
+    let initial_state = spawn.body_updates[0].state;
+    assert!(initial_state.linear_velocity_um_per_second.x > 0);
+    assert!(initial_state.linear_velocity_um_per_second.y > 0);
+    assert_eq!(client.receive(&spawn), Ok(ClientStatus::Applied));
+    assert_eq!(client.body_states(), server.body_states());
+
+    for _ in 0..30 {
+        let (packet, _) = server.advance_physics();
+        let packet = packet.expect("moving body emits a state delta");
+        assert_eq!(client.receive(&packet), Ok(ClientStatus::Applied));
+        assert_eq!(client.body_states(), server.body_states());
+        assert_eq!(client.body_fingerprint(), server.body_fingerprint());
+    }
+
+    assert!(server.body_states()[&1].translation_um.x > initial_state.translation_um.x);
 }
 
 #[test]
@@ -382,6 +428,12 @@ fn codec_rejects_truncated_and_corrupted_frames() {
     let mut corrupted = frames[0].clone();
     corrupted[0] = b'X';
     assert!(decode_frame(&corrupted).is_err());
+    let mut old_version = frames[0].clone();
+    old_version[4] = 4;
+    assert_eq!(
+        decode_frame(&old_version),
+        Err(CodecError::UnsupportedVersion(4))
+    );
 }
 
 #[test]

@@ -3,6 +3,53 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — three-axis rigid-body response promotion
+
+Source state: parent `d9468ff` plus the physics and protocol-v5 increment documented here. The
+promotion suite passed 77 library tests, four binary tests, and 40 integration tests in debug and
+release. New cases cover exact XYZ impulse conversion, sleep wake-up, bit-identical fixed-step
+repetition, symmetric 120 m/s lateral wall impacts across negative coordinates without tunnelling,
+upward ceiling impact, grounded friction to sleep, mass-weighted mixed-material response, bounded
+horizontal wire states, and an off-centre blast replicated for 30 ticks without a body-fingerprint
+divergence.
+
+The solver remains axis-aligned. It integrates all three translation axes at 60 Hz, retains each
+Euclidean division remainder, and sweeps the six canonical body silhouettes against static voxels.
+Static contact combines mass-weighted body and surface coefficients, suppresses sub-0.5 m/s
+micro-bounces, and applies deterministic ground friction. Newly detached bodies receive a bounded
+momentum budget proportional to blast energy and mass-weighted fragmentation; this response is
+deterministic gameplay calibration, not a claim of real-world explosive-energy units. Protocol v5
+separates these semantics from v4 peers that rejected horizontal state.
+
+Sequential release evidence on the same machine was:
+
+```bash
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario lateral-sweep
+```
+
+| Fixture | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|
+| Authoritative protocol-v5 destruction event | 0.012 ms | 0.221 ms | 0.362 ms | not reported |
+| Structural analysis plus six-surface body promotion | 4.221 ms | 4.401 ms | 4.553 ms | 4.707 ms |
+| 1,024-body physics tick | 0.468 ms | 0.882 ms | 0.903 ms | 0.932 ms |
+| 1,024-body four-cell lateral sweep | 0.519 ms | 0.536 ms | 0.550 ms | 0.634 ms |
+| Representative snapshot round trip | 8.366 ms | 8.449 ms | 9.773 ms | 9.773 ms |
+
+The destruction fixture sustained 21,526 events/s and emitted 865 frames / 0.520 MiB while creating
+32 active bodies with initial state updates. The physics fixture ended with all 1,024 bodies asleep,
+768 maximum broad-phase pairs, 8,192 static contacts, and 68,096 vertical body contacts. The
+separate lateral fixture resets outside each timed sample, then makes every body sweep four cells
+into its own wall; all 307,200 expected contacts resolved. The three-axis solver remains well below
+the 12 ms server-work target. Rotation, lateral dynamic-body response, interest filtering, and full
+socket scheduling are still excluded from this promotion.
+
+A five-second Vulkan regression smoke on the NVIDIA GeForce RTX 4050 Laptop GPU completed with 358
+CPU and 356 GPU samples, zero timestamp drops, one visible body returned to sleep, and GPU-total
+p99 0.698 ms (max 0.749 ms). Initial GPU setup took 314.5 ms and the 128-chunk bootstrap stream took
+47.7 ms. CPU frame-work p99 was 33.462 ms under presentation pacing; the short run proves clean
+render integration, not the final sustained 1,920×1,080 client budget.
+
 ## 2026-09-05 — standalone secure authority promotion
 
 Source state: commit `6900d38` plus the standalone configuration/process increment documented here.
@@ -312,7 +359,7 @@ cargo run --release --bin destruction-benchmark -- --events 500
 ```
 
 The representative multi-material scene completed 500 server-authoritative destruction, structural
-analysis, body promotion, protocol-v4 fragmentation, reordering, decode, reassembly,
+analysis, body promotion, then-current protocol-v4 fragmentation, reordering, decode, reassembly,
 client-application, and final-verification cycles at 21,524 events/s. Event latency was 0.012 ms
 p50, 0.229 ms p95, and 0.354 ms p99, or 2.1% of one 60 Hz frame budget. The run produced 838
 application datagrams (0.515 MiB), fractured 13,009 voxels, detached 1,361 voxels into 32 active
@@ -399,6 +446,7 @@ four exact canonical heights or the benchmark fails.
 
 The broad phase reports saturation only on the 8,193rd candidate; the complete tentative tick is
 then discarded, so overload cannot commit a partial or tunnelling-prone result. This core-solver
-result is comfortably below the 12 ms server-work target but still excludes horizontal impulses,
-friction, restitution, rotation, interest filtering, serialization, socket I/O, and other gameplay
-systems. Those costs require separate promotion evidence before the Stage 2 exit gate can pass.
+result was comfortably below the 12 ms server-work target. At this earlier solver state it still
+excluded horizontal impulses, friction, restitution, rotation, interest filtering, serialization,
+socket I/O, and other gameplay systems; the newer protocol-v5 promotion near the top of this file
+supersedes the first three exclusions.

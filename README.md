@@ -37,7 +37,7 @@ The Linux demo now combines the authoritative core with a real-time first-person
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,
   server-owned body descriptors in the same transaction;
-- protocol-v4 body assignments and fixed-state updates using compact server-monotonic 64-bit entity
+- protocol-v5 body assignments and three-axis fixed-state updates using compact server-monotonic 64-bit entity
   IDs, independent 128-bit geometry fingerprints, pre/post body fingerprints, and full client-side
   connectivity, material, mass, identity, and state revalidation;
 - immediate detection of packet gaps and replica divergence;
@@ -47,8 +47,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   background remeshing limited to chunks whose visible boundary changed;
 - bounded off-thread body meshing in local space, with fixed-capacity GPU instance transforms,
   independent body frustum culling, and participation in both world and shadow passes;
-- 60 Hz server-authoritative body gravity in deterministic micrometre units, swept static and
-  voxel-column body collision, stable vertical stacking, wake propagation, sleeping, bounded
+- 60 Hz server-authoritative body motion in deterministic micrometre units, mass-weighted blast
+  impulses, three-axis swept static collision, material ground friction and normal restitution,
+  vertical voxel-column body collision, stable stacking, wake propagation, sleeping, bounded
   sweep-and-prune broad phase, atomic overload rollback, and replicated GPU transforms;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
@@ -58,19 +59,19 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
-game. Horizontal and angular rigid-body response, progressive structural stress, authenticated
-remote-authority integration, trusted OIDC discovery/JWKS provisioning and certificate lifecycle,
-adaptive retransmission and congestion control, audio, asset-quality PBR, temporal anti-aliasing,
-and large-world residency streaming remain explicit later gates.
+game. Angular motion, lateral dynamic-body impulse exchange, progressive structural stress,
+authenticated remote-authority integration, trusted OIDC discovery/JWKS provisioning and
+certificate lifecycle, adaptive retransmission and congestion control, audio, asset-quality PBR,
+temporal anti-aliasing, and large-world residency streaming remain explicit later gates.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
 canonical detached-island proofs. The server revalidates each proof, derives integer-millimetre mass
 properties, removes its voxels from the static world, and replicates the new body atomically. The
-body is rendered from its preserved material voxels, falls under the 60 Hz authority, stacks on
-exact voxel-column surfaces, and sleeps after a deterministic rest interval. This first solver is
-axis-aligned and resolves downward contacts; rotation, friction, restitution, and general impulses
-are not claimed yet.
+body is rendered from its preserved material voxels and receives a deterministic material-weighted
+blast impulse. It sweeps all translation axes against static voxels, applies bounded restitution and
+ground friction, stacks on exact vertical body columns, and sleeps after a deterministic rest
+interval. Rotation and lateral response between two dynamic bodies are not claimed yet.
 
 ## Screenshots
 
@@ -92,6 +93,7 @@ cargo test oidc::tests
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario lateral-sweep
 cargo run --release --bin snapshot-benchmark -- --iterations 20
 cargo run --release --bin playable-demo
 ```

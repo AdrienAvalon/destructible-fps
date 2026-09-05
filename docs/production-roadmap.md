@@ -72,7 +72,7 @@ streaming, with no synchronous world meshing on the presentation thread.
   isolated primitive);
 - bounded promotion into revalidated authoritative body descriptors with integer-millimetre centre
   of mass and integer inertia (delivered);
-- atomic explosion/topology/body transactions and protocol-v4 body membership replication with
+- atomic explosion/topology/body transactions and protocol-v5 body membership replication with
   independent body fingerprints, bounded reassembly memory, and hostile-input rejection
   (delivered);
 - non-zero server-monotonic 64-bit body IDs separated from canonical 128-bit geometry fingerprints,
@@ -80,16 +80,16 @@ streaming, with no synchronous world meshing on the presentation thread.
   storage remains a Stage 3 requirement);
 - preserved-material body rendering through bounded off-thread local-space meshing and a
   fixed-capacity GPU transform arena (delivered);
-- 60 Hz micrometre gravity, swept vertical static and body-column collision, stable stacking, wake
-  propagation, deterministic sleeping, bounded sweep-and-prune with fail-closed overflow,
-  protocol-v4 state updates, and batched GPU transforms (delivered for downward axis-aligned
-  contacts);
+- 60 Hz micrometre gravity, mass-weighted blast impulses, three-axis swept static collision,
+  material ground friction and normal restitution, vertical body-column collision, stable stacking,
+  wake propagation, deterministic sleeping, bounded sweep-and-prune with fail-closed overflow,
+  protocol-v5 state updates, and batched GPU transforms (delivered for axis-aligned bodies);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
 - unsupported component extraction with mass, centre of mass, and inertia from voxel geometry;
-- deterministic server rigid-body integration, collision islands, sleeping, and continuous collision
-  detection for fast gameplay objects;
+- angular integration, lateral dynamic-body impulse exchange, collision islands, dynamic-body
+  friction, and continuous collision detection between fast moving bodies;
 - debris relevance tiers: authoritative hazards, replicated coarse bodies, deterministic cosmetic
   fragments, and settled static clusters;
 - player construction with server-validated placement, resource cost, support, and collision.

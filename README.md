@@ -33,6 +33,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   issuer/subject-derived principals;
 - a standalone secure authority process with bounded JSON/PEM/JWKS loading, strict Unix key-file
   permissions, forced static-JWKS expiry, graceful interruption, and no credential-valued arguments;
+- a reusable secure client bootstrap with bounded PEM/token files, strict Unix token permissions,
+  cryptographic client nonces, verified TLS/ALPN, post-TLS credential admission, encrypted bounded
+  datagrams, and no credential-valued arguments;
 - strict caps on incomplete packets, fragments, and retained bytes to prevent
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,

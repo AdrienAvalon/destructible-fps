@@ -87,6 +87,14 @@ unique session ID and an opaque 256-bit principal; a wire `Hello` cannot replace
 legacy re-handshake, and idle expiry remove queued commands, recovery work, and snapshot state for
 the old session before its peer key may be reused.
 
+The reusable secure client boundary takes only an address, a validated TLS server name, and absolute
+paths to a root-certificate PEM and application credential. It rejects root bundles beyond 256 KiB
+or 16 certificates and credentials beyond the protocol's 4 KiB limit. On Unix the credential file
+must deny every group/other permission. Credential bytes are trimmed only at their outside ASCII
+whitespace, remain zeroizing memory, and never enter arguments or diagnostic values. A system CSPRNG
+produces the non-zero client nonce; verified TLS/ALPN completes before the bounded reliable admission
+stream, after which only size-checked encrypted datagrams are exposed to callers.
+
 Authenticated character motion uses an independent player-state v2 datagram rather than entering
 the ordered permanent-world transaction stream. Every third 60 Hz authority tick, the server emits
 one complete session-sorted view at 20 Hz to every authenticated peer. The packet carries the server

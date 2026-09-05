@@ -3,6 +3,20 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — reusable secure client boundary
+
+Source state: parent `149089f` plus the secure-client increment documented here. Client setup bounds
+the root PEM to 256 KiB/16 certificates and the private credential to 4 KiB, requires absolute paths,
+enforces owner-only credential access on Unix, generates a system-random nonce, verifies TLS and the
+game ALPN, then authenticates through the post-TLS reliable stream. Credential storage is zeroized
+and neither command-line values nor errors contain it.
+
+An end-to-end integration creates an ephemeral trusted identity and owner-only credential file,
+starts the real secure authority, connects through the new file-backed client, proves a non-zero
+session/server nonce, requests and receives an encrypted snapshot datagram, and observes clean
+disconnect. The complete promotion passed 121 library tests, eight binary tests, and 43 integration
+tests in debug and release; strict Clippy was clean.
+
 ## 2026-09-05 — graphical retained-delta recovery increment
 
 Source state: parent `905a0ad` plus the graphical recovery increment documented here. Once a future

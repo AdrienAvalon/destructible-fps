@@ -137,7 +137,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   return to live delivery (delivered for loopback);
 - bounded TLS 1.3 QUIC configuration, server-certificate validation, post-TLS opaque credential
   admission, connection-bound principal, admission timeout, and encrypted datagram tests (delivered
-  and wired into the authority runtime);
+  and wired into the authority runtime); reusable file-backed client bootstrap with bounded root/token
+  loading, strict token permissions, cryptographic nonce and end-to-end encrypted snapshot test is
+  delivered, while graphical event-loop wiring remains;
 - offline RS256 access-token verification with strict JWKS key policy, exact issuer/audience and time
   validation, bounded one-use `jti` cache, atomic rotation, and issuer/subject-derived 256-bit
   principal (delivered; trusted discovery/refresh and process configuration remain);

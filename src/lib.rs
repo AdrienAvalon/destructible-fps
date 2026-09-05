@@ -17,6 +17,7 @@ pub mod player_replication;
 pub mod prediction;
 pub mod render;
 pub mod replication;
+pub mod secure_client;
 pub mod secure_server;
 pub mod secure_transport;
 pub mod server_config;
@@ -78,6 +79,10 @@ pub use replication::{
     ClientReplica, ClientStatus, CodecError, CommandError, DEFAULT_CONSTRUCTION_UNITS, DeltaFrame,
     DeltaPacket, ExplosionCommand, FrameAssembler, MAX_BUILD_COORDINATE, MAX_BUILD_REACH_UM,
     MAX_BUILD_REACH_VOXELS, PhysicsTickReport, ReplicationError, decode_frame, encode_frames,
+};
+pub use secure_client::{
+    MAX_CLIENT_ROOT_CERTIFICATE_BYTES, MAX_CLIENT_ROOT_CERTIFICATES, SecureClientConnection,
+    SecureClientError, SecureClientLaunchConfig,
 };
 pub use secure_server::{
     MAX_CONSECUTIVE_GAMEPLAY_QUEUE_DROPS, MAX_SECURE_CONTROL_EVENTS, MAX_SECURE_GAMEPLAY_BYTES,

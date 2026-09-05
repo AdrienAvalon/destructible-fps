@@ -3,6 +3,34 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — bounded oriented dynamic contact refinement
+
+Source state: parent `0a6af47` plus the oriented dynamic-contact increment documented here. Swept
+X/Z contacts keep the bounded coarse body broad phase, then refine every contact involving a rotated
+state through canonical material-voxel pairs at the rational impact time. A canonical normalized
+quaternion interpolation selects that time's orientation, and each voxel is represented by the same
+conservative fixed-point rotated proxy as static collision. Empty proxy intersections
+discard a coarse false positive; accepted intersections produce deterministic local contact
+centroids and therefore an inertia-weighted angular response. The narrow phase tests at most 4,096
+voxel pairs per body pair. Budget exhaustion fails closed by retaining coarse separation while
+withholding contact torque whose lever arm was not proven.
+
+The dedicated `rotated-dynamic-head-on` release scenario resets 1,024 two-voxel bars for 300 ticks.
+Every tick resolves 512 deliberately off-centre oriented impacts, requires both bodies in every pair
+to gain angular velocity, and verifies the canonical linear response. Across 153,600 body contacts it
+measured tick p50 6.019 ms, p95 6.151 ms, p99 6.499 ms and maximum 7.311 ms on this machine, below
+the 16.67 ms 60 Hz tick interval. Focused negative tests prove separated rotated voxel proxies are
+rejected, pair work saturates at the fixed budget, and an accepted off-centre contact generates
+bounded valid angular state.
+
+The complete promotion passed 134 library tests, ten binary tests and 43 integration tests in debug
+and release with strict Clippy clean. The required release baselines measured destruction p99 0.350
+ms, 8,192-voxel structural analysis plus promotion p99 4.452 ms, 1,024-body stacking p99 1.158 ms,
+and snapshot total p99 9.480 ms. A real five-second Vulkan smoke on the RTX 4050 completed with
+GPU-total p99 0.721 ms, maximum 0.721 ms and zero abandoned samples. Surface-paced CPU/redraw p99
+was 33.264/33.271 ms in that point-in-time run, so this smoke proves clean rendering and GPU headroom,
+not a portable frame-pacing guarantee.
+
 ## 2026-09-05 — bounded angular collision sweep
 
 Source state: parent `c11e972` plus the sampled-angular increment documented here. Each fixed tick

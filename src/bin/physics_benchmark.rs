@@ -21,6 +21,7 @@ enum Scenario {
     RotatedLateralSweep,
     AngularSweep,
     DynamicHeadOn,
+    RotatedDynamicHeadOn,
 }
 
 impl Scenario {
@@ -31,6 +32,7 @@ impl Scenario {
             Self::RotatedLateralSweep => "rotated-lateral-sweep",
             Self::AngularSweep => "angular-sweep",
             Self::DynamicHeadOn => "dynamic-head-on",
+            Self::RotatedDynamicHeadOn => "rotated-dynamic-head-on",
         }
     }
 }
@@ -53,6 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 | Scenario::RotatedLateralSweep
                 | Scenario::AngularSweep
                 | Scenario::DynamicHeadOn
+                | Scenario::RotatedDynamicHeadOn
         ) {
             states.clone_from(&initial_states);
         }
@@ -116,12 +119,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             verify_angular_sweeps(&states, &initial_states)?;
         }
-        Scenario::DynamicHeadOn => {
+        Scenario::DynamicHeadOn | Scenario::RotatedDynamicHeadOn => {
             let expected = body_count.saturating_mul(ticks) / 2;
             if body_collisions != expected {
                 return Err("not every dynamic pair resolved one head-on contact".into());
             }
-            verify_dynamic_head_on(&states, &initial_states)?;
+            verify_dynamic_head_on(
+                &states,
+                &initial_states,
+                scenario == Scenario::RotatedDynamicHeadOn,
+            )?;
         }
     }
     Ok(())
@@ -198,6 +205,7 @@ fn verify_rotated_lateral_sweeps(
 fn verify_dynamic_head_on(
     states: &StateMap,
     initial_states: &StateMap,
+    expect_torque: bool,
 ) -> Result<(), Box<dyn Error>> {
     for first_id in (1..=states.len()).step_by(2) {
         let first_id = BodyId::try_from(first_id)?;
@@ -215,11 +223,16 @@ fn verify_dynamic_head_on(
             .translation_um
             .x
             .saturating_add(destructible_fps::MICROMETERS_PER_VOXEL);
-        if first.translation_um.x != expected_first_x
-            || second.translation_um.x
-                != expected_first_x.saturating_add(destructible_fps::MICROMETERS_PER_VOXEL)
+        let expected_second_x =
+            expected_first_x.saturating_add(destructible_fps::MICROMETERS_PER_VOXEL);
+        let position_tolerance = if expect_torque { 8 } else { 0 };
+        if first.translation_um.x.abs_diff(expected_first_x) > position_tolerance
+            || second.translation_um.x.abs_diff(expected_second_x) > position_tolerance
             || first.linear_velocity_um_per_second.x != -26_400_000
             || second.linear_velocity_um_per_second.x != 26_400_000
+            || (expect_torque
+                && (first.angular_velocity_mrad_per_second.z == 0
+                    || second.angular_velocity_mrad_per_second.z == 0))
         {
             return Err(
                 format!("dynamic pair {first_id}/{second_id} did not resolve canonically").into(),
@@ -285,7 +298,52 @@ fn fixture(body_count: usize, scenario: Scenario) -> Result<Fixture, Box<dyn Err
         Scenario::RotatedLateralSweep => rotated_lateral_sweep_fixture(body_count),
         Scenario::AngularSweep => angular_sweep_fixture(body_count),
         Scenario::DynamicHeadOn => dynamic_head_on_fixture(body_count),
+        Scenario::RotatedDynamicHeadOn => rotated_dynamic_head_on_fixture(body_count),
     }
+}
+
+fn rotated_dynamic_head_on_fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
+    const PAIR_SPACING: i32 = 8;
+    const HEIGHT: i32 = 8;
+    if !body_count.is_multiple_of(2) {
+        return Err("rotated-dynamic-head-on requires an even body count".into());
+    }
+    let world = World::default();
+    let mut bodies = BTreeMap::new();
+    let mut states = BTreeMap::new();
+    for index in 0..body_count {
+        let pair = i32::try_from(index / 2)?;
+        let second = !index.is_multiple_of(2);
+        let x = pair
+            .saturating_mul(PAIR_SPACING)
+            .saturating_add(if second { 3 } else { 0 });
+        let y = HEIGHT.saturating_add(i32::from(second));
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            BodyId::try_from(index + 1)?,
+            vec![
+                destructible_fps::BodyVoxel {
+                    position: IVec3::new(x, y, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                destructible_fps::BodyVoxel {
+                    position: IVec3::new(x, y.saturating_add(1), 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )?;
+        let mut state = RigidBodyState::at_spawn(&body);
+        state.orientation = FixedQuaternion {
+            x: 0,
+            y: 707_107,
+            z: 0,
+            w: 707_107,
+        };
+        state.linear_velocity_um_per_second.x = if second { -120_000_000 } else { 120_000_000 };
+        states.insert(body.id, state);
+        bodies.insert(body.id, body);
+    }
+    Ok((world, bodies, states))
 }
 
 fn dynamic_head_on_fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
@@ -484,7 +542,7 @@ fn parse_arguments() -> Result<(usize, usize, Scenario), Box<dyn Error>> {
                 scenario = match arguments
                     .next()
                     .ok_or(
-                        "--scenario requires stacks, lateral-sweep, rotated-lateral-sweep, angular-sweep, or dynamic-head-on",
+                        "--scenario requires stacks, lateral-sweep, rotated-lateral-sweep, angular-sweep, dynamic-head-on, or rotated-dynamic-head-on",
                     )?
                     .as_str()
                 {
@@ -493,6 +551,7 @@ fn parse_arguments() -> Result<(usize, usize, Scenario), Box<dyn Error>> {
                     "rotated-lateral-sweep" => Scenario::RotatedLateralSweep,
                     "angular-sweep" => Scenario::AngularSweep,
                     "dynamic-head-on" => Scenario::DynamicHeadOn,
+                    "rotated-dynamic-head-on" => Scenario::RotatedDynamicHeadOn,
                     value => return Err(format!("unknown physics scenario: {value}").into()),
                 };
             }

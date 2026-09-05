@@ -90,17 +90,18 @@ streaming, with no synchronous world meshing on the presentation thread.
   GPU transforms with conservative rotated render bounds (delivered; static angular motion uses a
   radius-derived 0.25 m sample bound, at most eight substeps and 262,144 tested cells per body tick;
   over-budget or intersecting rotation stops, rotated bodies fail closed out of the legacy
-  vertical-column solver, and oriented dynamic-body narrow phase remains);
-- four-pass coarse swept X/Z body contacts with rational time-of-impact overlap validation,
-  inverse-mass separation, material restitution, momentum-preserving tangential friction, sleep
-  wake-up, and deterministic short-chain propagation (delivered);
+  vertical-column solver);
+- four-pass swept X/Z body contacts with rational time-of-impact overlap validation, bounded
+  refinement through 4,096 canonical rotated per-voxel proxy pairs, deterministic contact centroids,
+  inverse-mass separation, material restitution, off-centre angular impulse, momentum-preserving
+  tangential friction, fail-closed coarse separation on pair-budget exhaustion, sleep wake-up, and
+  deterministic short-chain propagation (delivered);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
 - unsupported component extraction with mass, centre of mass, and inertia from voxel geometry;
-- oriented dynamic-body voxel contact, collision-preserving angular response, gyroscopic response,
-  deeper collision-island convergence, and continuous multi-contact resolution between fast moving
-  bodies;
+- exact convex dynamic-body contact manifolds, rotated vertical support, gyroscopic response, deeper
+  collision-island convergence, and continuous multi-contact resolution between fast moving bodies;
 - debris relevance tiers: authoritative hazards, replicated coarse bodies, deterministic cosmetic
   fragments, and settled static clusters;
 - player construction with shared replay ordering, bounded static placement, per-session resource
@@ -256,8 +257,8 @@ The next three bounded increments are:
 
 1. add trusted OIDC discovery/JWKS refresh, certificate-expiry/lifecycle validation, Windows service
    DACL checks, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
-2. extend the delivered rotated static and sampled-angular collision path with bounded oriented
-   dynamic-body contact and collision-preserving angular response;
+2. extend the delivered oriented per-voxel dynamic contact with rotated vertical support, continuous
+   multi-contact manifolds, gyroscopic response, and deeper collision-island convergence;
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at
    least four clients, with RTT estimation, adaptive retransmission, and bandwidth fairness.
 

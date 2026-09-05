@@ -299,10 +299,13 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
   mass-centred GPU rotation with conservative rotated render bounds (delivered; static angular motion
   is sampled at a radius-derived maximum travel of 0.25 m with at most eight substeps and 262,144
   tested cells per body tick; over-budget or intersecting rotation stops, rotated bodies fail closed
-  out of the legacy vertical-column solver, and oriented dynamic-body narrow phase remains);
+  out of the legacy vertical-column solver);
 - four-pass X/Z dynamic contact from swept coarse body bounds, rational orthogonal-overlap validation
-  at time of impact, inverse-mass separation, material restitution, momentum-preserving tangential
-  friction, impact wake-up, and deterministic short-chain propagation (delivered);
+  at time of impact, bounded refinement through at most 4,096 canonical pairs of conservative
+  rotated per-voxel proxies, deterministic contact centroids, inverse-mass separation, material
+  restitution, off-centre angular impulse, momentum-preserving tangential friction, impact wake-up,
+  fail-closed coarse separation on pair-budget exhaustion, and deterministic short-chain propagation
+  (delivered);
 - control-protocol-v3 static construction with shared command replay ordering, per-session resource
   budgets, deterministic material costs, coordinate/occupancy/face-support validation, conservative
   dynamic-body exclusion, six-metre authoritative-player reach, conservative integer line of sight,
@@ -316,8 +319,8 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - local stress propagation after damage;
 - unsupported island extraction (delivered for topology-changing voxel edits);
 - rigid-body mass, centre of mass, and inertia derived from geometry (delivered);
-- oriented dynamic-body voxel contact, collision-preserving angular response, gyroscopic response,
-  deeper constraint-island convergence, clustering, and distance-based solver budgets.
+- exact convex dynamic-body contact manifolds, rotated vertical support, gyroscopic response, deeper
+  constraint-island convergence, clustering, and distance-based solver budgets.
 - player-state replication, client prediction and reconciliation, authoritative view/weapon state,
   persistent inventories, recipes, removal tools, material selection UI, dynamic-body character
   contact, and dynamic-body attachment for construction.

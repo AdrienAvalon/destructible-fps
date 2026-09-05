@@ -83,10 +83,10 @@ The Linux demo now combines the authoritative core with a real-time first-person
   impulses, inertia-weighted off-centre angular response, canonical fixed-quaternion integration,
   three-axis swept static collision using rotation-aware per-voxel conservative proxies, off-centre
   static-contact torque, material ground friction and normal restitution, vertical voxel-column body
-  collision, four-pass coarse swept X/Z body contacts with mass-weighted impulse
-  exchange and tangential friction, stable stacking, wake propagation, sleeping, bounded
-  sweep-and-prune broad phase, atomic overload rollback, and replicated GPU transforms about the
-  mass centre;
+  collision, four-pass swept X/Z body contacts with bounded oriented per-voxel proxy refinement,
+  mass-weighted impulse exchange, off-centre dynamic-contact torque and tangential friction, stable
+  stacking, wake propagation, sleeping, bounded sweep-and-prune broad phase, atomic overload
+  rollback, and replicated GPU transforms about the mass centre;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map, energy-aware Cook-Torrance
@@ -96,8 +96,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
-game. Oriented voxel collision, contact-generated torque, gyroscopic response, deeper
-constraint-island convergence, progressive structural stress, remote-authority exposure, trusted
+game. Exact convex contact manifolds, gyroscopic response, deeper constraint-island convergence,
+progressive structural stress, remote-authority exposure, trusted
 OIDC discovery/JWKS provisioning and certificate lifecycle, first-person arms/weapon presentation,
 adaptive retransmission and congestion control, audio,
 asset-quality PBR, temporal anti-aliasing, and
@@ -118,8 +118,12 @@ the canonical quaternion, and the GPU rotates the mesh around its mass centre. R
 use a deterministic conservative AABB for each material voxel and derive their contact lever from the
   actual overlapped cell. Rotated bodies fail closed out of the legacy axis-aligned vertical-support
   solver. Angular motion against static geometry is sampled from a radius-derived travel bound; it
-  stops before overlap or before exceeding its fixed substep/cell budgets. Oriented dynamic-body
-  narrow phase and full constraint-island convergence are not claimed yet.
+  stops before overlap or before exceeding its fixed substep/cell budgets. Swept X/Z body contacts
+  involving rotation refine the coarse bounds through at most 4,096 canonical pairs of conservative
+  per-voxel proxies at impact time, discard empty proxy intersections, and apply the resolved impulse
+  at the deterministic contact centroid. Pair-budget exhaustion retains the coarse separating
+  response but cannot manufacture contact torque. Exact convex manifolds, rotated vertical support,
+  and full constraint-island convergence are not claimed yet.
 
 ## Screenshots
 
@@ -145,6 +149,7 @@ cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scena
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario rotated-lateral-sweep
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario angular-sweep
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 1000 --scenario dynamic-head-on
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario rotated-dynamic-head-on
 cargo run --release --bin snapshot-benchmark -- --iterations 20
 cargo run --release --bin playable-demo
 ```

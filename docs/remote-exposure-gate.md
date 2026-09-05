@@ -16,7 +16,7 @@ non-loopback variant. Configuration fields or operator assertions alone do not c
 | Application admission | Invalid credential, stalled hello, or nonce mismatch | Secure transport and standalone process negative tests | Pass |
 | OIDC provenance | Discovery issuer mismatch, unsafe endpoint, malformed or stale key set, and replay | OIDC discovery/verifier tests and standalone discovery refusal | Pass |
 | Gameplay authorization | Invalid session and malformed or replayed command | Network, transport, and secure authority tests | Pass |
-| Resource abuse | Per-session datagram burst, queue pressure, pending handshake cap, and authority capacity | In-process and external-process 32-plus-one saturation, external oversized-datagram closure, secure-authority rate limiting, and bounded queue/capacity unit tests | Partial: add reconnect and multi-session queue-pressure storms |
+| Resource abuse | Per-session datagram burst, queue pressure, pending handshake cap, authority capacity, and reconnect cycling | External-process 32-plus-one saturation, oversized-datagram closure, 16-session queue pressure, 32 authenticated reconnects, secure-authority rate limiting, and bounded unit tests | Pass for deterministic loopback processes; replay through the reviewed LAN profile before exposure |
 | Loss and reordering | Distinct delay, duplication, and loss traces with bounded repair | Four-client real-process trace replay | Pass for deterministic loopback; add WAN profiles |
 | Trust outage | Discovery, static trust, or renewal reaches its monotonic deadline | Real-process TLS outage and static OIDC expiry tests pass; discovery retains failed-refresh controller tests | Pass for local mechanisms; repeat live discovery outage against the disposable realm |
 | Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix non-root service identity plus file/parent owner, mode, type, and no-follow tests | Partial: Windows service DACL validation missing |
@@ -59,7 +59,14 @@ The hostile-load test now crosses a real process boundary: 32 external clients h
 handshakes without application hellos, the 33rd is refused, and the process completes 240 ticks with
 zero admissions or simulation traffic. A separate authenticated client sends a 1,101-byte QUIC
 datagram; the server closes it, reports exactly one protocol rejection, and forwards nothing to the
-authority. Reconnect and multi-session queue-pressure storms remain.
+authority. The reconnect and multi-session queue-pressure campaigns complete the local matrix below.
+
+The remaining two local hostile-load cases fill all 16 authority slots and concurrently offer up to
+240 maximum-size malformed datagrams per session, then execute 32 complete authenticated reconnects.
+Queue memory stays at the fixed 256-event ceiling, abusive sessions close after 32 consecutive drops,
+queued data is rejected or counted malformed without applying a command, and every reconnect leaves
+matching admission/disconnection totals with no live session. The same campaign must still be replayed
+through the reviewed LAN interface and firewall profile.
 
 Only after all five proofs are reproducible may the internal validated binder gain a private-network
 capability. Internet publication remains a separate later gate with capacity protection and incident

@@ -103,7 +103,8 @@ deliberately unsuitable for LAN or Internet exposure.
 Readiness emits only the selected socket, non-secret exposure class, and whether OIDC refresh and TLS
 reload are active. The final line contains bounded gameplay and lifecycle counters, never
 credentials, remote endpoints, or principal identifiers. It explicitly reports refused connections,
-handshake/admission failures, gameplay-queue drops, protocol rejections, and rate-limited sessions.
+handshake/admission failures, gameplay-queue drops, protocol rejections, rejected-session datagrams,
+malformed authority inputs, and rate-limited sessions.
 `Ctrl-C`, certificate/JWKS safety
 deadlines, `max_ticks`, and `stop_after_commands` all converge through endpoint shutdown.
 

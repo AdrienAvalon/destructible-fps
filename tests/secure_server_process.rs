@@ -7,7 +7,8 @@ use aws_lc_rs::{
 use base64::Engine as _;
 use destructible_fps::{
     ExplosionCommand, IVec3, MAX_PENDING_QUIC_HANDSHAKES, MAX_QUIC_DATAGRAM_PAYLOAD_BYTES,
-    encode_explosion_request, establish_session, secure_client_config, send_gameplay_datagram,
+    MAX_SERVER_PEERS, MAX_SESSION_DATAGRAMS_PER_SECOND, encode_explosion_request,
+    establish_session, secure_client_config, send_gameplay_datagram,
 };
 use jsonwebtoken::{
     Algorithm, DecodingKey, Header,
@@ -460,6 +461,125 @@ async fn standalone_process_closes_an_external_oversized_datagram_before_simulat
     assert_eq!(stop_counter(&output.stdout, "inbound"), 0);
     assert!(!output.stdout.contains(&token));
     assert!(!output.stderr.contains(&token));
+    client.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn standalone_process_bounds_external_multi_session_gameplay_queue_pressure() {
+    let fixture = Fixture::new(360, None);
+    let mut process = RunningServer::spawn(&fixture.config);
+    let client = trusted_client(fixture.certificate.clone());
+    let mut connections = Vec::with_capacity(MAX_SERVER_PEERS);
+    for client_index in 0..MAX_SERVER_PEERS {
+        let connection = connect(&client, process.address).await;
+        let token = fixture.signed_token(&format!("queue-pressure-{client_index}"));
+        establish_session(
+            &connection,
+            500_u64 + u64::try_from(client_index).expect("bounded client index"),
+            token.as_bytes(),
+        )
+        .await
+        .expect("external queue-pressure session");
+        connections.push(connection);
+    }
+
+    let mut senders = tokio::task::JoinSet::new();
+    for connection in &connections {
+        let connection = connection.clone();
+        senders.spawn(async move {
+            let mut sent = 0_usize;
+            for _ in 0..MAX_SESSION_DATAGRAMS_PER_SECOND {
+                if connection
+                    .send_datagram_wait(vec![0xff_u8; MAX_QUIC_DATAGRAM_PAYLOAD_BYTES].into())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                sent += 1;
+            }
+            sent
+        });
+    }
+    let mut sent = 0_usize;
+    while !senders.is_empty() {
+        sent += timeout(Duration::from_secs(3), senders.join_next())
+            .await
+            .expect("external queue-pressure sender deadline")
+            .expect("external queue-pressure sender exists")
+            .expect("external queue-pressure sender task");
+    }
+    assert!(sent > 256, "insufficient offered queue pressure: {sent}");
+
+    let mut pressure_closed = 0_usize;
+    for _ in 0..100 {
+        pressure_closed = connections
+            .iter()
+            .filter(|connection| connection.close_reason().is_some())
+            .count();
+        if pressure_closed > 0 {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert!(pressure_closed > 0, "queue pressure closed no session");
+    for connection in &connections {
+        connection.close(0_u32.into(), b"external queue-pressure test complete");
+    }
+
+    let output = process.finish_within(Duration::from_secs(8)).await;
+    assert!(output.status.success(), "process stderr: {}", output.stderr);
+    assert_eq!(
+        stop_counter(&output.stdout, "admitted"),
+        MAX_SERVER_PEERS as u64
+    );
+    assert!(stop_counter(&output.stdout, "gameplay_queue_drops") >= 32);
+    let malformed = stop_counter(&output.stdout, "malformed");
+    let rejected = stop_counter(&output.stdout, "rejected_session_datagrams");
+    assert!(malformed.saturating_add(rejected) > 0);
+    assert_eq!(stop_counter(&output.stdout, "inbound"), malformed);
+    assert_eq!(stop_counter(&output.stdout, "commands"), 0);
+    assert_eq!(stop_counter(&output.stdout, "rate_limited"), 0);
+    client.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_process_survives_repeated_authenticated_reconnect_cycles() {
+    const RECONNECT_CYCLES: usize = 32;
+
+    let fixture = Fixture::new(480, None);
+    let mut process = RunningServer::spawn(&fixture.config);
+    let client = trusted_client(fixture.certificate.clone());
+    for cycle in 0..RECONNECT_CYCLES {
+        let connection = connect(&client, process.address).await;
+        let token = fixture.signed_token(&format!("reconnect-cycle-{cycle}"));
+        establish_session(
+            &connection,
+            800_u64 + u64::try_from(cycle).expect("bounded reconnect cycle"),
+            token.as_bytes(),
+        )
+        .await
+        .expect("authenticated reconnect cycle");
+        sleep(Duration::from_millis(25)).await;
+        connection.close(0_u32.into(), b"reconnect cycle complete");
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    let output = process.finish_within(Duration::from_secs(10)).await;
+    assert!(output.status.success(), "process stderr: {}", output.stderr);
+    assert_eq!(
+        stop_counter(&output.stdout, "admitted"),
+        RECONNECT_CYCLES as u64
+    );
+    assert_eq!(
+        stop_counter(&output.stdout, "disconnected"),
+        RECONNECT_CYCLES as u64
+    );
+    assert_eq!(stop_counter(&output.stdout, "active"), 0);
+    assert_eq!(stop_counter(&output.stdout, "refused"), 0);
+    assert_eq!(stop_counter(&output.stdout, "handshake_failures"), 0);
+    assert_eq!(stop_counter(&output.stdout, "admission_failures"), 0);
+    assert_eq!(stop_counter(&output.stdout, "commands"), 0);
     client.wait_idle().await;
 }
 

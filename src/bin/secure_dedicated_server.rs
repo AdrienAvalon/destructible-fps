@@ -28,6 +28,8 @@ struct Totals {
     ticks: u64,
     commands: usize,
     inbound: usize,
+    malformed: usize,
+    rejected_session_datagrams: usize,
     outbound: usize,
     admitted: usize,
     disconnected: usize,
@@ -144,7 +146,7 @@ fn print_stop(
     tls_counters: &RefreshCounters,
 ) {
     println!(
-        "STOP ticks={} commands={} admitted={} disconnected={} refused={} handshake_failures={} admission_failures={} gameplay_queue_drops={} protocol_rejections={} rate_limited={} active={} inbound={} outbound={} oidc_refresh_attempts={} oidc_refresh_successes={} oidc_refresh_failures={} tls_reload_attempts={} tls_reload_successes={} tls_reload_failures={} tls_reload_installed={} tls_reload_unchanged={}",
+        "STOP ticks={} commands={} admitted={} disconnected={} refused={} handshake_failures={} admission_failures={} gameplay_queue_drops={} protocol_rejections={} rate_limited={} active={} inbound={} malformed={} rejected_session_datagrams={} outbound={} oidc_refresh_attempts={} oidc_refresh_successes={} oidc_refresh_failures={} tls_reload_attempts={} tls_reload_successes={} tls_reload_failures={} tls_reload_installed={} tls_reload_unchanged={}",
         totals.ticks,
         totals.commands,
         totals.admitted,
@@ -157,6 +159,8 @@ fn print_stop(
         totals.rate_limited,
         active,
         totals.inbound,
+        totals.malformed,
+        totals.rejected_session_datagrams,
         totals.outbound,
         oidc_counters.attempts.load(Ordering::Relaxed),
         oidc_counters.successes.load(Ordering::Relaxed),
@@ -315,6 +319,12 @@ impl Totals {
         self.inbound = self
             .inbound
             .saturating_add(report.authority.received_datagrams);
+        self.malformed = self
+            .malformed
+            .saturating_add(report.authority.malformed_datagrams);
+        self.rejected_session_datagrams = self
+            .rejected_session_datagrams
+            .saturating_add(report.authority.rejected_sessions);
         self.outbound = self
             .outbound
             .saturating_add(report.authority.outbound_datagrams);

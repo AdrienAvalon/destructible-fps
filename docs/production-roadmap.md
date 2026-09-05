@@ -167,9 +167,10 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   bounded correction smoothing are delivered for loopback;
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
   Unix permission checks, complete-chain X.509 lifetime preflight, monotonic TLS/static-JWKS expiry,
-  reserved 60-second TLS and static-JWKS shutdown margins, signal-aware shutdown, and a thirteen-case
+  reserved 60-second TLS and static-JWKS shutdown margins, signal-aware shutdown, and a fifteen-case
   external-process matrix including trusted discovery, hostile issuer mismatch, trust-outage
-  shutdown, admission saturation, and oversized-datagram rejection;
+  shutdown, admission saturation, oversized-datagram rejection, multi-session queue pressure, and
+  authenticated reconnect cycling;
   bounded certificate/key hot reload changes future handshakes without disrupting current sessions
   (delivered for loopback; automated issuance, platform ACLs, production issuer/root provisioning,
   and remote policy remain);

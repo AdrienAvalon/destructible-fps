@@ -305,6 +305,13 @@ admitted session or simulation traffic. A thirteenth admits one OIDC client, inj
 datagram through raw QUIC, and proves connection closure plus a protocol-rejection counter before
 the payload reaches the authority core.
 
+A fourteenth fills all 16 authority slots and concurrently offers up to 240 maximum-sized malformed
+datagrams per session. The 256-event shared queue reports pressure, at least one abusive session is
+closed after 32 consecutive drops, already queued data is either rejected with the closed session or
+decoded as malformed, and no command is applied. A fifteenth performs 32 complete authenticated
+connect/disconnect cycles and finishes with exact admission/disconnection parity and no leaked active
+session.
+
 ## Planned engine layers
 
 ### First playable slice — delivered

@@ -1332,3 +1332,36 @@ three consecutive debug and three consecutive release executions.
 Graphify reported 2,000 nodes, 5,656 post-build edges, zero unverified code nodes, and a fully fresh
 index. External reconnect cycling and multi-session queue pressure remain before the hostile-load row
 can be closed.
+
+## 2026-09-05 — multi-session queue pressure and reconnect cycling
+
+Source state: parent `80f5c83` plus two final hostile-client process cases and authority rejection
+counters in the terminal summary. The pressure case fills all 16 authority slots, then concurrently
+offers up to 240 maximum-sized malformed datagrams per session against the fixed 256-event gameplay
+queue. More than 256 datagrams are accepted by QUIC, the queue reports at least 32 drops, and at least
+one abusive connection is closed. Inputs already queued at that boundary may be decoded as malformed
+or rejected after their session closes; both outcomes are bounded rejection paths. No command reaches
+the simulation and no rate-limit path is mistaken for queue pressure.
+
+The reconnect case performs 32 sequential OIDC-authenticated connection cycles against the real
+standalone process. It finishes with exactly 32 admissions, exactly 32 disconnections, zero active
+sessions, zero refusals, zero handshake or admission failures, and zero commands. The exact queue
+case passed five consecutive debug and five consecutive release executions; the reconnect case passed
+three consecutive debug and three consecutive release executions before complete promotion.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 157 passed debug; 157 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 58 passed debug; 58 passed release |
+| Destruction p99, 500 events | 0.353 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.581 ms |
+| Physics p99, 1,024 bodies | 1.241 ms |
+| Snapshot encode + decode + install p99 | 9.318 ms |
+| CPU frame-work p99, RTX 4050 smoke | 7.481 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.241 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+Graphify reported 2,002 nodes, 5,673 post-build edges, zero unverified code nodes, and a fully fresh
+index. This closes the deterministic loopback hostile-load matrix. The same campaign remains required
+through the reviewed LAN interface and firewall profile before non-loopback exposure.

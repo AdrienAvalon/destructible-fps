@@ -7,9 +7,9 @@ use core::fmt;
 use std::collections::{BTreeMap, VecDeque};
 
 const PLAYER_STATE_MAGIC: [u8; 4] = *b"DFPL";
-const PLAYER_STATE_VERSION: u8 = 1;
+const PLAYER_STATE_VERSION: u8 = 2;
 const PLAYER_STATE_HEADER_BYTES: usize = 4 + 1 + 8 + 1;
-const PLAYER_STATE_ENTRY_BYTES: usize = 8 + 3 * 8 + 3 * 8 + 8 + 1;
+const PLAYER_STATE_ENTRY_BYTES: usize = 8 + 3 * 8 + 3 * 4 + 3 + 8 + 1;
 const GROUNDED_FLAG: u8 = 1;
 pub const MAX_REPLICATED_PLAYERS: usize = 16;
 pub const PLAYER_STATE_BROADCAST_HZ: u64 = 20;
@@ -27,6 +27,7 @@ pub struct ReplicatedPlayerState {
     pub session_id: u64,
     pub position_um: FixedMicrometers3,
     pub velocity_um_per_second: FixedMicrometers3,
+    pub integration_remainder: [i64; 3],
     pub grounded: bool,
     pub last_input_sequence: u64,
 }
@@ -38,9 +39,19 @@ impl ReplicatedPlayerState {
             session_id,
             position_um: state.position_um,
             velocity_um_per_second: state.velocity_um_per_second,
+            integration_remainder: state.integration_remainder,
             grounded: state.grounded,
             last_input_sequence: state.last_input_sequence,
         }
+    }
+
+    /// Revalidates one state constructed outside the wire decoder.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero session or values outside the position, velocity, and integration bounds.
+    pub fn validate(self) -> Result<(), PlayerStateCodecError> {
+        validate_player_order(&[self])
     }
 }
 
@@ -63,6 +74,7 @@ pub enum PlayerStateCodecError {
     InvalidFlags(u8),
     PositionOutOfRange(u64),
     VelocityOutOfRange(u64),
+    IntegrationRemainderOutOfRange(u64),
 }
 
 impl fmt::Display for PlayerStateCodecError {
@@ -103,6 +115,10 @@ impl fmt::Display for PlayerStateCodecError {
                     "player {session_id} velocity exceeds the motion bound"
                 )
             }
+            Self::IntegrationRemainderOutOfRange(session_id) => write!(
+                formatter,
+                "player {session_id} integration remainder exceeds the server-tick divisor"
+            ),
         }
     }
 }
@@ -131,7 +147,13 @@ pub fn encode_player_state_packet(
     for player in players {
         push_u64(&mut bytes, player.session_id);
         push_fixed(&mut bytes, player.position_um);
-        push_fixed(&mut bytes, player.velocity_um_per_second);
+        push_velocity(&mut bytes, player.session_id, player.velocity_um_per_second)?;
+        for remainder in player.integration_remainder {
+            let remainder = i8::try_from(remainder).map_err(|_error| {
+                PlayerStateCodecError::IntegrationRemainderOutOfRange(player.session_id)
+            })?;
+            bytes.push(remainder.cast_unsigned());
+        }
         push_u64(&mut bytes, player.last_input_sequence);
         bytes.push(u8::from(player.grounded));
     }
@@ -176,7 +198,12 @@ pub fn decode_player_state_packet(
     for _ in 0..player_count {
         let session_id = cursor.take_u64();
         let position_um = cursor.take_fixed();
-        let velocity_um_per_second = cursor.take_fixed();
+        let velocity_um_per_second = cursor.take_velocity();
+        let integration_remainder = [
+            i64::from(cursor.take_i8()),
+            i64::from(cursor.take_i8()),
+            i64::from(cursor.take_i8()),
+        ];
         let last_input_sequence = cursor.take_u64();
         let flags = cursor.take_u8();
         if flags & !GROUNDED_FLAG != 0 {
@@ -186,6 +213,7 @@ pub fn decode_player_state_packet(
             session_id,
             position_um,
             velocity_um_per_second,
+            integration_remainder,
             grounded: flags & GROUNDED_FLAG != 0,
             last_input_sequence,
         });
@@ -537,6 +565,7 @@ fn interpolate_players(
                     numerator,
                     denominator,
                 ),
+                integration_remainder: older_player.integration_remainder,
                 grounded: older_player.grounded,
                 last_input_sequence: older_player.last_input_sequence,
             }
@@ -615,6 +644,15 @@ fn validate_player_order(players: &[ReplicatedPlayerState]) -> Result<(), Player
         ) {
             return Err(PlayerStateCodecError::VelocityOutOfRange(player.session_id));
         }
+        if player
+            .integration_remainder
+            .into_iter()
+            .any(|remainder| remainder.unsigned_abs() >= crate::SERVER_PHYSICS_HZ.cast_unsigned())
+        {
+            return Err(PlayerStateCodecError::IntegrationRemainderOutOfRange(
+                player.session_id,
+            ));
+        }
         previous = player.session_id;
     }
     Ok(())
@@ -630,6 +668,19 @@ fn push_fixed(bytes: &mut Vec<u8>, value: FixedMicrometers3) {
     push_i64(bytes, value.x);
     push_i64(bytes, value.y);
     push_i64(bytes, value.z);
+}
+
+fn push_velocity(
+    bytes: &mut Vec<u8>,
+    session_id: u64,
+    value: FixedMicrometers3,
+) -> Result<(), PlayerStateCodecError> {
+    for component in [value.x, value.y, value.z] {
+        let component = i32::try_from(component)
+            .map_err(|_error| PlayerStateCodecError::VelocityOutOfRange(session_id))?;
+        bytes.extend_from_slice(&component.to_le_bytes());
+    }
+    Ok(())
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
@@ -658,11 +709,27 @@ impl Cursor<'_> {
         i64::from_le_bytes(self.take_array())
     }
 
+    fn take_i8(&mut self) -> i8 {
+        i8::from_le_bytes(self.take_array())
+    }
+
+    fn take_i32(&mut self) -> i32 {
+        i32::from_le_bytes(self.take_array())
+    }
+
     fn take_fixed(&mut self) -> FixedMicrometers3 {
         FixedMicrometers3 {
             x: self.take_i64(),
             y: self.take_i64(),
             z: self.take_i64(),
+        }
+    }
+
+    fn take_velocity(&mut self) -> FixedMicrometers3 {
+        FixedMicrometers3 {
+            x: i64::from(self.take_i32()),
+            y: i64::from(self.take_i32()),
+            z: i64::from(self.take_i32()),
         }
     }
 
@@ -693,6 +760,7 @@ mod tests {
                 y: offset + 4,
                 z: offset + 5,
             },
+            integration_remainder: [1, -2, 3],
             grounded: session_id.is_multiple_of(2),
             last_input_sequence: session_id + 20,
         }
@@ -732,10 +800,16 @@ mod tests {
             Err(PlayerStateCodecError::InvalidMagic)
         );
         malformed = canonical.clone();
-        malformed[4] = 2;
+        malformed[4] = 1;
         assert_eq!(
             decode_player_state_packet(&malformed),
-            Err(PlayerStateCodecError::UnsupportedVersion(2))
+            Err(PlayerStateCodecError::UnsupportedVersion(1))
+        );
+        malformed = canonical.clone();
+        malformed[4] = 3;
+        assert_eq!(
+            decode_player_state_packet(&malformed),
+            Err(PlayerStateCodecError::UnsupportedVersion(3))
         );
         malformed = canonical.clone();
         *malformed.last_mut().expect("flags byte") = 0b10;
@@ -773,6 +847,18 @@ mod tests {
             Err(PlayerStateCodecError::Oversized(
                 MAX_PLAYER_STATE_DATAGRAM_BYTES + 1
             ))
+        );
+        let mut invalid_state = player(5, 0);
+        invalid_state.position_um.x = MAX_REPLICATED_PLAYER_POSITION_UM + 1;
+        assert_eq!(
+            invalid_state.validate(),
+            Err(PlayerStateCodecError::PositionOutOfRange(5))
+        );
+        invalid_state = player(5, 0);
+        invalid_state.integration_remainder[1] = crate::SERVER_PHYSICS_HZ;
+        assert_eq!(
+            invalid_state.validate(),
+            Err(PlayerStateCodecError::IntegrationRemainderOutOfRange(5))
         );
     }
 
@@ -898,6 +984,7 @@ mod tests {
                     session_id: 1,
                     position_um: FixedMicrometers3 { x, y: 0, z: 0 },
                     velocity_um_per_second: FixedMicrometers3::default(),
+                    integration_remainder: [0; 3],
                     grounded: true,
                     last_input_sequence: server_tick,
                 }],

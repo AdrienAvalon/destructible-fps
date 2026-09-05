@@ -1,5 +1,5 @@
 use destructible_fps::{
-    AuthenticatedPrincipal, BuildCommand, DeltaPacket, ExplosionCommand, IVec3,
+    AuthenticatedPrincipal, BuildCommand, ClientPrediction, DeltaPacket, ExplosionCommand, IVec3,
     MAX_SESSION_DATAGRAMS_PER_SECOND, Material, OrderedDeltaInbox, PlayerInputCommand,
     PlayerStateInbox, PlayerStateReceiveError, ReplicatedPlayerState, SecureDedicatedServer,
     SessionCredentialVerifier, Voxel, World, demo_world, encode_build_request,
@@ -153,6 +153,7 @@ async fn authenticated_quic_client_builds_one_authoritative_voxel() {
         IVec3::new(1, 0, 41),
         Voxel::new(Material::Stone),
     );
+    let client_world = world.clone();
     let mut server = SecureDedicatedServer::bind(
         LOOPBACK_EPHEMERAL,
         server_config,
@@ -173,42 +174,10 @@ async fn authenticated_quic_client_builds_one_authoritative_voxel() {
         sleep(Duration::from_millis(2)).await;
     }
     assert_eq!(server.active_sessions(), 1);
-    send_gameplay_datagram(
-        &connection,
-        encode_player_input(
-            welcome.session_id,
-            PlayerInputCommand {
-                input_sequence: 1,
-                movement_x_per_mille: 1_000,
-                ..PlayerInputCommand::default()
-            },
-        ),
-    )
-    .expect("encrypted player input");
-    for _ in 0..100 {
-        let report = server.tick().expect("player simulation tick");
-        if report.authority.player_inputs_accepted == 1 {
-            break;
-        }
-        sleep(Duration::from_millis(2)).await;
-    }
-    assert!(
-        server
-            .player_state(welcome.session_id)
-            .expect("authoritative player")
-            .position_um
-            .x
-            > 0
-    );
-    for _ in 0..=destructible_fps::PLAYER_STATE_BROADCAST_INTERVAL_TICKS {
-        let report = server.tick().expect("player-motion broadcast tick");
-        if report.authority.player_state_broadcasts == 1 {
-            break;
-        }
-    }
-    let replicated = receive_player_motion(&connection, welcome.session_id).await;
+    let replicated =
+        predict_and_reconcile_movement(&mut server, &connection, welcome.session_id, &client_world)
+            .await;
     assert!(replicated.position_um.x > 0);
-    assert_eq!(replicated.last_input_sequence, 1);
     let command = BuildCommand {
         command_id: 1,
         position: IVec3::new(0, 1, 36),
@@ -386,10 +355,58 @@ async fn receive_player_view(
     panic!("player view exceeded bounded test receive loop");
 }
 
-async fn receive_player_motion(
+async fn predict_and_reconcile_movement(
+    server: &mut SecureDedicatedServer,
     connection: &quinn::Connection,
     session_id: u64,
+    world: &World,
 ) -> ReplicatedPlayerState {
+    drive_until_player_broadcast(server);
+    let (initial_tick, initial_player) = receive_player_sample(connection, session_id, 0).await;
+    let mut prediction =
+        ClientPrediction::new(initial_tick, initial_player).expect("initial local prediction");
+    let movement = PlayerInputCommand {
+        input_sequence: 1,
+        movement_x_per_mille: 1_000,
+        ..PlayerInputCommand::default()
+    };
+    prediction
+        .predict(movement, world)
+        .expect("immediate local movement prediction");
+    send_gameplay_datagram(connection, encode_player_input(session_id, movement))
+        .expect("encrypted player input");
+    for _ in 0..100 {
+        let report = server.tick().expect("player simulation tick");
+        if report.authority.player_inputs_accepted == 1 {
+            break;
+        }
+    }
+    drive_until_player_broadcast(server);
+    let (movement_tick, replicated) = receive_player_sample(connection, session_id, 1).await;
+    let reconciliation = prediction
+        .reconcile(movement_tick, replicated, world)
+        .expect("authoritative local reconciliation");
+    assert_eq!(reconciliation.acknowledged_inputs, 1);
+    assert_eq!(reconciliation.replayed_inputs, 0);
+    assert_eq!(reconciliation.state.position_um, replicated.position_um);
+    replicated
+}
+
+fn drive_until_player_broadcast(server: &mut SecureDedicatedServer) {
+    for _ in 0..=destructible_fps::PLAYER_STATE_BROADCAST_INTERVAL_TICKS {
+        let report = server.tick().expect("player-state broadcast tick");
+        if report.authority.player_state_broadcasts > 0 {
+            return;
+        }
+    }
+    panic!("player-state cadence failed to broadcast");
+}
+
+async fn receive_player_sample(
+    connection: &quinn::Connection,
+    session_id: u64,
+    minimum_input_sequence: u64,
+) -> (u64, ReplicatedPlayerState) {
     let mut inbox = PlayerStateInbox::default();
     for _ in 0..256 {
         let payload = timeout(
@@ -408,12 +425,12 @@ async fn receive_player_motion(
             Err(error) => panic!("invalid player-motion datagram: {error}"),
         }
         if let Some(player) = inbox.player(session_id)
-            && player.position_um.x > 0
+            && player.last_input_sequence >= minimum_input_sequence
         {
-            return player;
+            return (inbox.last_server_tick(), player);
         }
     }
-    panic!("player motion exceeded bounded test receive loop");
+    panic!("player sample exceeded bounded test receive loop");
 }
 
 fn trusted_client(certificate: CertificateDer<'static>) -> Endpoint {

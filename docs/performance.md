@@ -3,6 +3,28 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — local prediction and exact reconciliation increment
+
+Source state: parent `7633f75` plus the prediction increment documented here. Player-state protocol
+v2 encodes bounded velocities as signed 32-bit micrometres per second and adds all three signed
+fixed-step integration remainders. The maximum 16-player packet falls from 1,054 to 910 bytes, or
+145,600 bit/s of payload at 20 Hz; eight maximum interpolation views now retain at most 7,280 encoded
+payload bytes. Prior v1 packets and invalid position, velocity, remainder, session, ordering, flag,
+size, and tick values are rejected before client state changes.
+
+The controlled client simulates one contiguous input immediately and retains at most 128 unconfirmed
+commands. Reconciliation accepts only a newer server tick for the same session with a monotonic
+acknowledgement no higher than the last locally produced input. It restores position, velocity,
+grounded state, input sequence and integration remainders, drops the acknowledged prefix, then
+replays the remaining inputs through the same fixed-step character code. The operation uses a
+candidate player and commits only after replay succeeds. Tests prove exact equality with an authority
+while three newer inputs are replayed, atomic rejection of a wrong session/impossible ACK, and a
+fail-closed full history. The secure QUIC integration performs prediction, receives the compact
+state, reconciles it, and only then constructs a voxel.
+
+The complete promotion passed 114 library tests, four binary tests, and 41 integration tests in
+debug and release; strict Clippy was clean.
+
 ## 2026-09-05 — deterministic remote-player interpolation increment
 
 Source state: parent `6c5b1f6` plus the interpolation increment documented here. The client retains at

@@ -14,6 +14,7 @@ pub mod oidc;
 pub mod physics;
 pub mod player;
 pub mod player_replication;
+pub mod prediction;
 pub mod render;
 pub mod replication;
 pub mod secure_server;
@@ -65,6 +66,10 @@ pub use player_replication::{
     PlayerInterpolationSample, PlayerStateApplyReport, PlayerStateCodecError, PlayerStateInbox,
     PlayerStatePacket, PlayerStateReceiveError, ReplicatedPlayerState, decode_player_state_packet,
     encode_player_state_packet, is_player_state_datagram,
+};
+pub use prediction::{
+    ClientPrediction, ClientPredictionError, ClientPredictionStep, MAX_PENDING_PREDICTED_INPUTS,
+    PredictionReconcileReport,
 };
 pub use replication::{
     AuthoritativeServer, BodyStateUpdate, BodyVoxelAssignment, BuildCommand, BuildReport,

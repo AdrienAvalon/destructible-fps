@@ -49,11 +49,14 @@ The Linux demo now combines the authoritative core with a real-time first-person
   simulates once per 60 Hz tick, expires stale intent, and handles gravity, jumping, bounded terminal
   velocity, swept static-voxel contact, fall recovery, and 16 distinct recyclable spawn slots
   independently of client packet rate;
-- player-state protocol v1, broadcasting a canonical sorted full view at 20 Hz in one datagram even
-  at the 16-player cap, acknowledging each player's latest input, and a latest-wins client inbox that
-  rejects malformed, stale, replayed, duplicate, or unordered state atomically;
+- player-state protocol v2, broadcasting a canonical sorted full view at 20 Hz in at most 910 bytes
+  even at the 16-player cap, acknowledging each player's latest input, preserving exact fixed-step
+  integration remainders, and a latest-wins client inbox that rejects malformed, stale, replayed,
+  duplicate, or unordered state atomically;
 - an eight-view remote-player interpolation buffer with a 100 ms target delay, exact integer
   interpolation, coherent join/leave boundaries, bounded history eviction, and safe edge clamping;
+- local player prediction with contiguous input sequencing, a 128-input ceiling, atomic authority
+  reconciliation, and deterministic replay of every input newer than the server acknowledgement;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
@@ -78,8 +81,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
 game. Oriented voxel collision, contact-generated torque, gyroscopic response, deeper
 constraint-island convergence, progressive structural stress, authenticated remote-authority
-exposure, trusted OIDC discovery/JWKS provisioning and certificate lifecycle, local prediction and
-reconciliation, adaptive
+exposure, trusted OIDC discovery/JWKS provisioning and certificate lifecycle, graphical remote/local
+player presentation, correction smoothing, adaptive
 retransmission and congestion control, audio, asset-quality PBR, temporal anti-aliasing, and
 large-world residency streaming remain explicit later gates.
 

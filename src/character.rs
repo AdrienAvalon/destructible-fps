@@ -149,6 +149,15 @@ impl AuthoritativePlayer {
         self.state
     }
 
+    pub(crate) fn restore_authoritative_state(&mut self, state: AuthoritativePlayerState) {
+        self.state = state;
+        self.held_input = PlayerInputCommand {
+            input_sequence: state.last_input_sequence,
+            ..PlayerInputCommand::default()
+        };
+        self.input_age_ticks = MAX_PLAYER_INPUT_HOLD_TICKS;
+    }
+
     #[must_use]
     pub const fn build_context(&self) -> PlayerBuildContext {
         let position = self.state.position_um;

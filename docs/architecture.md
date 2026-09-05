@@ -71,15 +71,16 @@ unique session ID and an opaque 256-bit principal; a wire `Hello` cannot replace
 legacy re-handshake, and idle expiry remove queued commands, recovery work, and snapshot state for
 the old session before its peer key may be reused.
 
-Authenticated character motion uses an independent player-state v1 datagram rather than entering
+Authenticated character motion uses an independent player-state v2 datagram rather than entering
 the ordered permanent-world transaction stream. Every third 60 Hz authority tick, the server emits
 one complete session-sorted view at 20 Hz to every authenticated peer. The packet carries the server
-tick, fixed-micrometre position and velocity, grounded state, and latest accepted input sequence for
-at most 16 players; its maximum encoded size is 1,054 bytes, below the secure 1,100-byte application
+tick, fixed-micrometre position, bounded compact velocity, exact integration remainders, grounded
+state, and latest accepted input sequence for at most 16 players; its maximum encoded size is 910
+bytes, below the secure 1,100-byte application
 ceiling. A client atomically replaces its prior view only when the server tick advances, so loss does
 not stall motion while replay, reordering, duplicate IDs, malformed flags, and partial views cannot
 roll state backward. Absence from a newer complete view means the session left. At the cap, this
-correctness baseline consumes 168.64 kbit/s of payload per client; interpolation, delta baselines,
+correctness baseline consumes 145.6 kbit/s of payload per client; interpolation, delta baselines,
 and spatial interest remain required before the larger scale gate.
 
 Remote rendering retains at most eight validated complete views and normally samples six server
@@ -87,8 +88,13 @@ ticks, or 100 ms, behind the newest tick. Position and velocity interpolation us
 bounded world/motion inputs, avoiding frame-rate-dependent accumulation. A player leaving remains in
 the older view until the newer boundary; a joining player appears exactly at that boundary. Targets
 outside retained history clamp instead of extrapolating unbounded motion, while an old or malformed
-packet leaves the whole interpolation history unchanged. The local controlled player will use the
-input acknowledgement for prediction reconciliation rather than this delayed remote path.
+packet leaves the whole interpolation history unchanged. The local controlled player instead
+simulates each contiguous input immediately and retains at most 128 commands. A newer state restores
+the exact position, velocity, grounded flag and integration remainders, removes the acknowledged
+prefix, and deterministically replays the remaining commands. Wrong-session, stale,
+impossible-acknowledgement and over-cap paths leave prediction unchanged. This simulation primitive
+is proven through real QUIC; graphical wiring and visual correction smoothing remain presentation
+work.
 
 The dedicated-authority sessions described above are deliberately loopback-only and unauthenticated;
 the snapshot hash is an integrity check, not a MAC, and that legacy transport provides no

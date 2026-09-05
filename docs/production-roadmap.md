@@ -105,10 +105,12 @@ streaming, with no synchronous world meshing on the presentation thread.
 - fixed-step authoritative character movement with bounded newest-input retention, independent
   input replay protection, stale-input expiry, gravity, jumping, static collision, fall recovery and
   session cleanup (server slice delivered); a 20 Hz, single-datagram, full-view state stream now
-  replicates fixed position, velocity, grounded state and input acknowledgement for all 16 sessions;
+  replicates fixed position, compact velocity, integration remainders, grounded state and input
+  acknowledgement for all 16 sessions;
   an eight-view integer interpolation history renders remote state at a bounded 100 ms delay with
-  coherent joins and leaves (delivered; local prediction/reconciliation, view authority and
-  dynamic-body contact remain).
+  coherent joins and leaves; local prediction retains 128 contiguous inputs and atomically replays
+  the unacknowledged suffix from exact server state (simulation slices delivered; graphical wiring,
+  correction smoothing, view authority and dynamic-body contact remain).
 
 Exit gate: removing a load-bearing member causes a repeatable progressive collapse; the worst-case
 fixture remains inside the 60 Hz server budget and converges bit-for-bit on replicas.
@@ -136,17 +138,18 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - 32-task bounded concurrent admission, 64-event control and 256-datagram gameplay queues,
   cryptographic server nonces, monotonic session allocation, per-session ingress limits, and
   two-client secure-authority convergence (delivered in-process over real QUIC sockets);
-- player-state protocol v1 with a sorted 16-player cap, 1,054-byte maximum packet, 20 Hz latest-wins
+- player-state protocol v2 with a sorted 16-player cap, 910-byte maximum packet, 20 Hz latest-wins
   broadcast, input acknowledgement, stale/replay rejection, disconnect removal, and real two-client
-  QUIC convergence, plus a 100 ms bounded deterministic remote interpolation buffer (delivered;
-  local prediction and spatial delta baselines remain);
+  QUIC convergence, plus a 100 ms bounded deterministic remote interpolation buffer and exact
+  128-input local reconciliation (simulation delivered; graphical wiring, correction smoothing and
+  spatial delta baselines remain);
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
   Unix permission checks, static-JWKS expiry, signal-aware shutdown, and a four-case external-process
   matrix (delivered for loopback; online refresh and remote policy remain);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - broader entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
-- client input prediction, server reconciliation, interpolation, and bounded lag compensation;
+- graphical client prediction/reconciliation and bounded lag compensation;
 - configurable stochastic and trace-replay impairment plus a 32-client process harness;
 - fixed-profile bounded loss/jitter/reorder/duplication proxy with delta/snapshot repair, ACK retry,
   and per-channel byte accounting (delivered for one real client and one server process);

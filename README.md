@@ -49,8 +49,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   independent body frustum culling, and participation in both world and shadow passes;
 - 60 Hz server-authoritative body motion in deterministic micrometre units, mass-weighted blast
   impulses, three-axis swept static collision, material ground friction and normal restitution,
-  vertical voxel-column body collision, stable stacking, wake propagation, sleeping, bounded
-  sweep-and-prune broad phase, atomic overload rollback, and replicated GPU transforms;
+  vertical voxel-column body collision, coarse swept X/Z body contacts with mass-weighted impulse
+  exchange, stable stacking, wake propagation, sleeping, bounded sweep-and-prune broad phase,
+  atomic overload rollback, and replicated GPU transforms;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map, procedural material
@@ -59,10 +60,11 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
-game. Angular motion, lateral dynamic-body impulse exchange, progressive structural stress,
-authenticated remote-authority integration, trusted OIDC discovery/JWKS provisioning and
-certificate lifecycle, adaptive retransmission and congestion control, audio, asset-quality PBR,
-temporal anti-aliasing, and large-world residency streaming remain explicit later gates.
+game. Angular motion, voxel-exact iterative multi-body contacts, dynamic-body friction, progressive
+structural stress, authenticated remote-authority integration, trusted OIDC discovery/JWKS
+provisioning and certificate lifecycle, adaptive retransmission and congestion control, audio,
+asset-quality PBR, temporal anti-aliasing, and large-world residency streaming remain explicit later
+gates.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
@@ -71,7 +73,9 @@ properties, removes its voxels from the static world, and replicates the new bod
 body is rendered from its preserved material voxels and receives a deterministic material-weighted
 blast impulse. It sweeps all translation axes against static voxels, applies bounded restitution and
 ground friction, stacks on exact vertical body columns, and sleeps after a deterministic rest
-interval. Rotation and lateral response between two dynamic bodies are not claimed yet.
+interval. A bounded single pass also separates coarse swept X/Z body bounds and exchanges normal
+velocity from mass and restitution. Rotation, dynamic contact friction, voxel-exact lateral contact,
+and iterative multi-contact resolution are not claimed yet.
 
 ## Screenshots
 
@@ -94,6 +98,7 @@ cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario lateral-sweep
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 1000 --scenario dynamic-head-on
 cargo run --release --bin snapshot-benchmark -- --iterations 20
 cargo run --release --bin playable-demo
 ```

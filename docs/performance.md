@@ -3,6 +3,33 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — bounded lateral body-contact increment
+
+Source state: parent `66741fe` plus the isolated-pair dynamic-contact increment documented here.
+The solver uses the existing bounded swept broad phase, compares rational entry times without
+floating point, requires strict overlap on both orthogonal axes at contact time, separates the final
+coarse bounds in inverse proportion to mass, exchanges normal momentum using material restitution,
+and wakes impacted sleeping bodies. Pair traversal and tie-breaking are deterministic.
+
+Unit coverage includes equal-mass 120 m/s head-on impacts on both X and Z, unequal wood/steel impact
+with wake-up and exact separation, and a negative case where swept bounds meet only at a corner. This
+is a bounded single pass over at most 8,192 broad-phase pairs. It is not yet a voxel-exact, iterative,
+rotating, or frictional dynamic-body solver.
+
+The complete promotion passed 80 library tests, four binary tests, and 40 integration tests in both
+debug and release.
+
+```bash
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 1000 --scenario dynamic-head-on
+```
+
+The fixture resets outside each timed sample, then resolves 512 independent simultaneous wood/wood
+head-on contacts among 1,024 active bodies. Across 1,000 samples it resolved all 512,000 expected
+contacts, with 512 maximum broad-phase pairs: tick p50 0.806 ms, p95 0.831 ms, p99 0.856 ms, and
+maximum 0.886 ms. A separate 300-tick vertical stack regression remained within the 12 ms target at
+p50 0.494 ms, p95 1.119 ms, p99 1.133 ms, and maximum 1.166 ms while all 1,024 bodies settled at
+their exact expected heights.
+
 ## 2026-09-05 — three-axis rigid-body response promotion
 
 Source state: parent `d9468ff` plus the physics and protocol-v5 increment documented here. The

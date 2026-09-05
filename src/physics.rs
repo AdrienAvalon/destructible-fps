@@ -539,7 +539,11 @@ pub fn step_rigid_bodies(
 
     let adjacency = pair_adjacency(&broad_phase.pairs);
     propagate_waking(bodies, states, &mut next, &adjacency);
-    let body_collisions = resolve_body_contacts(bodies, states, &mut next, &adjacency);
+    let lateral_body_collisions =
+        resolve_lateral_body_contacts(bodies, states, &mut next, &broad_phase.pairs);
+    let vertical_body_collisions =
+        resolve_vertical_body_contacts(bodies, states, &mut next, &adjacency);
+    let body_collisions = lateral_body_collisions.saturating_add(vertical_body_collisions);
     let transitions = state_transitions(bodies, states, &next);
     let bodies_put_to_sleep = transitions
         .iter()
@@ -576,7 +580,7 @@ fn integrate_static_bodies(
         .sum()
 }
 
-fn resolve_body_contacts(
+fn resolve_vertical_body_contacts(
     bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
     before: &BTreeMap<BodyId, RigidBodyState>,
     next: &mut BTreeMap<BodyId, RigidBodyState>,
@@ -649,6 +653,44 @@ fn resolve_body_contacts(
     body_collisions
 }
 
+fn resolve_lateral_body_contacts(
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    before: &BTreeMap<BodyId, RigidBodyState>,
+    next: &mut BTreeMap<BodyId, RigidBodyState>,
+    pairs: &[(BodyId, BodyId)],
+) -> usize {
+    let mut collisions = 0_usize;
+    for &(first_id, second_id) in pairs {
+        let (Some(first_body), Some(second_body)) = (bodies.get(&first_id), bodies.get(&second_id))
+        else {
+            continue;
+        };
+        let (Some(first_before), Some(second_before), Some(mut first), Some(mut second)) = (
+            before.get(&first_id).copied(),
+            before.get(&second_id).copied(),
+            next.get(&first_id).copied(),
+            next.get(&second_id).copied(),
+        ) else {
+            continue;
+        };
+        let Some(contact) = lateral_body_contact(
+            first_body,
+            first_before,
+            first,
+            second_body,
+            second_before,
+            second,
+        ) else {
+            continue;
+        };
+        separate_lateral_contact(first_body, &mut first, second_body, &mut second, contact);
+        next.insert(first_id, first);
+        next.insert(second_id, second);
+        collisions = collisions.saturating_add(1);
+    }
+    collisions
+}
+
 fn state_transitions(
     bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
     before: &BTreeMap<BodyId, RigidBodyState>,
@@ -692,14 +734,14 @@ fn broad_phase_between(
     let mut pairs = Vec::new();
     for (index, &(left_id, left, left_sleeping)) in entries.iter().enumerate() {
         for &(right_id, right, right_sleeping) in &entries[index + 1..] {
-            if right.0.x >= left.1.x {
+            if right.0.x > left.1.x {
                 break;
             }
             if left_sleeping && right_sleeping {
                 continue;
             }
             if intervals_overlap_or_touch(left.0.y, left.1.y, right.0.y, right.1.y)
-                && intervals_overlap(left.0.z, left.1.z, right.0.z, right.1.z)
+                && intervals_overlap_or_touch(left.0.z, left.1.z, right.0.z, right.1.z)
             {
                 if pairs.len() == MAX_BROAD_PHASE_PAIRS {
                     return BroadPhaseResult {
@@ -796,6 +838,15 @@ enum Axis {
     Z,
 }
 
+#[derive(Clone, Copy)]
+struct LateralBodyContact {
+    axis: Axis,
+    first_before_second: bool,
+    penetration_um: u64,
+    gap_um: u64,
+    closing_travel_um: u64,
+}
+
 impl Axis {
     const fn index(self) -> usize {
         match self {
@@ -828,6 +879,278 @@ impl Axis {
             Self::Z => [Self::X, Self::Y],
         }
     }
+}
+
+fn lateral_body_contact(
+    first_body: &RigidBodyDescriptor,
+    first_before: RigidBodyState,
+    first_after: RigidBodyState,
+    second_body: &RigidBodyDescriptor,
+    second_before: RigidBodyState,
+    second_after: RigidBodyState,
+) -> Option<LateralBodyContact> {
+    let first_before_bounds = body_aabb(first_body, first_before);
+    let second_before_bounds = body_aabb(second_body, second_before);
+    if bounds_overlap_on_axis(first_before_bounds, second_before_bounds, Axis::X)
+        && bounds_overlap_on_axis(first_before_bounds, second_before_bounds, Axis::Z)
+    {
+        return None;
+    }
+    let first_after_bounds = body_aabb(first_body, first_after);
+    let second_after_bounds = body_aabb(second_body, second_after);
+    let x = axis_body_contact(
+        Axis::X,
+        first_before_bounds,
+        first_after_bounds,
+        second_before_bounds,
+        second_after_bounds,
+    )
+    .filter(|contact| {
+        overlaps_on_orthogonal_axes_at_contact(
+            *contact,
+            first_before_bounds,
+            first_after_bounds,
+            second_before_bounds,
+            second_after_bounds,
+        )
+    });
+    let z = axis_body_contact(
+        Axis::Z,
+        first_before_bounds,
+        first_after_bounds,
+        second_before_bounds,
+        second_after_bounds,
+    )
+    .filter(|contact| {
+        overlaps_on_orthogonal_axes_at_contact(
+            *contact,
+            first_before_bounds,
+            first_after_bounds,
+            second_before_bounds,
+            second_after_bounds,
+        )
+    });
+    match (x, z) {
+        (Some(x), Some(z)) => {
+            let x_order = u128::from(x.gap_um).saturating_mul(u128::from(z.closing_travel_um));
+            let z_order = u128::from(z.gap_um).saturating_mul(u128::from(x.closing_travel_um));
+            Some(if x_order <= z_order { x } else { z })
+        }
+        (Some(contact), None) | (None, Some(contact)) => Some(contact),
+        (None, None) => None,
+    }
+}
+
+const fn bounds_overlap_on_axis(
+    first: (FixedMicrometers3, FixedMicrometers3),
+    second: (FixedMicrometers3, FixedMicrometers3),
+    axis: Axis,
+) -> bool {
+    let first = axis_bounds(first, axis);
+    let second = axis_bounds(second, axis);
+    first.0 < second.1 && second.0 < first.1
+}
+
+fn overlaps_on_orthogonal_axes_at_contact(
+    contact: LateralBodyContact,
+    first_before: (FixedMicrometers3, FixedMicrometers3),
+    first_after: (FixedMicrometers3, FixedMicrometers3),
+    second_before: (FixedMicrometers3, FixedMicrometers3),
+    second_after: (FixedMicrometers3, FixedMicrometers3),
+) -> bool {
+    contact.axis.orthogonal().into_iter().all(|axis| {
+        let first = scaled_axis_bounds(
+            first_before,
+            first_after,
+            axis,
+            contact.gap_um,
+            contact.closing_travel_um,
+        );
+        let second = scaled_axis_bounds(
+            second_before,
+            second_after,
+            axis,
+            contact.gap_um,
+            contact.closing_travel_um,
+        );
+        first.0 < second.1 && second.0 < first.1
+    })
+}
+
+fn scaled_axis_bounds(
+    before: (FixedMicrometers3, FixedMicrometers3),
+    after: (FixedMicrometers3, FixedMicrometers3),
+    axis: Axis,
+    time_numerator: u64,
+    time_denominator: u64,
+) -> (i128, i128) {
+    let scale = i128::from(time_denominator);
+    let time = i128::from(time_numerator);
+    let interpolate = |before: i64, after: i64| {
+        i128::from(before).saturating_mul(scale).saturating_add(
+            i128::from(after)
+                .saturating_sub(i128::from(before))
+                .saturating_mul(time),
+        )
+    };
+    (
+        interpolate(axis.component(before.0), axis.component(after.0)),
+        interpolate(axis.component(before.1), axis.component(after.1)),
+    )
+}
+
+const fn axis_body_contact(
+    axis: Axis,
+    first_before: (FixedMicrometers3, FixedMicrometers3),
+    first_after: (FixedMicrometers3, FixedMicrometers3),
+    second_before: (FixedMicrometers3, FixedMicrometers3),
+    second_after: (FixedMicrometers3, FixedMicrometers3),
+) -> Option<LateralBodyContact> {
+    let (first_min, first_max) = axis_bounds(first_before, axis);
+    let (second_min, second_max) = axis_bounds(second_before, axis);
+    let first_travel = axis
+        .component(first_after.0)
+        .saturating_sub(axis.component(first_before.0));
+    let second_travel = axis
+        .component(second_after.0)
+        .saturating_sub(axis.component(second_before.0));
+    let (first_before_second, gap, closing) = if first_max <= second_min {
+        (
+            true,
+            second_min.saturating_sub(first_max),
+            first_travel.saturating_sub(second_travel),
+        )
+    } else if second_max <= first_min {
+        (
+            false,
+            first_min.saturating_sub(second_max),
+            second_travel.saturating_sub(first_travel),
+        )
+    } else {
+        return None;
+    };
+    if closing <= 0 || closing < gap {
+        return None;
+    }
+    Some(LateralBodyContact {
+        axis,
+        first_before_second,
+        penetration_um: closing.saturating_sub(gap).cast_unsigned(),
+        gap_um: gap.cast_unsigned(),
+        closing_travel_um: closing.cast_unsigned(),
+    })
+}
+
+fn separate_lateral_contact(
+    first_body: &RigidBodyDescriptor,
+    first: &mut RigidBodyState,
+    second_body: &RigidBodyDescriptor,
+    second: &mut RigidBodyState,
+    contact: LateralBodyContact,
+) {
+    let total_mass = u128::from(first_body.mass_kg).saturating_add(u128::from(second_body.mass_kg));
+    let penetration = u128::from(contact.penetration_um);
+    let first_correction = penetration
+        .saturating_mul(u128::from(second_body.mass_kg))
+        .saturating_add(total_mass.saturating_sub(1))
+        / total_mass;
+    let first_correction = i64::try_from(first_correction).unwrap_or(i64::MAX);
+    let second_correction = i64::try_from(penetration).unwrap_or(i64::MAX) - first_correction;
+    let direction = if contact.first_before_second { -1 } else { 1 };
+    let first_origin = contact
+        .axis
+        .component(first.translation_um)
+        .saturating_add(direction * first_correction)
+        .clamp(-MAX_WORLD_TRANSLATION_UM, MAX_WORLD_TRANSLATION_UM);
+    let second_origin = contact
+        .axis
+        .component(second.translation_um)
+        .saturating_sub(direction * second_correction)
+        .clamp(-MAX_WORLD_TRANSLATION_UM, MAX_WORLD_TRANSLATION_UM);
+    contact
+        .axis
+        .set_component(&mut first.translation_um, first_origin);
+    contact
+        .axis
+        .set_component(&mut second.translation_um, second_origin);
+
+    let first_velocity = contact.axis.component(first.linear_velocity_um_per_second);
+    let second_velocity = contact.axis.component(second.linear_velocity_um_per_second);
+    let approaching = if contact.first_before_second {
+        first_velocity > second_velocity
+    } else {
+        second_velocity > first_velocity
+    };
+    if approaching {
+        let restitution = combined_response(
+            first_body.restitution_per_mille,
+            second_body.restitution_per_mille,
+        );
+        let (first_velocity, second_velocity) = dynamic_contact_velocities(
+            first_body.mass_kg,
+            first_velocity,
+            second_body.mass_kg,
+            second_velocity,
+            restitution,
+        );
+        contact
+            .axis
+            .set_component(&mut first.linear_velocity_um_per_second, first_velocity);
+        contact
+            .axis
+            .set_component(&mut second.linear_velocity_um_per_second, second_velocity);
+    }
+    first.integration_remainder[contact.axis.index()] = 0;
+    second.integration_remainder[contact.axis.index()] = 0;
+    first.sleep_ticks = 0;
+    first.sleeping = false;
+    second.sleep_ticks = 0;
+    second.sleeping = false;
+}
+
+fn dynamic_contact_velocities(
+    first_mass: u64,
+    first_velocity: i64,
+    second_mass: u64,
+    second_velocity: i64,
+    restitution_per_mille: u16,
+) -> (i64, i64) {
+    let first_mass = i128::from(first_mass);
+    let second_mass = i128::from(second_mass);
+    let total_mass = first_mass.saturating_add(second_mass);
+    let momentum = first_mass
+        .saturating_mul(i128::from(first_velocity))
+        .saturating_add(second_mass.saturating_mul(i128::from(second_velocity)));
+    let relative_velocity = i128::from(first_velocity).saturating_sub(i128::from(second_velocity));
+    let restitution = i128::from(restitution_per_mille);
+    let first_exchange = second_mass
+        .saturating_mul(restitution)
+        .saturating_mul(relative_velocity)
+        / i128::from(RESPONSE_SCALE);
+    let second_exchange = first_mass
+        .saturating_mul(restitution)
+        .saturating_mul(relative_velocity)
+        / i128::from(RESPONSE_SCALE);
+    let first = momentum.saturating_sub(first_exchange) / total_mass;
+    let second = momentum.saturating_add(second_exchange) / total_mass;
+    (
+        i64::try_from(first)
+            .unwrap_or_else(|_| first.signum() as i64 * MAX_LINEAR_SPEED_UM_PER_SECOND)
+            .clamp(
+                -MAX_LINEAR_SPEED_UM_PER_SECOND,
+                MAX_LINEAR_SPEED_UM_PER_SECOND,
+            ),
+        i64::try_from(second)
+            .unwrap_or_else(|_| second.signum() as i64 * MAX_LINEAR_SPEED_UM_PER_SECOND)
+            .clamp(
+                -MAX_LINEAR_SPEED_UM_PER_SECOND,
+                MAX_LINEAR_SPEED_UM_PER_SECOND,
+            ),
+    )
+}
+
+const fn axis_bounds(bounds: (FixedMicrometers3, FixedMicrometers3), axis: Axis) -> (i64, i64) {
+    (axis.component(bounds.0), axis.component(bounds.1))
 }
 
 #[derive(Clone, Copy)]
@@ -1180,10 +1503,6 @@ fn world_column(body: &RigidBodyDescriptor, state: RigidBodyState, surface: IVec
             i64::from(surface.z - body.minimum.z).saturating_mul(MICROMETERS_PER_VOXEL),
         ),
     )
-}
-
-const fn intervals_overlap(left_min: i64, left_max: i64, right_min: i64, right_max: i64) -> bool {
-    left_min < right_max && right_min < left_max
 }
 
 const fn intervals_overlap_or_touch(
@@ -1717,6 +2036,142 @@ mod tests {
         );
         assert!(state.translation_um.x > 0);
         assert!(state.sleeping);
+    }
+
+    #[test]
+    fn equal_mass_dynamic_sweeps_exchange_velocity_on_both_lateral_axes() {
+        for axis in [Axis::X, Axis::Z] {
+            let first_position = IVec3::new(0, 5, 0);
+            let second_position = match axis {
+                Axis::X => IVec3::new(3, 5, 0),
+                Axis::Z => IVec3::new(0, 5, 3),
+                Axis::Y => unreachable!("lateral fixture"),
+            };
+            let first = RigidBodyDescriptor::from_replicated_voxels(
+                1,
+                vec![BodyVoxel {
+                    position: first_position,
+                    voxel: Voxel::new(Material::Wood),
+                }],
+                BodyLimits::default(),
+            )
+            .expect("first dynamic body");
+            let second = RigidBodyDescriptor::from_replicated_voxels(
+                2,
+                vec![BodyVoxel {
+                    position: second_position,
+                    voxel: Voxel::new(Material::Wood),
+                }],
+                BodyLimits::default(),
+            )
+            .expect("second dynamic body");
+            let mut first_state = RigidBodyState::at_spawn(&first);
+            let mut second_state = RigidBodyState::at_spawn(&second);
+            axis.set_component(&mut first_state.linear_velocity_um_per_second, 120_000_000);
+            axis.set_component(
+                &mut second_state.linear_velocity_um_per_second,
+                -120_000_000,
+            );
+            let bodies = BTreeMap::from([(first.id, first), (second.id, second)]);
+            let mut states = BTreeMap::from([(1, first_state), (2, second_state)]);
+
+            let report = step_rigid_bodies(&World::default(), &bodies, &mut states);
+
+            assert_eq!(report.body_collisions, 1);
+            assert_eq!(
+                axis.component(states[&1].translation_um),
+                MICROMETERS_PER_VOXEL
+            );
+            assert_eq!(
+                axis.component(states[&2].translation_um),
+                2 * MICROMETERS_PER_VOXEL
+            );
+            assert_eq!(
+                axis.component(states[&1].linear_velocity_um_per_second),
+                -26_400_000
+            );
+            assert_eq!(
+                axis.component(states[&2].linear_velocity_um_per_second),
+                26_400_000
+            );
+        }
+    }
+
+    #[test]
+    fn lateral_impact_separates_and_wakes_an_unequal_sleeping_body() {
+        let first = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![BodyVoxel {
+                position: IVec3::new(0, 5, 0),
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("light moving body");
+        let second = RigidBodyDescriptor::from_replicated_voxels(
+            2,
+            vec![BodyVoxel {
+                position: IVec3::new(2, 5, 0),
+                voxel: Voxel::new(Material::Steel),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("heavy sleeping body");
+        let mut first_state = RigidBodyState::at_spawn(&first);
+        first_state.linear_velocity_um_per_second.x = 120_000_000;
+        let mut second_state = RigidBodyState::at_spawn(&second);
+        second_state.sleep_ticks = SLEEP_TICKS;
+        second_state.sleeping = true;
+        let bodies = BTreeMap::from([(first.id, first), (second.id, second)]);
+        let mut states = BTreeMap::from([(1, first_state), (2, second_state)]);
+
+        let report = step_rigid_bodies(&World::default(), &bodies, &mut states);
+
+        assert_eq!(report.body_collisions, 1);
+        assert_eq!(report.bodies_woken, 1);
+        assert!(!states[&2].sleeping);
+        assert!(states[&1].linear_velocity_um_per_second.x < 0);
+        assert!(states[&2].linear_velocity_um_per_second.x > 0);
+        let first_bounds = body_aabb(&bodies[&1], states[&1]);
+        let second_bounds = body_aabb(&bodies[&2], states[&2]);
+        assert_eq!(first_bounds.1.x, second_bounds.0.x);
+    }
+
+    #[test]
+    fn swept_corner_touch_without_orthogonal_overlap_does_not_false_collide() {
+        let first = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![BodyVoxel {
+                position: IVec3::new(0, 5, 0),
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("x-moving body");
+        let second = RigidBodyDescriptor::from_replicated_voxels(
+            2,
+            vec![BodyVoxel {
+                position: IVec3::new(2, 5, 3),
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("z-moving body");
+        let mut first_state = RigidBodyState::at_spawn(&first);
+        first_state.linear_velocity_um_per_second.x = 120_000_000;
+        let mut second_state = RigidBodyState::at_spawn(&second);
+        second_state.linear_velocity_um_per_second.z = -240_000_000;
+        let bodies = BTreeMap::from([(first.id, first), (second.id, second)]);
+        let mut states = BTreeMap::from([(1, first_state), (2, second_state)]);
+
+        let report = step_rigid_bodies(&World::default(), &bodies, &mut states);
+
+        assert_eq!(report.broad_phase_pairs, 1);
+        assert_eq!(report.body_collisions, 0);
+        assert_eq!(states[&1].translation_um.x, 2 * MICROMETERS_PER_VOXEL);
+        assert_eq!(states[&2].translation_um.z, -MICROMETERS_PER_VOXEL);
+        assert_eq!(states[&1].linear_velocity_um_per_second.x, 120_000_000);
+        assert_eq!(states[&2].linear_velocity_um_per_second.z, -240_000_000);
     }
 
     #[test]

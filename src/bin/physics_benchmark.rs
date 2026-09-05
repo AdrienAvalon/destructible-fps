@@ -18,6 +18,7 @@ type Fixture = (World, BodyMap, StateMap);
 enum Scenario {
     Stacks,
     LateralSweep,
+    DynamicHeadOn,
 }
 
 impl Scenario {
@@ -25,6 +26,7 @@ impl Scenario {
         match self {
             Self::Stacks => "stacks",
             Self::LateralSweep => "lateral-sweep",
+            Self::DynamicHeadOn => "dynamic-head-on",
         }
     }
 }
@@ -41,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut body_collisions = 0_usize;
 
     for _ in 0..ticks {
-        if scenario == Scenario::LateralSweep {
+        if matches!(scenario, Scenario::LateralSweep | Scenario::DynamicHeadOn) {
             states.clone_from(&initial_states);
         }
         let tick_started = Instant::now();
@@ -91,6 +93,47 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err("not every lateral sweep reached its static wall".into());
             }
             verify_lateral_sweeps(&states, &initial_states)?;
+        }
+        Scenario::DynamicHeadOn => {
+            let expected = body_count.saturating_mul(ticks) / 2;
+            if body_collisions != expected {
+                return Err("not every dynamic pair resolved one head-on contact".into());
+            }
+            verify_dynamic_head_on(&states, &initial_states)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_dynamic_head_on(
+    states: &StateMap,
+    initial_states: &StateMap,
+) -> Result<(), Box<dyn Error>> {
+    for first_id in (1..=states.len()).step_by(2) {
+        let first_id = BodyId::try_from(first_id)?;
+        let second_id = first_id.saturating_add(1);
+        let first = states
+            .get(&first_id)
+            .ok_or("dynamic fixture lost its first body")?;
+        let second = states
+            .get(&second_id)
+            .ok_or("dynamic fixture lost its second body")?;
+        let first_initial = initial_states
+            .get(&first_id)
+            .ok_or("dynamic fixture lost its first initial state")?;
+        let expected_first_x = first_initial
+            .translation_um
+            .x
+            .saturating_add(destructible_fps::MICROMETERS_PER_VOXEL);
+        if first.translation_um.x != expected_first_x
+            || second.translation_um.x
+                != expected_first_x.saturating_add(destructible_fps::MICROMETERS_PER_VOXEL)
+            || first.linear_velocity_um_per_second.x != -26_400_000
+            || second.linear_velocity_um_per_second.x != 26_400_000
+        {
+            return Err(
+                format!("dynamic pair {first_id}/{second_id} did not resolve canonically").into(),
+            );
         }
     }
     Ok(())
@@ -149,7 +192,46 @@ fn fixture(body_count: usize, scenario: Scenario) -> Result<Fixture, Box<dyn Err
     match scenario {
         Scenario::Stacks => stack_fixture(body_count),
         Scenario::LateralSweep => lateral_sweep_fixture(body_count),
+        Scenario::DynamicHeadOn => dynamic_head_on_fixture(body_count),
     }
+}
+
+fn dynamic_head_on_fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
+    const PAIR_SPACING: i32 = 8;
+    const HEIGHT: i32 = 8;
+    if !body_count.is_multiple_of(2) {
+        return Err("dynamic-head-on requires an even body count".into());
+    }
+    let world = World::default();
+    let mut bodies = BTreeMap::new();
+    let mut states = BTreeMap::new();
+    for index in 0..body_count {
+        let pair = i32::try_from(index / 2)?;
+        let within_pair = if index.is_multiple_of(2) { 0 } else { 3 };
+        let position = IVec3::new(
+            pair.saturating_mul(PAIR_SPACING)
+                .saturating_add(within_pair),
+            HEIGHT,
+            0,
+        );
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            BodyId::try_from(index + 1)?,
+            vec![destructible_fps::BodyVoxel {
+                position,
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )?;
+        let mut state = RigidBodyState::at_spawn(&body);
+        state.linear_velocity_um_per_second.x = if index.is_multiple_of(2) {
+            120_000_000
+        } else {
+            -120_000_000
+        };
+        states.insert(body.id, state);
+        bodies.insert(body.id, body);
+    }
+    Ok((world, bodies, states))
 }
 
 fn stack_fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
@@ -239,11 +321,12 @@ fn parse_arguments() -> Result<(usize, usize, Scenario), Box<dyn Error>> {
             "--scenario" => {
                 scenario = match arguments
                     .next()
-                    .ok_or("--scenario requires stacks or lateral-sweep")?
+                    .ok_or("--scenario requires stacks, lateral-sweep, or dynamic-head-on")?
                     .as_str()
                 {
                     "stacks" => Scenario::Stacks,
                     "lateral-sweep" => Scenario::LateralSweep,
+                    "dynamic-head-on" => Scenario::DynamicHeadOn,
                     value => return Err(format!("unknown physics scenario: {value}").into()),
                 };
             }

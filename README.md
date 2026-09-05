@@ -121,7 +121,7 @@ edge ribbons; signed-direction ray tests cover the reported breach defect.
 Smooth detached fracture bodies, true sub-voxel interiors and reinforcement geometry, calibrated
 authored geometry, material blending, vegetation, reflections, temporal anti-aliasing and post-processing
 remain visual gates. Exact convex contact manifolds,
-gyroscopic response, deeper constraint-island convergence, progressive structural stress,
+gyroscopic response, deeper constraint-island convergence, fully integrated progressive structural failure,
 remote-authority exposure, automated certificate issuance, first-person arms/weapon presentation,
 transport pacing and congestion control, audio, and large-world residency streaming also remain
 explicit later gates. See [`docs/visual-direction.md`](docs/visual-direction.md) for the visual target
@@ -129,10 +129,13 @@ and promotion order.
 
 A separate [structural elasticity foundation](docs/structural-elasticity.md) now solves compression,
 shear-aware bending and torsion, and measures load redistribution after losing supports. Its bounded
-six-DOF solver is validated offline against analytical cases and a 64×32 wall. It is not yet connected
-to gameplay fracture: calibrated strength, complete domain extraction, server scheduling and atomic
-replicated failure remain the next promotion. Run it with
-`cargo run --release --bin structural-load-benchmark -- --iterations 20`.
+six-DOF solver is validated against analytical cases and a 64×32 wall. A bounded worker extracts
+complete domains; the opt-in [coarse failure adapter](docs/structural-failure.md) assesses explicit
+strengths, prepares mass-preserving fragments and commits ordinary replicated static-to-body
+transactions. Automatic game-loop scheduling, calibrated material response, crushing geometry and
+nonlinear/contact coupling remain required before realistic progressive collapse is playable.
+Run `cargo run --release --bin structural-failure-benchmark -- --iterations 20` for the two-stage
+support-failure fixture, or `structural-load-benchmark` for the separate numerical cases.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits

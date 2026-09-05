@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn square_torsion_matches_the_published_fifty_mm_bar_twist() {
+    let mut nodes: Vec<_> = (0..=30)
+        .map(|x| {
+            let mut value = node(IVec3::new(x, 0, 0), x == 0);
+            value.young_modulus_pa = 2e11;
+            value.poisson_ratio = 0.29;
+            value
+        })
+        .collect();
+    nodes[30].load[3] = 1000.0;
+    let result = solve(nodes, 0.05, [0.0; 3], 8);
+    let expected = 1000.0 * 1.5 / ((2e11 / 2.58) * 0.1406 * 0.05_f64.powi(4));
+    close(result.displacements[30][3], expected);
+    // Recompute from the stated E/nu/J, which do not reproduce the webpage's displayed twist.
+    close(result.displacements[30][3], 0.022_019_914_651_493_593);
+    let old_polar_approximation = 1000.0 * 1.5 / ((2e11 / 2.58) * 0.05_f64.powi(4) / 6.0);
+    assert!((1.18..1.19).contains(&(result.displacements[30][3] / old_polar_approximation)));
+}
+
 fn node(position: IVec3, fixed: bool) -> ElasticNode {
     ElasticNode {
         position,
@@ -115,7 +135,7 @@ fn analytical_axial_bending_and_torsion_hold_in_every_signed_direction() {
                         10.0 * length.powi(3) / (3.0 * 1e9 * inertia)
                             + 10.0 * length / ((5.0 / 6.0) * 4e8 * length.powi(2))
                     } else if dof == axis + 3 {
-                        10.0 * length / (4e8 * 2.0 * inertia)
+                        10.0 * length / (4e8 * 0.1406 * length.powi(4))
                     } else {
                         10.0 * length / (1e9 * inertia)
                     };

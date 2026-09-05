@@ -1903,3 +1903,103 @@ structural review. The separate tooling review's failed invocation remains docum
 Graphify's final local AST index was fresh with 2,525 nodes, 6,943 post-build edges, zero unverified
 code nodes and zero dangling endpoints. Conclusions were confirmed in source, not inferred solely
 from graph connections.
+
+## 2026-09-06 — opt-in stress-driven severance and atomic body promotion
+
+Source state: `c5a37f9` plus the explicit section-strength worker and coarse fracture commit.
+This advances PHYS-01 from force calculation to actual integer static-to-body transactions. The
+normal graphical/dedicated-server loop still does not schedule this policy automatically, and
+material calibration, crushing geometry, nonlinear response and body-contact loads remain open.
+See [`structural-failure.md`](structural-failure.md) for the exact model and ownership boundaries.
+
+The end-to-end case accepts an intact cantilever, partially damages it with a real authoritative
+explosion, rejects the old job and commits a fresh stress-driven cut. Its failed voxel and four
+other timber voxels become two separate bodies without losing material, integrity or mass. Their
+framed/reassembled delta and 360 fixed physics ticks converge on two replicas; both bodies fall
+three metres and sleep on the floor. A duplicate transaction cannot duplicate mass, and a late
+snapshot reconstructs the same world and body state. This is not a proof of compressive crushing:
+a failed voxel still has a whole-cube contact shape, which may continue carrying contact load.
+
+The section law considers both bond-end envelopes so clamped-root bending cannot be overlooked.
+The square Saint-Venant torsion constant replaces the old polar-area-moment approximation. Exact
+analytical tests use the stated dimensions and material inputs rather than fitting to a differing
+webpage result. The brittle strength profiles are explicit synthetic inputs, not material presets.
+
+Full debug and release matrices passed 251 library, 11 binary and 78 ordinary integration tests
+each. Eight failure/commit library tests include exact capacity/counter faults and 1,024 real
+consecutive cuts followed by unchanged-state refusal of the next cut. Seven integration tests cover
+falling/settling, two successive support failures, cancellation/configuration/foreign results,
+unrelated live-body ID allocation, anchor removal, nonfailed-cell edits, per-body limits and
+explicit unresolved out-of-linear-range handling. All 16 elastic tests pass with the corrected
+torsion stiffness. Dedicated network, secure transport/authority/process and six OIDC tests passed;
+the normally ignored production-shader projection test passed explicitly on Vulkan in both profiles.
+
+Claude's analysis led to the root-section envelope, consistent square torsion and stronger atomic
+and saturation tests. Its final review completed with no observed runtime blocker, conditional on
+the full matrix/performance checks. Test diffs were summarized, not independently reviewed in full;
+Codex inspected assertions and ran the actual suites. The suggested circular-style resultant for
+biaxial bending was not substituted: the implemented sum of absolute contributions is the square
+corner maximum and is independently tested. Persistent body-slot consumption, excluded foundation
+bearing and whole-cube compression behaviour remain explicit limitations, not review approval of
+the final gameplay model.
+
+### Measurements
+
+Release build on the same Intel i7-13700H / RTX 4050 Laptop Linux workstation, with clocks not
+locked. All benchmark binaries were built before this serial batch; no compiler or other game
+benchmark was deliberately run concurrently. These are short local observations, not a certified
+worst-case server budget. Values below are p50 / p95 / p99 in milliseconds.
+
+| Workload | Samples | p50 / p95 / p99 |
+| --- | ---: | --- |
+| Destruction, authoritative loopback | 500 events | 0.013 / 0.230 / 0.388 |
+| Detached 8,192-voxel slab, analysis | 100 | 2.546 / 2.633 / 2.735 |
+| Same slab, body promotion | 100 | 1.668 / 1.705 / 1.762 |
+| Same slab, combined | 100 | 4.218 / 4.338 / 4.497 |
+| Physics, 1,024 bodies | 300 ticks | 0.539 / 1.163 / 1.186 |
+| Snapshot encode | 20 | 5.393 / 5.589 / 6.203 |
+| Snapshot reassemble/decode | 20 | 6.271 / 6.362 / 6.797 |
+| Snapshot validate/install | 20 | 0.370 / 0.381 / 0.384 |
+| Snapshot total | 20 | 12.065 / 12.202 / 13.368 |
+
+The loopback replicas matched after 29,631 voxel changes and 908 frames / 0.567 MiB. The physics
+case settled all 1,024 bodies, with 768 maximum broad-phase pairs and a 1.224 ms maximum tick.
+Snapshot size remained 1,181 frames / 1.351 MiB. The slab combined maximum was 4.503 ms.
+
+The new two-support benchmark starts with 964 nodes: 960 brick cells, two free timber supports
+and two clamped stone cells. Two fresh solves move one and then 961 cells into three bodies;
+two replicas agree after each transaction. Each repetition starts from an intact scene, rather
+than measuring progressively less work. All elastic moduli are explicitly synthetic 100 GPa;
+the earlier 1 GPa version left the linear regime after its first support failed and was rejected.
+This positive fixture validates bounded preparation and commits, not calibrated timber or collapse
+under whole-cube compressive contact. See the model limitations before interpreting it as gameplay.
+
+| Stress-driven fracture phase | First 20 repetitions | Warm repeat, 20 repetitions |
+| --- | --- | --- |
+| First support, worker completion | 18.653 / 20.025 / 34.422 | 18.052 / 18.223 / 25.362 |
+| First support, atomic commit | 0.017 / 0.039 / 0.051 | 0.015 / 0.041 / 0.104 |
+| Second support, worker completion | 38.090 / 40.563 / 43.949 | 36.060 / 36.553 / 40.821 |
+| Second support, atomic commit | 0.126 / 0.161 / 0.248 | 0.118 / 0.128 / 0.141 |
+
+The first batch's outliers are retained. Neither run clears OS caches or establishes a controlled
+cold-start baseline. Worker completion includes OS scheduling, polling, solving and body descriptor
+preparation. Its roughly 44 ms p99 is off-thread latency, not tick time; fair automatic scheduling
+and end-to-end gameplay latency remain unmeasured. Commit timings do not include packet broadcast,
+client rendering or the full 4,096-node bound. The warm-repeat child process peaked at 23,288 KiB
+RSS (22.74 MiB), measured with Python `resource.getrusage(RUSAGE_CHILDREN)` after successful exit.
+This covers the benchmark authority, worker and two replicas together, not isolated worker RSS.
+Allocation counts, sustained combat and 32-player bandwidth/correction behaviour remain unmeasured.
+
+The separate elastic benchmark passed all four fixtures; 64×32 wall and two-support wall solve
+p99 values were 43.636 and 54.701 ms. Existing immutable-job wall completion p99 values were
+15.699 and 24.363 ms; submit remained at or below 0.002 ms p99. This increment does not claim a
+numerical solver speedup.
+
+The required five-second real Vulkan smoke passed at the default 1,440×900 logical window on
+NVIDIA 610.57.04, with 98,394 voxels, 128 chunks and 48,736 faces, no active bodies or players.
+Initial streaming took 59.9 ms. CPU frame-wall p50/p95/p99 was 16.662 / 16.905 / 33.444 ms
+(342 samples; maximum 35.310 ms), including acquisition/presentation waits. GPU shadows were
+0.096 / 0.097 / 0.097 ms, world/HUD 1.005 / 1.010 / 1.059 ms and total
+1.114 / 1.123 / 1.141 ms (340 samples; maximum total 1.163 ms; zero dropped GPU samples).
+This checks startup and compatibility, not the new opt-in fracture path, sustained destruction,
+CPU active-time or photorealistic quality.

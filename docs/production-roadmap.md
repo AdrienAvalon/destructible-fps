@@ -114,8 +114,11 @@ streaming, with no synchronous world meshing on the presentation thread.
   benchmarks (foundation delivered); bounded complete free-component extraction with actual
   clamped-solid boundaries, copy-on-write chunk snapshots, authority/configuration/occupied-and-air
   observation validation, explicit cancellation and one-slot server worker scheduling (callable
-  adapter delivered; automatic fair dirty-domain scheduling, large-map decomposition, calibrated
-  strengths and atomic gameplay failure remain);
+  adapter delivered); explicit brittle section strengths, root-moment-aware endpoint demand,
+  mass-preserving one-cell severance and component preparation on the worker, and revalidated
+  atomic static-to-body protocol transactions (opt-in coarse adapter delivered; automatic fair
+  dirty-domain scheduling, large-map decomposition, calibrated strengths, crushing geometry,
+  nonlinear/contact load response and playable integration remain);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
 - incremental stress propagation restricted to affected graph islands;

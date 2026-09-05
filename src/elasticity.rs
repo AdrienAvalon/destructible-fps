@@ -1,7 +1,7 @@
 //! Bounded small-deflection 3D beam equilibrium for immutable server structural jobs.
 //!
 //! Six DOFs per node: translations in metres and rotations in radians. This module never mutates
-//! voxels or replicas. Converged forces are evidence for a future validated fracture transaction,
+//! voxels or replicas. Converged forces are evidence for a revalidated server fracture transaction,
 //! not permission to change gameplay. See docs/structural-elasticity.md for model limitations.
 
 use crate::IVec3;
@@ -100,7 +100,8 @@ impl Beam {
             axis,
             length,
             axial: young * area / length,
-            torsion: shear * (2.0 * inertia) / length,
+            // Saint-Venant square torsion constant, not the polar area moment 2I.
+            torsion: shear * (0.1406 * length.powi(4) * fraction.powi(2)) / length,
             bending: young * inertia / (length.powi(3) * (1.0 + shear_parameter)),
             shear_parameter,
         }

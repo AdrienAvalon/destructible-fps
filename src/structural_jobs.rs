@@ -7,6 +7,9 @@ use crate::{
         ElasticSolution, MAX_ELASTIC_NODES,
     },
     structural::StructuralAnchors,
+    structural_failure::{
+        PreparedStructuralFailure, StructuralFailureError, StructuralStrengths, prepare_failure,
+    },
     world::ChunkObservation,
 };
 use std::{
@@ -115,6 +118,7 @@ impl From<ElasticError> for StructuralJobError {
 pub(crate) struct StructuralContext {
     identity: Arc<()>,
     materials: Option<StructuralMaterials>,
+    strengths: Option<StructuralStrengths>,
 }
 
 // A fork is a different authority even if all initial chunk payloads are shared.
@@ -123,6 +127,7 @@ impl Clone for StructuralContext {
         Self {
             identity: Arc::new(()),
             materials: self.materials,
+            strengths: self.strengths,
         }
     }
 }
@@ -134,6 +139,11 @@ impl StructuralContext {
 
     pub(crate) fn configure(&mut self, materials: StructuralMaterials) {
         self.materials = Some(materials);
+        self.invalidate();
+    }
+
+    pub(crate) fn configure_strengths(&mut self, strengths: StructuralStrengths) {
+        self.strengths = Some(strengths);
         self.invalidate();
     }
 
@@ -152,6 +162,7 @@ impl StructuralContext {
             anchors: anchors.clone(),
             seed,
             materials,
+            strengths: self.strengths,
             identity: Arc::clone(&self.identity),
         })
     }
@@ -178,6 +189,7 @@ struct StructuralRequest {
     anchors: StructuralAnchors,
     seed: IVec3,
     materials: StructuralMaterials,
+    strengths: Option<StructuralStrengths>,
     identity: Arc<()>,
 }
 
@@ -187,9 +199,15 @@ pub struct CompletedStructuralJob {
     identity: Arc<()>,
     observations: Vec<ChunkObservation>,
     result: Result<ElasticSolution, StructuralJobError>,
+    failure: Result<Option<PreparedStructuralFailure>, StructuralFailureError>,
 }
 
 impl CompletedStructuralJob {
+    pub(crate) fn into_failure(
+        self,
+    ) -> Result<Option<PreparedStructuralFailure>, StructuralFailureError> {
+        self.failure
+    }
     #[must_use]
     pub const fn observed_chunks(&self) -> usize {
         self.observations.len()
@@ -213,7 +231,7 @@ fn read_voxel(
     Ok(voxel)
 }
 
-fn neighbors(position: IVec3) -> impl Iterator<Item = IVec3> {
+pub(crate) fn neighbors(position: IVec3) -> impl Iterator<Item = IVec3> {
     (0..3).flat_map(move |axis| {
         [-1, 1].into_iter().filter_map(move |direction| {
             let mut coordinates = [position.x, position.y, position.z];
@@ -288,6 +306,17 @@ fn run_request(request: StructuralRequest, cancelled: &AtomicBool) -> CompletedS
             }
         }
     })();
+    let failure = match (&result, request.strengths) {
+        (Ok(solution), Some(strengths)) => prepare_failure(
+            &request.world,
+            &request.anchors,
+            solution,
+            strengths,
+            cancelled,
+        ),
+        (Err(error), _) => Err(StructuralFailureError::Job(*error)),
+        (Ok(_), None) => Err(StructuralFailureError::NotConfigured),
+    };
     let observations = observed
         .into_iter()
         .map(|position| request.world.observe_chunk(position))
@@ -296,6 +325,7 @@ fn run_request(request: StructuralRequest, cancelled: &AtomicBool) -> CompletedS
         identity: request.identity,
         observations,
         result,
+        failure,
     }
 }
 
@@ -397,6 +427,7 @@ impl StructuralScheduler {
             Ok(mut result) => {
                 if self.cancelled.load(Ordering::Relaxed) {
                     result.result = Err(StructuralJobError::Cancelled);
+                    result.failure = Err(StructuralJobError::Cancelled.into());
                 }
                 self.busy = false;
                 Ok(Some(result))

@@ -5,8 +5,9 @@ loads redistribute through surviving connections instead of treating every groun
 component as infinitely strong. `src/structural_jobs.rs` now extracts authoritative world domains
 and runs immutable calculations on a bounded worker. The server exposes an explicit scheduling/
 revalidation API; the normal game loop does not automatically schedule or commit structural load
-failures yet. This calculation does not fracture a voxel, animate deformation, or claim that the
-requested progressive collapse is already playable.
+failures yet. The opt-in [coarse failure adapter](structural-failure.md) can now prepare a
+mass-preserving fracture and commit it as an ordinary replicated transaction. The numerical kernel
+does not animate deformation or establish that realistic progressive collapse is already playable.
 
 ## Mechanical representation
 
@@ -21,12 +22,14 @@ Unlike the initial Euler-Bernoulli proposal, the implemented bending blocks incl
 deformation. Their closed-form two-node Timoshenko coefficients follow the
 [numgeo beam formulation](https://j-machacek.github.io/numgeo/theory/elements/beam.html), using a
 square-section shear correction of 5/6. With cell spacing `L` and minimum endpoint integrity fraction
-`f`, the effective area is `L² f`, the second moment is `L⁴ f² / 12`, and the current torsion
-constant is approximated by twice that second moment. Damage does not remove occupied mass.
+`f`, the effective area is `L² f`, the second moment is `L⁴ f² / 12`, and the Saint-Venant square
+torsion constant is `0.1406 L⁴ f²`, replacing the initial polar-area-moment approximation `2I`.
+The square-bar [AutoFEM validation example](https://autofem.com/examples/torsion_of_a_beam_with_the_squ.html)
+provides the torsion coefficient. Damage does not remove occupied mass.
 
 The force law is linear elastic and isotropic. This remains a lattice approximation, not a
 calibrated volumetric solid model: wood grain, masonry mortar, unilateral contact, steel yield,
-reinforcement, plastic hinges, buckling, dynamic loading and accurate square-section torsion are
+reinforcement, plastic hinges, buckling, restrained warping and dynamic loading are
 not represented. Benchmark elastic constants and masses are explicit test inputs, not validated
 game-material presets. Real material calibration must precede gameplay failure thresholds.
 
@@ -53,7 +56,7 @@ force/moment, including their own gravity load, in the reported support reaction
 bound, not a wall-clock deadline; model construction and `finish` also cost time and belong off the
 network/presentation paths. Batching changes scheduling, not floating-point operation order.
 These `f64` values are local analysis scratch, not new replicated state or a promise of bit-identical
-results across operating systems. A future authority converts validated outcomes into canonical
+results across operating systems. The explicit server adapter converts validated outcomes into canonical
 integer transactions; clients must never independently decide fracture from these floats.
 
 Invalid call budgets leave the job unchanged. Numerical failure, total-budget exhaustion and a
@@ -118,8 +121,8 @@ Every result also retains an authority/configuration identity. Changing anchors 
 or cloning the authority, creates a new identity. A result from another instance cannot be used
 even if voxel bytes and fingerprints match. `AuthoritativeServer::structural_result` revalidates
 all these observations and returns a borrowed solution: inspecting it keeps that authority
-immutably borrowed. This is not a mutation permit. A future fracture transaction must repeat
-validation at commit and quantize accepted changes into the existing integer protocol.
+immutably borrowed. This is not a mutation permit. `commit_structural_failure` repeats validation
+before promoting the worker's coarse fracture plan into the existing integer protocol.
 
 The scheduler has one thread and **one outstanding slot**, including a completed-but-unconsumed
 result. Repeated submissions return `Busy`; they cannot build an unbounded backlog. Explicit
@@ -163,11 +166,11 @@ Next promotion work remains explicit:
 1. Extend the explicit complete-domain worker to fair automatic dirty-domain scheduling and bounded
    decomposition/residency for real maps. Preserve shared-clamp reaction semantics and stale-state
    rejection under distant new-chunk churn, not only edits in existing chunks.
-2. Calibrate strength and direction-dependent material response; derive fracture candidates from
-   compression, tension, shear, bending and torsional demand, preserving significant fragment mass.
-3. Integrate the worker outside receive/presentation paths, then revalidate and commit integer
-   damage, structural separation and significant body assignments atomically; never treat unresolved
-   jobs as stable support or automatic collapse.
+2. Calibrate strength and direction-dependent material response beyond the new explicit isotropic
+   brittle section envelope; add crushing geometry and contact feedback while preserving mass.
+3. Integrate automatic worker scheduling outside receive/presentation paths and broadcast/retain
+   the new atomic coarse fracture transactions; never treat unresolved jobs as stable support or
+   automatic collapse. Load continuation/nonlinear handling must cover over-range configurations.
 4. Exercise weak wood, explosive wall breach and overloaded remaining supports in the same two-client
    playable sequence, including repair/late join and repeated failure/rebuild. Validate multi-OS,
    sustained latency and memory before claiming realistic synchronized collapse.

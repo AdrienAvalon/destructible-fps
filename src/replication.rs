@@ -14,6 +14,8 @@ use crate::world::{IVec3, VoxelChange, World, WorldError};
 use core::fmt;
 use std::collections::{BTreeMap, HashMap};
 
+mod structural_failure;
+
 const MAGIC: [u8; 4] = *b"DFPS";
 const PROTOCOL_VERSION: u8 = 6;
 const DELTA_KIND: u8 = 1;
@@ -362,7 +364,7 @@ impl AuthoritativeServer {
     ///
     /// # Errors
     /// Rejects stale or foreign results and propagates explicit domain/solver failure. This method
-    /// does not commit damage; a future fracture commit must repeat these checks atomically.
+    /// does not commit damage; `commit_structural_failure` repeats these checks atomically.
     pub fn structural_result<'a>(
         &'a self,
         completed: &'a crate::structural_jobs::CompletedStructuralJob,

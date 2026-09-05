@@ -20,7 +20,7 @@ non-loopback variant. Configuration fields or operator assertions alone do not c
 | Loss and reordering | Distinct delay, duplication, and loss traces with bounded repair | Four-client real-process trace replay | Pass for deterministic loopback; add WAN profiles |
 | Trust outage | Discovery, static trust, or renewal reaches its monotonic deadline | Real-process TLS outage and static OIDC expiry tests pass; discovery retains failed-refresh controller tests | Pass for local mechanisms; repeat live discovery outage against the disposable realm |
 | Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix non-root service identity plus file/parent owner, mode, type, and no-follow tests | Partial: Windows service DACL validation missing |
-| Deployment policy | Exact interface/address/port, certificate name, issuer, source ranges, budgets, owner, and expiry | Bounded `LanDeploymentPolicy`, read-only exact host-assignment attestation, negative matrix, and `lan-policy-check` | Partial: instantiate and review; port/firewall/certificate/OIDC/ACL proofs remain |
+| Deployment policy | Exact interface/address/port, certificate name, issuer, source ranges, budgets, owner, and expiry | Bounded `LanDeploymentPolicy`, read-only exact host-assignment attestation, offline exact-SAN/ordered-chain/single-reviewed-CA attestation, negative matrix, and `lan-policy-check` | Partial: instantiate and review; installed key, port/firewall/OIDC/ACL proofs remain |
 
 Every executable row is part of the normal test suite; no network namespace, firewall exception, or
 remote bind is needed to rehearse it. A failure in any row blocks promotion.
@@ -36,10 +36,10 @@ remote bind is needed to rehearse it. A failure in any row blocks promotion.
 4. Hostile external clients exercise handshake saturation, malformed datagrams, replay, burst rate,
    queue pressure, packet loss, duplication, reordering, and reconnect storms without exceeding the
    fixed simulation budget or leaking credentials.
-5. Instantiate and review the bounded deployment-policy contract for the target host, then prove its
-   exact interface/address relation, UDP port, certificate name, identity issuer, firewall source
-   ranges, observability budget, rollback owner, and expiry against live state. Wildcard binds remain
-   forbidden for the first private-network demo.
+5. Instantiate and review the bounded deployment-policy contract for the target host, repeat its
+   host and certificate attestations against installed material, then prove the private key matches,
+   exact UDP port, identity issuer, firewall source ranges, observability budget, rollback owner, and
+   expiry against live state. Wildcard binds remain forbidden for the first private-network demo.
 
 The in-process hostile client rehearsal now establishes 32 concurrent trusted TLS connections while
 withholding every application hello. The 33rd connection is refused within a fixed deadline, the
@@ -87,10 +87,15 @@ The checker performs no socket operation and never mutates a network interface, 
 certificate store, identity provider, or service manager. Offline mode does not inspect them. With
 `--verify-host`, it enumerates at most 256 interface-address records and requires exactly the named
 operational interface, address, non-zero index and fully private prefix. It rejects the same address
-under any other interface name and never echoes topology or identity values.
+under any other interface name and never echoes topology or identity values. Paired
+`--certificate-chain` and `--trust-anchor` options read only public, integrity-protected files. They
+require one literal policy SAN, explicit server-auth usage, one ordered eight-entry-maximum chain,
+one reviewed self-issued CA, and cryptographic validity now and through policy expiry plus the
+60-second safety margin. No private key, DNS request, socket or revocation service is involved.
 
 An offline `POLICY_OK` means only that a proposal is bounded and unambiguous; a host-verified result
-adds only a point-in-time interface assignment. Neither result makes the proposal approved, proves
-the remaining target state, or unlocks the loopback-only server. A future launcher must repeat the
-host proof immediately before bind and fail closed if subsequent interface-change monitoring reports
-drift.
+adds only a point-in-time interface assignment, while a certificate-verified result adds only a
+point-in-time public chain proof. None makes the proposal approved, proves installed private-key
+correspondence or the remaining target state, or unlocks the loopback-only server. A future launcher
+must repeat both proofs immediately before bind and fail closed if subsequent interface, certificate
+or policy monitoring reports drift.

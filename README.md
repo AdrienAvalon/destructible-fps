@@ -257,12 +257,19 @@ placeholder, set a fresh expiry, then lint the proposed document with:
 ```bash
 cargo run --release --bin lan-policy-check -- /absolute/path/to/lan-policy.json
 cargo run --release --bin lan-policy-check -- --verify-host /absolute/path/to/lan-policy.json
+cargo run --release --bin lan-policy-check -- \
+  --certificate-chain /absolute/path/to/server-chain.pem \
+  --trust-anchor /absolute/path/to/reviewed-root.pem \
+  /absolute/path/to/lan-policy.json
 ```
 
 The optional host check enumerates interfaces without opening a socket and requires one unique,
-operational interface/address/index/prefix match. Certificate SAN, firewall state, issuer and
-platform ACLs must still be checked independently before this contract can participate in a
-private-network launch.
+operational interface/address/index/prefix match. The optional certificate proof accepts one exact,
+ordered chain and one explicitly reviewed self-issued CA, requires a single literal DNS SAN and
+server-auth usage, verifies the signatures at the current time and at policy expiry plus the
+reserved 60-second margin, and never reads a private key. The two checks can be combined in one
+invocation. Firewall state, issuer, certificate issuance/revocation policy and platform ACLs must
+still be checked independently before this contract can participate in a private-network launch.
 
 For local protocol development the legacy authority can be started directly:
 

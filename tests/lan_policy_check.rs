@@ -1,6 +1,9 @@
 use destructible_fps::{
-    MAX_LAN_POLICY_BYTES, MAX_PENDING_QUIC_HANDSHAKES, MAX_SECURE_GAMEPLAY_EVENTS,
-    MAX_SERVER_PEERS, MAX_SESSION_DATAGRAMS_PER_SECOND,
+    MAX_LAN_CERTIFICATE_CHAIN_BYTES, MAX_LAN_POLICY_BYTES, MAX_PENDING_QUIC_HANDSHAKES,
+    MAX_SECURE_GAMEPLAY_EVENTS, MAX_SERVER_PEERS, MAX_SESSION_DATAGRAMS_PER_SECOND,
+};
+use rcgen::{
+    BasicConstraints, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
 };
 use std::{
     fs,
@@ -26,6 +29,7 @@ fn checker_accepts_one_bounded_policy_without_echoing_topology() {
     assert!(!stdout.contains("192.168"));
     assert!(!stdout.contains("identity"));
     assert!(!stdout.contains("team:avalon"));
+    assert!(stdout.contains("certificate_verified=false"));
     assert!(output.stderr.is_empty());
 }
 
@@ -74,6 +78,98 @@ fn checker_attests_a_real_private_host_assignment_when_available() {
     assert!(!stdout.contains(&interface.ip().to_string()));
     assert!(output.stderr.is_empty());
     eprintln!("live private host attestation exercised");
+}
+
+#[test]
+fn checker_attests_an_exact_certificate_without_echoing_identity_or_paths() {
+    let fixture = Fixture::new();
+    let (certificate_chain, trust_anchor) = fixture.write_certificate_material();
+    let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
+        .arg("--certificate-chain")
+        .arg(&certificate_chain)
+        .arg("--trust-anchor")
+        .arg(&trust_anchor)
+        .arg(&fixture.policy)
+        .output()
+        .expect("run LAN certificate attestation");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 attestation output");
+    assert!(stdout.contains("certificate_verified=true"));
+    assert!(!stdout.contains("game.home.arpa"));
+    assert!(!stdout.contains(&certificate_chain.display().to_string()));
+    assert!(!stdout.contains(&trust_anchor.display().to_string()));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn checker_requires_paired_absolute_certificate_paths() {
+    let fixture = Fixture::new();
+    let (certificate_chain, trust_anchor) = fixture.write_certificate_material();
+    for arguments in [
+        vec![
+            "--certificate-chain".into(),
+            certificate_chain.as_os_str().to_owned(),
+            fixture.policy.as_os_str().to_owned(),
+        ],
+        vec![
+            "--trust-anchor".into(),
+            trust_anchor.as_os_str().to_owned(),
+            fixture.policy.as_os_str().to_owned(),
+        ],
+        vec![
+            "--certificate-chain".into(),
+            "relative.pem".into(),
+            "--trust-anchor".into(),
+            trust_anchor.as_os_str().to_owned(),
+            fixture.policy.as_os_str().to_owned(),
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
+            .args(arguments)
+            .output()
+            .expect("run invalid LAN certificate arguments");
+        assert!(!output.status.success());
+    }
+}
+
+#[test]
+fn checker_bounds_certificate_files_before_pem_parsing() {
+    let fixture = Fixture::new();
+    let (certificate_chain, trust_anchor) = fixture.write_certificate_material();
+    fs::write(
+        &certificate_chain,
+        vec![b'A'; MAX_LAN_CERTIFICATE_CHAIN_BYTES + 1],
+    )
+    .expect("oversized certificate chain");
+    let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
+        .arg("--certificate-chain")
+        .arg(certificate_chain)
+        .arg("--trust-anchor")
+        .arg(trust_anchor)
+        .arg(&fixture.policy)
+        .output()
+        .expect("run oversized certificate attestation");
+    assert!(!output.status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn checker_rejects_a_symlinked_certificate_file() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let (certificate_chain, trust_anchor) = fixture.write_certificate_material();
+    let certificate_link = fixture.directory.join("server-link.pem");
+    symlink(&certificate_chain, &certificate_link).expect("certificate symlink");
+    let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
+        .arg("--certificate-chain")
+        .arg(certificate_link)
+        .arg("--trust-anchor")
+        .arg(trust_anchor)
+        .arg(&fixture.policy)
+        .output()
+        .expect("run symlinked certificate attestation");
+    assert!(!output.status.success());
 }
 
 struct Fixture {
@@ -131,6 +227,37 @@ impl Fixture {
         )
         .expect("LAN policy fixture");
         Self { directory, policy }
+    }
+
+    fn write_certificate_material(&self) -> (PathBuf, PathBuf) {
+        let mut root_parameters =
+            rcgen::CertificateParams::new(Vec::<String>::new()).expect("root parameters");
+        root_parameters.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        root_parameters.not_after = rcgen::date_time_ymd(4090, 1, 1);
+        root_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root_parameters.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let root = CertifiedIssuer::self_signed(
+            root_parameters,
+            KeyPair::generate().expect("root signing key"),
+        )
+        .expect("self-signed root");
+
+        let leaf_key = KeyPair::generate().expect("leaf signing key");
+        let mut leaf_parameters = rcgen::CertificateParams::new(vec!["game.home.arpa".to_owned()])
+            .expect("leaf parameters");
+        leaf_parameters.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        leaf_parameters.not_after = rcgen::date_time_ymd(4090, 1, 1);
+        leaf_parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let leaf = leaf_parameters
+            .signed_by(&leaf_key, &root)
+            .expect("signed server certificate");
+
+        let certificate_chain = self.directory.join("server-chain.pem");
+        let trust_anchor = self.directory.join("reviewed-root.pem");
+        fs::write(&certificate_chain, leaf.pem()).expect("server certificate chain");
+        fs::write(&trust_anchor, root.pem()).expect("reviewed trust anchor");
+        (certificate_chain, trust_anchor)
     }
 }
 

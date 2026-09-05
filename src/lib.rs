@@ -3,6 +3,7 @@
 //! The simulation and wire protocol stay independent from rendering. The playable
 //! milestone adds a safe Vulkan presentation layer without moving authority into it.
 
+pub mod certificate_attestation;
 pub mod character;
 pub mod deployment_policy;
 pub mod destruction;
@@ -32,6 +33,12 @@ pub mod telemetry;
 pub mod transport;
 pub mod world;
 
+pub use certificate_attestation::{
+    LAN_CERTIFICATE_SAFETY_MARGIN_SECONDS, LanCertificateAttestation,
+    LanCertificateAttestationError, MAX_LAN_CERTIFICATE_CHAIN_BYTES,
+    MAX_LAN_CERTIFICATE_CHAIN_ENTRIES, MAX_LAN_TRUST_ANCHOR_BYTES, MAX_LAN_TRUST_ANCHORS,
+    attest_lan_server_certificate,
+};
 pub use character::{
     AuthoritativePlayer, AuthoritativePlayerState, MAX_PLAYER_INPUT_HOLD_TICKS,
     MAX_PLAYER_INPUT_PER_MILLE, PLAYER_EYE_HEIGHT_UM, PLAYER_HEIGHT_UM, PLAYER_RADIUS_UM,

@@ -18,12 +18,46 @@ address.
 ```bash
 cargo run --release --bin lan-policy-check -- /absolute/path/to/lan-policy.json
 cargo run --release --bin lan-policy-check -- --verify-host /absolute/path/to/lan-policy.json
+cargo run --release --bin lan-policy-check -- \
+  --certificate-chain /absolute/path/to/server-chain.pem \
+  --trust-anchor /absolute/path/to/reviewed-root.pem \
+  /absolute/path/to/lan-policy.json
+cargo run --release --bin lan-policy-check -- \
+  --verify-host \
+  --certificate-chain /absolute/path/to/server-chain.pem \
+  --trust-anchor /absolute/path/to/reviewed-root.pem \
+  /absolute/path/to/lan-policy.json
 ```
 
 The first command validates only the document. The second additionally takes one read-only host
-interface snapshot and proves the exact assignment. The checker prints only the schema version,
-source-range count, remaining lifetime, and whether host verification ran. It does not echo topology,
-identities, or owner fields.
+interface snapshot and proves the exact assignment. The certificate options are inseparable and
+accept only absolute paths to one ordered leaf/intermediate chain and one explicitly reviewed
+self-issued CA. They can be combined with host verification. The checker prints only the schema
+version, source-range count, remaining lifetime, and proof booleans. It does not echo topology,
+certificate names, paths, fingerprints, identities, or owner fields.
+
+## Offline certificate evidence
+
+Certificate inputs are public but integrity-sensitive. Each file is capped at 256 KiB; the presented
+chain is capped at eight entries and the reviewed trust file must contain exactly one CA. Canonical
+PEM permits certificate sections and blank separator lines only. Duplicate entries, an embedded
+anchor, unrelated or out-of-order intermediates, non-CA issuers, and malformed X.509 fail closed.
+On Unix the checker refuses a final-component symlink, opens with `O_NOFOLLOW`, and requires both the
+file and its immediate parent to be owned by root or the current user and not group/world writable.
+Windows DACL and reparse-point evidence remains a separate promotion gate.
+
+The leaf must contain exactly one SAN entry: the policy's literal lowercase DNS name. Wildcards,
+aliases, IP SANs, CN fallback, CA leaves and certificates without explicit server-auth usage are
+rejected. Rustls/webpki validates the chain and DNS identity against only the supplied anchor at the
+current instant and again at policy expiry plus 60 seconds. Independent X.509 checks require the
+leaf, every intermediate and the trust anchor to cover both instants, including the final margin.
+The returned proof binds the material with length-prefixed SHA-256 fingerprints, but the CLI does
+not print them.
+
+This is a point-in-time offline chain proof. It does not read or validate a private key, contact a
+CA, fetch OCSP/CRL data, resolve DNS, or inspect the certificate installed in a running service.
+Automated issuance, atomic installation and renewal/revocation policy remain required before LAN
+promotion.
 
 ## Fail-closed schema
 
@@ -50,7 +84,7 @@ textual assertions:
 
 - the named interface exists and owns exactly the declared address;
 - the socket is bound only to that address and port, never a wildcard or dual-stack alias;
-- the installed certificate covers the exact DNS name and chains to the reviewed CA;
+- the installed certificate repeats the offline exact-name/chain proof against the reviewed CA;
 - discovery returns the exact issuer and reviewed trust root;
 - the active host firewall permits only the declared source ranges;
 - service ACLs and secret-file ownership pass on the target operating system;

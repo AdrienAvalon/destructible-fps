@@ -175,8 +175,10 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   port, certificate and issuer identity, canonical source ranges, compile-time runtime-limit parity,
   bounded observability, rollback ownership, and a maximum 24-hour lifetime (delivered without a
   remote bind capability), plus bounded read-only POSIX/Windows host enumeration proving the exact
-  operational interface/address/index/private-prefix assignment (delivered; live policy review and
-  the other environment proofs remain);
+  operational interface/address/index/private-prefix assignment, and an offline exact-SAN,
+  ordered-chain, single-reviewed-CA proof covering the full policy lifetime plus the TLS safety
+  margin (delivered; live policy review, installed-key correspondence and the other environment
+  proofs remain);
   bounded certificate/key hot reload changes future handshakes without disrupting current sessions
   (delivered for loopback; automated issuance, platform ACLs, production issuer/root provisioning,
   and remote policy remain);

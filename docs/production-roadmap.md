@@ -113,7 +113,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
 - client input prediction, server reconciliation, interpolation, and bounded lag compensation;
-- deterministic loss/jitter/reorder/duplication simulator and multi-process test harness;
+- configurable stochastic and trace-replay impairment plus a 32-client process harness;
+- fixed-profile bounded loss/jitter/reorder/duplication proxy with delta/snapshot repair, ACK retry,
+  and per-channel byte accounting (delivered for one real client and one server process);
 - rate limits, command validation, allocation limits, and fuzzed packet decoding.
 
 Exit gate: at least 32 headless clients sustain the traffic and tick budgets under the agreed network
@@ -195,12 +197,12 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add a deterministic latency/loss/jitter/reorder/duplication harness with acknowledgement
-   retry/timeout cases and explicit per-channel bandwidth evidence;
-2. design authenticated encrypted session negotiation and packet replay protection before any
+1. design authenticated encrypted session negotiation and packet replay protection before any
    non-loopback exposure;
-3. add horizontal velocity, material friction/restitution, and deterministic impulse response,
+2. add horizontal velocity, material friction/restitution, and deterministic impulse response,
    followed by angular state and replicated orientation.
+3. extend the fixed impairment profile into configurable trace replay and congestion tests for at
+   least four clients, with RTT estimation, adaptive retransmission, and bandwidth fairness.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

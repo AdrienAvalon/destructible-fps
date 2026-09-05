@@ -63,6 +63,15 @@ These sessions are deliberately loopback-only and unauthenticated; the snapshot 
 check, not a MAC, and the transport provides no confidentiality, identity, packet authenticity, or
 congestion control. It must not be exposed beyond the developer machine.
 
+A test-only source-bound UDP proxy now injects a fixed 2–6-pump-tick delay pattern, deliberate
+whole-transaction and snapshot-fragment loss, duplication, and reordering between real client and
+server sockets. Its queue is capped at 2,048 datagrams and 2 MiB, rejects datagrams above the
+application MTU before allocation, and accounts delivered bytes by control, delta, snapshot, and
+unknown channel. One process test repairs a completely lost first delta while later packets are
+buffered; another repairs the lost snapshot fragments and survives a lost first install ACK through
+bounded client retry. This is deterministic fault injection for correctness and byte accounting,
+not an Internet congestion algorithm or a substitute for authenticated transport.
+
 ## Planned engine layers
 
 ### First playable slice — delivered
@@ -134,9 +143,12 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
 - canonical bounded snapshots, corruption rejection, paced transfer, selective bitmap repair after
   a deliberately lost fragment, acknowledged atomic install, and retained-delta catch-up during
   active body motion (delivered for loopback);
+- bounded deterministic latency/jitter/loss/duplication/reordering injection across real sockets,
+  including delta recovery, selective snapshot recovery, ACK retry, and per-channel byte evidence
+  (delivered for loopback tests);
 - encrypted client authentication and session negotiation;
 - unreliable sequenced deltas plus reliable snapshot/control channels;
-- loss, duplication, reordering, latency, and bandwidth simulation;
+- configurable stochastic and trace-replay network simulation beyond the delivered fixed profile;
 - spatial interest management and per-client bandwidth budgets;
 - join-in-progress and persisted-world recovery.
 

@@ -31,6 +31,428 @@ struct Endpoint {
     dropped_frames: usize,
 }
 
+const MAX_PROXY_PENDING_DATAGRAMS: usize = 2_048;
+const MAX_PROXY_PENDING_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_PROXY_RECEIVES_PER_PUMP: usize = 128;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyDirection {
+    ClientToServer,
+    ServerToClient,
+}
+
+impl ProxyDirection {
+    const fn index(self) -> usize {
+        match self {
+            Self::ClientToServer => 0,
+            Self::ServerToClient => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DatagramChannel {
+    Control,
+    Delta,
+    Snapshot,
+    Unknown,
+}
+
+impl DatagramChannel {
+    const fn index(self) -> usize {
+        match self {
+            Self::Control => 0,
+            Self::Delta => 1,
+            Self::Snapshot => 2,
+            Self::Unknown => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ChannelStats {
+    received: usize,
+    delivered: usize,
+    dropped: usize,
+    duplicated: usize,
+    delivered_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ImpairmentStats {
+    channels: [ChannelStats; 4],
+    reordered_deliveries: usize,
+    peak_pending_datagrams: usize,
+    peak_pending_bytes: usize,
+    queue_drops: usize,
+    max_delay_ticks: u64,
+}
+
+struct ScheduledDatagram {
+    direction: ProxyDirection,
+    channel: DatagramChannel,
+    deliver_at: u64,
+    ordinal: u64,
+    bytes: Vec<u8>,
+}
+
+struct DeterministicUdpProxy {
+    client_socket: UdpSocket,
+    server_socket: UdpSocket,
+    server_address: SocketAddr,
+    client_address: Option<SocketAddr>,
+    pending: Vec<ScheduledDatagram>,
+    pending_bytes: usize,
+    next_ordinal: u64,
+    tick: u64,
+    highest_delivered_ordinal: [u64; 2],
+    dropped_delta_one_once: [bool; 1_024],
+    duplicated_delta_two_once: [bool; 1_024],
+    dropped_snapshot_once: [bool; 4_096],
+    duplicated_snapshot_once: [bool; 4_096],
+    dropped_first_ack: bool,
+    stats: ImpairmentStats,
+}
+
+impl DeterministicUdpProxy {
+    fn bind(server_address: SocketAddr) -> io::Result<Self> {
+        let client_socket = UdpSocket::bind("127.0.0.1:0")?;
+        let server_socket = UdpSocket::bind("127.0.0.1:0")?;
+        client_socket.set_nonblocking(true)?;
+        server_socket.set_nonblocking(true)?;
+        Ok(Self {
+            client_socket,
+            server_socket,
+            server_address,
+            client_address: None,
+            pending: Vec::with_capacity(MAX_PROXY_PENDING_DATAGRAMS),
+            pending_bytes: 0,
+            next_ordinal: 1,
+            tick: 0,
+            highest_delivered_ordinal: [0; 2],
+            dropped_delta_one_once: [false; 1_024],
+            duplicated_delta_two_once: [false; 1_024],
+            dropped_snapshot_once: [false; 4_096],
+            duplicated_snapshot_once: [false; 4_096],
+            dropped_first_ack: false,
+            stats: ImpairmentStats::default(),
+        })
+    }
+
+    fn client_address(&self) -> io::Result<SocketAddr> {
+        self.client_socket.local_addr()
+    }
+
+    const fn stats(&self) -> ImpairmentStats {
+        self.stats
+    }
+
+    const fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    fn pump(&mut self) -> io::Result<()> {
+        self.tick = self.tick.saturating_add(1);
+        self.receive_direction(ProxyDirection::ClientToServer)?;
+        self.receive_direction(ProxyDirection::ServerToClient)?;
+        self.deliver_due()
+    }
+
+    fn receive_direction(&mut self, direction: ProxyDirection) -> io::Result<()> {
+        let mut buffer = [0_u8; 1_201];
+        for _ in 0..MAX_PROXY_RECEIVES_PER_PUMP {
+            let received = match direction {
+                ProxyDirection::ClientToServer => self.client_socket.recv_from(&mut buffer),
+                ProxyDirection::ServerToClient => self.server_socket.recv_from(&mut buffer),
+            };
+            let (length, source) = match received {
+                Ok(received) => received,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error),
+            };
+            if length > 1_200 || !self.accept_source(direction, source) {
+                self.stats.queue_drops = self.stats.queue_drops.saturating_add(1);
+                continue;
+            }
+            self.schedule(direction, &buffer[..length]);
+        }
+        Ok(())
+    }
+
+    fn accept_source(&mut self, direction: ProxyDirection, source: SocketAddr) -> bool {
+        match direction {
+            ProxyDirection::ClientToServer => {
+                if let Some(expected) = self.client_address {
+                    source == expected
+                } else {
+                    self.client_address = Some(source);
+                    true
+                }
+            }
+            ProxyDirection::ServerToClient => source == self.server_address,
+        }
+    }
+
+    fn schedule(&mut self, direction: ProxyDirection, bytes: &[u8]) {
+        let channel = classify_datagram(bytes);
+        let channel_stats = &mut self.stats.channels[channel.index()];
+        channel_stats.received = channel_stats.received.saturating_add(1);
+        if self.should_drop(direction, channel, bytes) {
+            self.stats.channels[channel.index()].dropped = self.stats.channels[channel.index()]
+                .dropped
+                .saturating_add(1);
+            return;
+        }
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self.next_ordinal.saturating_add(1);
+        let delay = deterministic_delay(ordinal);
+        self.stats.max_delay_ticks = self.stats.max_delay_ticks.max(delay);
+        self.admit(ScheduledDatagram {
+            direction,
+            channel,
+            deliver_at: self.tick.saturating_add(delay),
+            ordinal,
+            bytes: bytes.to_vec(),
+        });
+        if self.should_duplicate(direction, channel, bytes) {
+            self.stats.channels[channel.index()].duplicated = self.stats.channels[channel.index()]
+                .duplicated
+                .saturating_add(1);
+            self.admit(ScheduledDatagram {
+                direction,
+                channel,
+                deliver_at: self.tick.saturating_add(delay).saturating_add(1),
+                ordinal,
+                bytes: bytes.to_vec(),
+            });
+        }
+    }
+
+    fn should_drop(
+        &mut self,
+        direction: ProxyDirection,
+        channel: DatagramChannel,
+        bytes: &[u8],
+    ) -> bool {
+        if direction == ProxyDirection::ClientToServer
+            && channel == DatagramChannel::Control
+            && bytes.get(5) == Some(&7)
+            && !self.dropped_first_ack
+        {
+            self.dropped_first_ack = true;
+            return true;
+        }
+        if direction != ProxyDirection::ServerToClient || channel != DatagramChannel::Snapshot {
+            return self.should_drop_delta(direction, channel, bytes);
+        }
+        let Some(index) = snapshot_fragment_index(bytes) else {
+            return false;
+        };
+        if index % 53 == 0 && !self.dropped_snapshot_once[index] {
+            self.dropped_snapshot_once[index] = true;
+            return true;
+        }
+        false
+    }
+
+    fn should_drop_delta(
+        &mut self,
+        direction: ProxyDirection,
+        channel: DatagramChannel,
+        bytes: &[u8],
+    ) -> bool {
+        if direction != ProxyDirection::ServerToClient || channel != DatagramChannel::Delta {
+            return false;
+        }
+        let Some((sequence, index)) = delta_identity(bytes) else {
+            return false;
+        };
+        if sequence == 1 && !self.dropped_delta_one_once[index] {
+            self.dropped_delta_one_once[index] = true;
+            return true;
+        }
+        false
+    }
+
+    fn should_duplicate(
+        &mut self,
+        direction: ProxyDirection,
+        channel: DatagramChannel,
+        bytes: &[u8],
+    ) -> bool {
+        if direction != ProxyDirection::ServerToClient || channel != DatagramChannel::Snapshot {
+            return self.should_duplicate_delta(direction, channel, bytes);
+        }
+        let Some(index) = snapshot_fragment_index(bytes) else {
+            return false;
+        };
+        if index % 47 == 3 && !self.duplicated_snapshot_once[index] {
+            self.duplicated_snapshot_once[index] = true;
+            return true;
+        }
+        false
+    }
+
+    fn should_duplicate_delta(
+        &mut self,
+        direction: ProxyDirection,
+        channel: DatagramChannel,
+        bytes: &[u8],
+    ) -> bool {
+        if direction != ProxyDirection::ServerToClient || channel != DatagramChannel::Delta {
+            return false;
+        }
+        let Some((sequence, index)) = delta_identity(bytes) else {
+            return false;
+        };
+        if sequence == 2 && !self.duplicated_delta_two_once[index] {
+            self.duplicated_delta_two_once[index] = true;
+            return true;
+        }
+        false
+    }
+
+    fn admit(&mut self, datagram: ScheduledDatagram) {
+        let bytes = datagram.bytes.len();
+        if self.pending.len() >= MAX_PROXY_PENDING_DATAGRAMS
+            || self.pending_bytes.saturating_add(bytes) > MAX_PROXY_PENDING_BYTES
+        {
+            self.stats.queue_drops = self.stats.queue_drops.saturating_add(1);
+            return;
+        }
+        self.pending_bytes = self.pending_bytes.saturating_add(bytes);
+        self.pending.push(datagram);
+        self.stats.peak_pending_datagrams =
+            self.stats.peak_pending_datagrams.max(self.pending.len());
+        self.stats.peak_pending_bytes = self.stats.peak_pending_bytes.max(self.pending_bytes);
+    }
+
+    fn deliver_due(&mut self) -> io::Result<()> {
+        let mut index = 0;
+        while index < self.pending.len() {
+            if self.pending[index].deliver_at > self.tick {
+                index += 1;
+                continue;
+            }
+            let datagram = self.pending.swap_remove(index);
+            self.pending_bytes = self.pending_bytes.saturating_sub(datagram.bytes.len());
+            let destination = match datagram.direction {
+                ProxyDirection::ClientToServer => self.server_address,
+                ProxyDirection::ServerToClient => self.client_address.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotConnected, "proxy client is unknown")
+                })?,
+            };
+            let socket = match datagram.direction {
+                ProxyDirection::ClientToServer => &self.server_socket,
+                ProxyDirection::ServerToClient => &self.client_socket,
+            };
+            let sent = socket.send_to(&datagram.bytes, destination)?;
+            if sent != datagram.bytes.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "proxy sent a partial UDP datagram",
+                ));
+            }
+            let direction = datagram.direction.index();
+            if datagram.ordinal < self.highest_delivered_ordinal[direction] {
+                self.stats.reordered_deliveries = self.stats.reordered_deliveries.saturating_add(1);
+            }
+            self.highest_delivered_ordinal[direction] =
+                self.highest_delivered_ordinal[direction].max(datagram.ordinal);
+            let channel_stats = &mut self.stats.channels[datagram.channel.index()];
+            channel_stats.delivered = channel_stats.delivered.saturating_add(1);
+            channel_stats.delivered_bytes = channel_stats
+                .delivered_bytes
+                .saturating_add(datagram.bytes.len());
+        }
+        Ok(())
+    }
+}
+
+const fn deterministic_delay(ordinal: u64) -> u64 {
+    2 + match ordinal % 6 {
+        0 | 4 => 0,
+        1 => 4,
+        2 => 1,
+        3 => 3,
+        _ => 2,
+    }
+}
+
+const fn impaired_commands() -> [ExplosionCommand; 2] {
+    [
+        ExplosionCommand {
+            command_id: 1,
+            center: IVec3::new(-20, 6, 0),
+            radius_voxels: 8,
+            peak_energy: 30_000,
+        },
+        ExplosionCommand {
+            command_id: 2,
+            center: IVec3::new(20, 6, 0),
+            radius_voxels: 4,
+            peak_energy: 10_000,
+        },
+    ]
+}
+
+fn classify_datagram(bytes: &[u8]) -> DatagramChannel {
+    if bytes.starts_with(b"DFCT") {
+        DatagramChannel::Control
+    } else if bytes.starts_with(b"DFPS") {
+        DatagramChannel::Delta
+    } else if bytes.starts_with(b"DFSN") {
+        DatagramChannel::Snapshot
+    } else {
+        DatagramChannel::Unknown
+    }
+}
+
+fn snapshot_fragment_index(bytes: &[u8]) -> Option<usize> {
+    let encoded = bytes.get(14..16)?;
+    let index = usize::from(u16::from_le_bytes(encoded.try_into().ok()?));
+    (index < 4_096).then_some(index)
+}
+
+fn delta_identity(bytes: &[u8]) -> Option<(u64, usize)> {
+    let sequence = u64::from_le_bytes(bytes.get(6..14)?.try_into().ok()?);
+    let fragment_index = usize::from(u16::from_le_bytes(bytes.get(86..88)?.try_into().ok()?));
+    if fragment_index >= 1_024 {
+        return None;
+    }
+    Some((sequence, fragment_index))
+}
+
+#[test]
+fn impairment_metadata_parsers_reject_out_of_range_frames() {
+    let mut snapshot = vec![0_u8; 16];
+    snapshot[14..16].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert_eq!(snapshot_fragment_index(&snapshot), None);
+    let mut delta = vec![0_u8; 88];
+    delta[86..88].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert_eq!(delta_identity(&delta), None);
+    assert_eq!(delta_identity(&[]), None);
+}
+
+#[test]
+fn impairment_queue_fails_closed_at_its_byte_and_count_limits() {
+    let server_address = SocketAddr::from(([127, 0, 0, 1], 9));
+    let mut proxy = DeterministicUdpProxy::bind(server_address).expect("bounded proxy");
+    for ordinal in 0..=MAX_PROXY_PENDING_DATAGRAMS {
+        proxy.admit(ScheduledDatagram {
+            direction: ProxyDirection::ServerToClient,
+            channel: DatagramChannel::Unknown,
+            deliver_at: u64::MAX,
+            ordinal: u64::try_from(ordinal).expect("small proxy queue"),
+            bytes: vec![0; 1_200],
+        });
+    }
+
+    assert!(proxy.pending.len() <= MAX_PROXY_PENDING_DATAGRAMS);
+    assert!(proxy.pending_bytes <= MAX_PROXY_PENDING_BYTES);
+    assert!(proxy.stats().queue_drops > 0);
+}
+
 #[test]
 fn dedicated_process_synchronizes_two_real_udp_clients() {
     let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
@@ -426,12 +848,300 @@ fn process_snapshot_catches_up_motion_before_returning_to_live_deltas() {
     );
 }
 
+#[test]
+fn retained_delta_converges_through_deterministic_network_impairments() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
+    let server_address = reservation.local_addr().expect("reserved address");
+    drop(reservation);
+    let mut child = spawn_test_server(server_address, 300, "--exit-after-repairs");
+    let mut proxy = DeterministicUdpProxy::bind(server_address).expect("bind deterministic proxy");
+    let proxy_address = proxy.client_address().expect("proxy client address");
+    let socket = client_socket();
+    socket
+        .set_nonblocking(true)
+        .expect("nonblocking impaired client");
+    let session = handshake_through_proxy(&socket, proxy_address, &mut proxy, 0x7878, &mut child);
+    let [first, second] = impaired_commands();
+    socket
+        .send_to(&encode_explosion_request(session, first), proxy_address)
+        .expect("send first impaired command");
+    pump_proxy_for(&mut proxy, Duration::from_millis(50));
+    socket
+        .send_to(&encode_explosion_request(session, second), proxy_address)
+        .expect("send second impaired command");
+    pump_proxy_for(&mut proxy, Duration::from_millis(50));
+    let mut endpoint = Endpoint {
+        socket,
+        inbox: OrderedDeltaInbox::default(),
+        replica: ClientReplica::new(demo_world()),
+        applied: 0,
+        drop_sequence: None,
+        dropped_frames: 0,
+    };
+
+    let future_deadline = Instant::now() + Duration::from_secs(3);
+    while endpoint.inbox.buffered_complete_packets() == 0 && Instant::now() < future_deadline {
+        assert!(
+            child.0.try_wait().expect("query impaired server").is_none(),
+            "impaired server exited before delta repair"
+        );
+        proxy.pump().expect("pump impaired deltas");
+        receive_available(&mut endpoint, proxy_address);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(endpoint.inbox.expected_sequence(), 1);
+    assert!(endpoint.inbox.buffered_complete_packets() > 0);
+    endpoint
+        .socket
+        .send_to(&encode_repair_request(session, 1), proxy_address)
+        .expect("request impaired delta repair");
+
+    let exit_deadline = Instant::now() + Duration::from_secs(3);
+    let mut exit_status = None;
+    while Instant::now() < exit_deadline {
+        proxy.pump().expect("pump repaired deltas");
+        receive_available(&mut endpoint, proxy_address);
+        if let Some(status) = child.0.try_wait().expect("query repaired server") {
+            exit_status = Some(status);
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        exit_status
+            .expect("impaired delta server did not exit")
+            .success()
+    );
+    let drain_deadline = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < drain_deadline {
+        proxy.pump().expect("drain impaired deltas");
+        receive_available(&mut endpoint, proxy_address);
+        if !proxy.has_pending() && endpoint.inbox.buffered_complete_packets() == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(endpoint.applied >= 2);
+    assert!(endpoint.inbox.expected_sequence() >= 3);
+    let mut expected = AuthoritativeServer::new(demo_world());
+    expected
+        .execute_explosion(session, first)
+        .expect("first expected command");
+    expected
+        .execute_explosion(session, second)
+        .expect("second expected command");
+    assert_eq!(
+        endpoint.replica.world().fingerprint(),
+        expected.world().fingerprint()
+    );
+    let impairment = proxy.stats();
+    let delta = impairment.channels[DatagramChannel::Delta.index()];
+    assert!(delta.dropped >= 1, "delta loss was not injected");
+    assert!(delta.duplicated >= 1, "delta duplication was not injected");
+    assert!(
+        impairment.reordered_deliveries >= 1,
+        "delta reordering was not observed"
+    );
+    assert_eq!(impairment.queue_drops, 0);
+    assert!(impairment.peak_pending_bytes <= MAX_PROXY_PENDING_BYTES);
+    assert!(delta.delivered_bytes < 512 * 1_024);
+    eprintln!(
+        "deterministic delta impairment: delta={delta:?} reordered={} peak={}datagrams/{}bytes max_delay={}ticks",
+        impairment.reordered_deliveries,
+        impairment.peak_pending_datagrams,
+        impairment.peak_pending_bytes,
+        impairment.max_delay_ticks
+    );
+}
+
+#[test]
+fn process_snapshot_converges_through_deterministic_network_impairments() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
+    let server_address = reservation.local_addr().expect("reserved address");
+    drop(reservation);
+    let mut child = spawn_test_server(server_address, 600, "--exit-after-catchups");
+    let mut proxy = DeterministicUdpProxy::bind(server_address).expect("bind deterministic proxy");
+    let proxy_address = proxy.client_address().expect("proxy client address");
+    let socket = client_socket();
+    socket
+        .set_nonblocking(true)
+        .expect("nonblocking impaired client");
+    let session = handshake_through_proxy(&socket, proxy_address, &mut proxy, 0x8888, &mut child);
+    socket
+        .send_to(&encode_snapshot_request(session), proxy_address)
+        .expect("request impaired snapshot");
+
+    let mut assembler = SnapshotAssembler::default();
+    let mut replica = ClientReplica::new(World::default());
+    let mut installed_snapshot_id = None;
+    let mut next_repair = Instant::now() + Duration::from_millis(1_100);
+    let mut next_ack = Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut exit_status = None;
+    let mut buffer = [0_u8; 1_201];
+    while Instant::now() < deadline {
+        proxy.pump().expect("pump deterministic proxy");
+        loop {
+            match socket.recv_from(&mut buffer) {
+                Ok((length, source))
+                    if source == proxy_address && is_snapshot_datagram(&buffer[..length]) =>
+                {
+                    if let Some(snapshot) = assembler
+                        .push(&buffer[..length])
+                        .expect("valid impaired snapshot")
+                    {
+                        let snapshot_id = snapshot.snapshot_id();
+                        snapshot
+                            .install_into(&mut replica)
+                            .expect("install impaired snapshot");
+                        installed_snapshot_id = Some(snapshot_id);
+                        next_ack = Instant::now();
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("impaired snapshot receive failed: {error}"),
+            }
+        }
+        let now = Instant::now();
+        if installed_snapshot_id.is_none() && now >= next_repair {
+            request_missing_snapshot_fragments(&socket, proxy_address, session, &assembler);
+            next_repair = now + Duration::from_millis(200);
+        }
+        if let Some(snapshot_id) = installed_snapshot_id
+            && now >= next_ack
+        {
+            socket
+                .send_to(&encode_snapshot_ack(session, snapshot_id), proxy_address)
+                .expect("retry snapshot acknowledgement");
+            next_ack = now + Duration::from_millis(50);
+        }
+        if let Some(status) = child.0.try_wait().expect("query impaired server") {
+            exit_status = Some(status);
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let exit_code = exit_status.expect("impaired snapshot catch-up did not complete");
+    assert!(exit_code.success());
+    assert!(installed_snapshot_id.is_some());
+    assert_eq!(replica.world().fingerprint(), demo_world().fingerprint());
+    let impairment = proxy.stats();
+    let control = impairment.channels[DatagramChannel::Control.index()];
+    let snapshot = impairment.channels[DatagramChannel::Snapshot.index()];
+    assert!(control.dropped >= 1, "first snapshot ACK was not dropped");
+    assert!(snapshot.dropped >= 2, "snapshot loss was not injected");
+    assert!(
+        snapshot.duplicated >= 1,
+        "snapshot duplication was not injected"
+    );
+    assert!(
+        impairment.reordered_deliveries >= 1,
+        "reordering was not observed"
+    );
+    assert!(
+        impairment.max_delay_ticks >= 6,
+        "jitter profile was not exercised"
+    );
+    assert_eq!(impairment.queue_drops, 0);
+    assert!(impairment.peak_pending_datagrams <= MAX_PROXY_PENDING_DATAGRAMS);
+    assert!(impairment.peak_pending_bytes <= MAX_PROXY_PENDING_BYTES);
+    assert!(snapshot.delivered_bytes < 2 * 1_024 * 1_024);
+    eprintln!(
+        "deterministic impairment: control={control:?} snapshot={snapshot:?} reordered={} peak={}datagrams/{}bytes max_delay={}ticks",
+        impairment.reordered_deliveries,
+        impairment.peak_pending_datagrams,
+        impairment.peak_pending_bytes,
+        impairment.max_delay_ticks
+    );
+}
+
 fn client_socket() -> UdpSocket {
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind loopback client");
     socket
         .set_read_timeout(Some(Duration::from_millis(40)))
         .expect("client read timeout");
     socket
+}
+
+fn handshake_through_proxy(
+    socket: &UdpSocket,
+    proxy_address: SocketAddr,
+    proxy: &mut DeterministicUdpProxy,
+    nonce: u64,
+    child: &mut ChildGuard,
+) -> u64 {
+    let hello = encode_client_hello(nonce);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut next_hello = Instant::now();
+    let mut buffer = [0_u8; 1_201];
+    while Instant::now() < deadline {
+        assert!(
+            child.0.try_wait().expect("query impaired server").is_none(),
+            "dedicated server exited before impaired handshake"
+        );
+        let now = Instant::now();
+        if now >= next_hello {
+            socket
+                .send_to(&hello, proxy_address)
+                .expect("send impaired hello");
+            next_hello = now + Duration::from_millis(20);
+        }
+        proxy.pump().expect("pump proxy handshake");
+        loop {
+            match socket.recv_from(&mut buffer) {
+                Ok((length, source)) if source == proxy_address => {
+                    if let Ok(ServerControlMessage::Welcome {
+                        nonce: received,
+                        session_id,
+                    }) = decode_server_control(&buffer[..length])
+                        && received == nonce
+                    {
+                        return session_id;
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("impaired handshake receive failed: {error}"),
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    panic!("dedicated server did not complete impaired handshake")
+}
+
+fn pump_proxy_for(proxy: &mut DeterministicUdpProxy, duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        proxy.pump().expect("pump deterministic proxy interval");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn request_missing_snapshot_fragments(
+    socket: &UdpSocket,
+    proxy_address: SocketAddr,
+    session: u64,
+    assembler: &SnapshotAssembler,
+) {
+    let Some(snapshot_id) = assembler.active_snapshot_id() else {
+        return;
+    };
+    for (base_fragment, missing_mask) in assembler.missing_fragment_windows() {
+        socket
+            .send_to(
+                &encode_snapshot_fragments_request(
+                    session,
+                    snapshot_id,
+                    base_fragment,
+                    missing_mask,
+                ),
+                proxy_address,
+            )
+            .expect("request impaired missing fragments");
+    }
 }
 
 fn spawn_test_server(address: SocketAddr, max_ticks: u64, exit_flag: &str) -> ChildGuard {

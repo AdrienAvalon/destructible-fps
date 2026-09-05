@@ -65,10 +65,10 @@ detached body, and its moving fixed-point state. Each canonical snapshot occupie
 
 | Measurement | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| Server encode and frame | 3.809 ms | 3.874 ms | 4.346 ms | 4.346 ms |
-| Client reassemble and decode | 4.396 ms | 4.485 ms | 4.719 ms | 4.719 ms |
-| Client semantic validate and install | 0.303 ms | 0.314 ms | 0.317 ms | 0.317 ms |
-| End-to-end in-memory work | 8.509 ms | 8.648 ms | 9.371 ms | 9.371 ms |
+| Server encode and frame | 3.817 ms | 3.891 ms | 4.439 ms | 4.439 ms |
+| Client reassemble and decode | 4.356 ms | 4.516 ms | 4.724 ms | 4.724 ms |
+| Client semantic validate and install | 0.303 ms | 0.308 ms | 0.320 ms | 0.320 ms |
+| End-to-end in-memory work | 8.476 ms | 8.659 ms | 9.483 ms | 9.483 ms |
 
 The encoder has a four-MiB payload ceiling; the client retains only one transfer. The server emits
 at most 16 snapshot frames per peer per tick and retains at most 256 catch-up packets or 8 MiB per
@@ -88,11 +88,33 @@ body and prove ordered catch-up before returning that client to live deltas. Thi
 loopback milestone evidence, not congestion-controlled Internet transport; deterministic impairment,
 acknowledgement retry/timeout policy, and remote transport remain later gates.
 
-The final promotion passed 54 library tests, three binary tests, and 21 integration tests in both
+The final promotion passed 54 library tests, three binary tests, and 25 integration tests in both
 debug and release. The unchanged destruction, structural, and 1,024-body physics fixtures reported
-0.390 ms, 4.050 ms, and 0.852 ms p99 respectively. The five-second Vulkan smoke on the RTX 4050
-Laptop completed 2,192 GPU samples with zero drops: CPU frame-work p99 was 13.822 ms and GPU-total
-p99 was 0.212 ms at 1,440×900.
+0.359 ms, 4.235 ms, and 0.878 ms p99 respectively. The five-second Vulkan smoke on the RTX 4050
+Laptop completed 2,376 GPU samples with zero drops: CPU frame-work p99 was 12.725 ms and GPU-total
+p99 was 0.208 ms at 1,440×900.
+
+## 2026-09-05 — deterministic impaired-UDP baseline
+
+Source state: commit `f43bdc9` plus the bounded test proxy and process scenarios documented here.
+The fixed profile delays every datagram by 2–6 proxy pump ticks, reorders deliveries, drops every
+53rd snapshot fragment once, duplicates every 47th snapshot fragment once, drops every frame of
+delta sequence 1 once, duplicates delta sequence 2 once, and discards the first snapshot install
+ACK. No pseudo-random source or wall-clock seed participates in those decisions.
+
+Five repeated delta runs and three repeated snapshot runs converged. The representative delta run
+dropped all eight frames of the first transaction, delivered a later duplicate out of order, then
+recovered from retained history. It delivered 20 delta datagrams / 11,134 bytes, observed seven
+reordered deliveries, and peaked at nine queued datagrams / 8,400 bytes. The snapshot run received
+880 source datagrams, deliberately dropped 17, injected 19 duplicates, and delivered 882 datagrams /
+1,058,196 bytes after selective repair. It delivered 20 control datagrams / 548 bytes after dropping
+the first ACK, observed more than 670 reordered deliveries in representative runs, and peaked at 32
+queued datagrams / 38,400 bytes. Both scenarios had zero proxy queue drops and stayed below the
+2,048-datagram / 2-MiB hard queue limits.
+
+These figures account application datagrams at the proxy boundary; they exclude UDP/IP/Ethernet
+headers. They demonstrate bounded deterministic repair on loopback, not throughput, fairness, RTT
+estimation, or congestion behavior on a real network.
 
 ## 2026-09-05 — Stage 1 telemetry baseline
 

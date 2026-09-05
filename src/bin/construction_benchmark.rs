@@ -1,6 +1,6 @@
 use destructible_fps::{
-    AuthoritativeServer, BuildCommand, DEFAULT_CONSTRUCTION_UNITS, IVec3, Material, SampleWindow,
-    Voxel, World,
+    AuthoritativeServer, BuildCommand, DEFAULT_CONSTRUCTION_UNITS, FixedMicrometers3, IVec3,
+    MICROMETERS_PER_VOXEL, Material, PlayerBuildContext, SampleWindow, Voxel, World,
 };
 use std::{error::Error, hint::black_box, time::Instant};
 
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 position: IVec3::new(i32::try_from(index)?, 1, 0),
                 material: Material::Wood,
             };
-            let (packet, report) = authority.execute_build(1, command)?;
+            let (packet, report) = authority.execute_build(1, command, nearby_player(index)?)?;
             samples.record_ms(before.elapsed().as_secs_f64() * 1_000.0);
             black_box((packet, report));
         }
@@ -60,6 +60,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         summary.max_ms * 1_000.0
     );
     Ok(())
+}
+
+fn nearby_player(index: usize) -> Result<PlayerBuildContext, Box<dyn Error>> {
+    let x = i64::try_from(index)?
+        .saturating_mul(MICROMETERS_PER_VOXEL)
+        .saturating_add(MICROMETERS_PER_VOXEL / 2);
+    Ok(PlayerBuildContext {
+        eye_position_um: FixedMicrometers3 {
+            x,
+            y: 2_650_000,
+            z: 3_500_000,
+        },
+        bounds_minimum_um: FixedMicrometers3 {
+            x: x.saturating_sub(300_000),
+            y: MICROMETERS_PER_VOXEL,
+            z: 3_200_000,
+        },
+        bounds_maximum_um: FixedMicrometers3 {
+            x: x.saturating_add(300_000),
+            y: 2_800_000,
+            z: 3_800_000,
+        },
+    })
 }
 
 fn parse_iterations() -> Result<usize, Box<dyn Error>> {

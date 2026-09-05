@@ -1,9 +1,10 @@
 use destructible_fps::{
     AuthenticatedPrincipal, BuildCommand, DeltaPacket, ExplosionCommand, IVec3,
-    MAX_SESSION_DATAGRAMS_PER_SECOND, Material, OrderedDeltaInbox, SecureDedicatedServer,
-    SessionCredentialVerifier, Voxel, World, demo_world, encode_build_request,
-    encode_explosion_request, encode_snapshot_request, establish_session,
-    receive_gameplay_datagram, secure_client_config, secure_server_config, send_gameplay_datagram,
+    MAX_SESSION_DATAGRAMS_PER_SECOND, Material, OrderedDeltaInbox, PlayerInputCommand,
+    SecureDedicatedServer, SessionCredentialVerifier, Voxel, World, demo_world,
+    encode_build_request, encode_explosion_request, encode_player_input, encode_snapshot_request,
+    establish_session, receive_gameplay_datagram, secure_client_config, secure_server_config,
+    send_gameplay_datagram,
 };
 use quinn::rustls::{
     RootCertStore,
@@ -136,7 +137,11 @@ async fn authenticated_quic_client_builds_one_authoritative_voxel() {
     let server_config =
         secure_server_config(vec![certificate.clone()], private_key).expect("server config");
     let mut world = World::default();
-    world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
+    world.fill_box(
+        IVec3::new(-1, 0, 35),
+        IVec3::new(1, 0, 41),
+        Voxel::new(Material::Stone),
+    );
     let mut server = SecureDedicatedServer::bind(
         LOOPBACK_EPHEMERAL,
         server_config,
@@ -157,9 +162,36 @@ async fn authenticated_quic_client_builds_one_authoritative_voxel() {
         sleep(Duration::from_millis(2)).await;
     }
     assert_eq!(server.active_sessions(), 1);
+    send_gameplay_datagram(
+        &connection,
+        encode_player_input(
+            welcome.session_id,
+            PlayerInputCommand {
+                input_sequence: 1,
+                movement_x_per_mille: 1_000,
+                ..PlayerInputCommand::default()
+            },
+        ),
+    )
+    .expect("encrypted player input");
+    for _ in 0..100 {
+        let report = server.tick().expect("player simulation tick");
+        if report.authority.player_inputs_accepted == 1 {
+            break;
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+    assert!(
+        server
+            .player_state(welcome.session_id)
+            .expect("authoritative player")
+            .position_um
+            .x
+            > 0
+    );
     let command = BuildCommand {
         command_id: 1,
-        position: IVec3::new(0, 1, 0),
+        position: IVec3::new(0, 1, 36),
         material: Material::Wood,
     };
     send_gameplay_datagram(

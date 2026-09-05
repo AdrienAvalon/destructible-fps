@@ -1,3 +1,4 @@
+use crate::character::PlayerBuildContext;
 use crate::destruction::{DestructionReport, Explosion};
 use crate::material::{InvalidMaterial, Voxel};
 use crate::physics::{
@@ -29,6 +30,8 @@ const MAX_ACTIVE_BODY_VOXELS: usize = 262_144;
 const MAX_SPAWNED_BODY_VOXELS: usize = 16_384;
 pub const DEFAULT_CONSTRUCTION_UNITS: u32 = 512;
 pub const MAX_BUILD_COORDINATE: i32 = 1_000_000;
+pub const MAX_BUILD_REACH_UM: i64 = 6 * MICROMETERS_PER_VOXEL;
+pub const MAX_BUILD_REACH_VOXELS: f32 = 6.0;
 const BUILD_NEIGHBORS: [IVec3; 6] = [
     IVec3::new(-1, 0, 0),
     IVec3::new(1, 0, 0),
@@ -152,6 +155,11 @@ pub enum CommandError {
     BuildCoordinateOutOfRange(IVec3),
     BuildPositionOccupied(IVec3),
     BuildPositionUnsupported(IVec3),
+    BuildOutOfReach(IVec3),
+    BuildOccluded(IVec3),
+    BuildOverlapsPlayer(IVec3),
+    MissingAuthoritativePlayer(u64),
+    InvalidPlayerBuildContext(u64),
     BuildOverlapsBody {
         position: IVec3,
         body_id: BodyId,
@@ -202,6 +210,30 @@ impl fmt::Display for CommandError {
                 write!(
                     formatter,
                     "build position {position:?} has no static face support"
+                )
+            }
+            Self::BuildOutOfReach(position) => {
+                write!(
+                    formatter,
+                    "build position {position:?} is outside player reach"
+                )
+            }
+            Self::BuildOccluded(position) => {
+                write!(formatter, "build position {position:?} is occluded")
+            }
+            Self::BuildOverlapsPlayer(position) => {
+                write!(formatter, "build position {position:?} overlaps the player")
+            }
+            Self::MissingAuthoritativePlayer(client_id) => {
+                write!(
+                    formatter,
+                    "client {client_id} has no authoritative player state"
+                )
+            }
+            Self::InvalidPlayerBuildContext(client_id) => {
+                write!(
+                    formatter,
+                    "client {client_id} has an invalid player build context"
                 )
             }
             Self::BuildOverlapsBody { position, body_id } => write!(
@@ -389,7 +421,24 @@ impl AuthoritativeServer {
         &mut self,
         client_id: u64,
         command: BuildCommand,
+        player: PlayerBuildContext,
     ) -> Result<(DeltaPacket, BuildReport), CommandError> {
+        self.execute_build_with_players(client_id, command, player, &[player])
+    }
+
+    pub(crate) fn execute_build_with_players(
+        &mut self,
+        client_id: u64,
+        command: BuildCommand,
+        player: PlayerBuildContext,
+        players: &[PlayerBuildContext],
+    ) -> Result<(DeltaPacket, BuildReport), CommandError> {
+        if !player.is_canonical()
+            || !players.contains(&player)
+            || players.iter().any(|candidate| !candidate.is_canonical())
+        {
+            return Err(CommandError::InvalidPlayerBuildContext(client_id));
+        }
         self.validate_fresh_command(client_id, command.command_id)?;
         let cost = build_material_cost(command.material)
             .ok_or(CommandError::InvalidBuildMaterial(command.material))?;
@@ -408,6 +457,21 @@ impl AuthoritativeServer {
                 .is_solid()
         }) {
             return Err(CommandError::BuildPositionUnsupported(command.position));
+        }
+        if !build_is_in_reach(player.eye_position_um, command.position) {
+            return Err(CommandError::BuildOutOfReach(command.position));
+        }
+        if players.iter().any(|candidate| {
+            voxel_overlaps_bounds(
+                command.position,
+                candidate.bounds_minimum_um,
+                candidate.bounds_maximum_um,
+            )
+        }) {
+            return Err(CommandError::BuildOverlapsPlayer(command.position));
+        }
+        if !build_has_line_of_sight(&self.world, player.eye_position_um, command.position) {
+            return Err(CommandError::BuildOccluded(command.position));
         }
         if let Some(body_id) = self.bodies.iter().find_map(|(&body_id, body)| {
             self.body_states
@@ -470,6 +534,13 @@ impl AuthoritativeServer {
             .get(&client_id)
             .copied()
             .unwrap_or(DEFAULT_CONSTRUCTION_UNITS)
+    }
+
+    /// Releases replay and ephemeral construction accounting for a transport session that can no
+    /// longer submit commands. Session identifiers must never be reused by the caller.
+    pub fn release_client(&mut self, client_id: u64) {
+        self.last_command_id.remove(&client_id);
+        self.construction_units.remove(&client_id);
     }
 
     #[must_use]
@@ -866,6 +937,159 @@ const fn saturating_position_add(position: IVec3, offset: IVec3) -> IVec3 {
         position.y.saturating_add(offset.y),
         position.z.saturating_add(offset.z),
     )
+}
+
+fn build_is_in_reach(eye: FixedMicrometers3, position: IVec3) -> bool {
+    let center = voxel_center_um(position);
+    let delta = [
+        i128::from(center.x) - i128::from(eye.x),
+        i128::from(center.y) - i128::from(eye.y),
+        i128::from(center.z) - i128::from(eye.z),
+    ];
+    let squared_distance = delta
+        .into_iter()
+        .map(|component| component.saturating_mul(component))
+        .fold(0_i128, i128::saturating_add);
+    squared_distance <= i128::from(MAX_BUILD_REACH_UM).pow(2)
+}
+
+fn voxel_overlaps_bounds(
+    position: IVec3,
+    minimum: FixedMicrometers3,
+    maximum: FixedMicrometers3,
+) -> bool {
+    let voxel_minimum = [position.x, position.y, position.z]
+        .map(|coordinate| i64::from(coordinate).saturating_mul(MICROMETERS_PER_VOXEL));
+    let voxel_maximum = voxel_minimum.map(|value| value.saturating_add(MICROMETERS_PER_VOXEL));
+    let minimum = [minimum.x, minimum.y, minimum.z];
+    let maximum = [maximum.x, maximum.y, maximum.z];
+    (0..3).all(|axis| minimum[axis] < voxel_maximum[axis] && voxel_minimum[axis] < maximum[axis])
+}
+
+fn build_has_line_of_sight(world: &World, eye: FixedMicrometers3, target: IVec3) -> bool {
+    let Some(mut current) = fixed_position_to_voxel(eye) else {
+        return false;
+    };
+    if current == target {
+        return true;
+    }
+    if world.voxel(current).is_solid() {
+        return false;
+    }
+    let end = voxel_center_um(target);
+    let origin = [eye.x, eye.y, eye.z];
+    let end = [end.x, end.y, end.z];
+    let mut steps = [0_i32; 3];
+    let mut absolute_delta = [0_u64; 3];
+    let mut next_boundary_distance = [u64::MAX; 3];
+    for axis in 0..3 {
+        let delta = end[axis].saturating_sub(origin[axis]);
+        steps[axis] = delta.signum().try_into().unwrap_or_default();
+        absolute_delta[axis] = delta.unsigned_abs();
+        if steps[axis] == 0 {
+            continue;
+        }
+        let coordinate = ivec_component(current, axis);
+        let boundary = if steps[axis] > 0 {
+            i64::from(coordinate)
+                .saturating_add(1)
+                .saturating_mul(MICROMETERS_PER_VOXEL)
+        } else {
+            i64::from(coordinate).saturating_mul(MICROMETERS_PER_VOXEL)
+        };
+        next_boundary_distance[axis] = boundary.abs_diff(origin[axis]);
+    }
+
+    // Six metres can cross at most 21 voxel planes. The larger hard ceiling remains fail-closed if
+    // a future reach constant changes without updating this traversal budget.
+    for _ in 0..64 {
+        if current == target {
+            return true;
+        }
+        let mut tied = [false; 3];
+        for axis in 0..3 {
+            if absolute_delta[axis] == 0 {
+                continue;
+            }
+            let is_minimum = (0..3).all(|other| {
+                absolute_delta[other] == 0
+                    || u128::from(next_boundary_distance[axis])
+                        .saturating_mul(u128::from(absolute_delta[other]))
+                        <= u128::from(next_boundary_distance[other])
+                            .saturating_mul(u128::from(absolute_delta[axis]))
+            });
+            tied[axis] = is_minimum;
+        }
+        if !tied.into_iter().any(core::convert::identity) {
+            return false;
+        }
+
+        // A ray exactly touching an edge or corner is conservatively blocked by every crossed
+        // neighbor, not only by an arbitrary axis order.
+        for subset in 1_u8..8 {
+            if (0..3).any(|axis| subset & (1 << axis) != 0 && !tied[axis]) {
+                continue;
+            }
+            let mut crossed = current;
+            for (axis, step) in steps.iter().copied().enumerate() {
+                if subset & (1 << axis) != 0 {
+                    let crossed_axis = ivec_component(crossed, axis).saturating_add(step);
+                    set_ivec_component(&mut crossed, axis, crossed_axis);
+                }
+            }
+            if crossed != target && world.voxel(crossed).is_solid() {
+                return false;
+            }
+        }
+        for axis in 0..3 {
+            if tied[axis] {
+                let current_axis = ivec_component(current, axis).saturating_add(steps[axis]);
+                set_ivec_component(&mut current, axis, current_axis);
+                next_boundary_distance[axis] = next_boundary_distance[axis]
+                    .saturating_add(MICROMETERS_PER_VOXEL.cast_unsigned());
+            }
+        }
+    }
+    false
+}
+
+fn voxel_center_um(position: IVec3) -> FixedMicrometers3 {
+    const HALF_VOXEL: i64 = MICROMETERS_PER_VOXEL / 2;
+    FixedMicrometers3 {
+        x: i64::from(position.x)
+            .saturating_mul(MICROMETERS_PER_VOXEL)
+            .saturating_add(HALF_VOXEL),
+        y: i64::from(position.y)
+            .saturating_mul(MICROMETERS_PER_VOXEL)
+            .saturating_add(HALF_VOXEL),
+        z: i64::from(position.z)
+            .saturating_mul(MICROMETERS_PER_VOXEL)
+            .saturating_add(HALF_VOXEL),
+    }
+}
+
+fn fixed_position_to_voxel(position: FixedMicrometers3) -> Option<IVec3> {
+    Some(IVec3::new(
+        i32::try_from(position.x.div_euclid(MICROMETERS_PER_VOXEL)).ok()?,
+        i32::try_from(position.y.div_euclid(MICROMETERS_PER_VOXEL)).ok()?,
+        i32::try_from(position.z.div_euclid(MICROMETERS_PER_VOXEL)).ok()?,
+    ))
+}
+
+const fn ivec_component(vector: IVec3, axis: usize) -> i32 {
+    match axis {
+        0 => vector.x,
+        1 => vector.y,
+        _ => vector.z,
+    }
+}
+
+const fn set_ivec_component(vector: &mut IVec3, axis: usize, value: i32) {
+    match axis {
+        0 => vector.x = value,
+        1 => vector.y = value,
+        _ => vector.z = value,
+    }
 }
 
 fn body_overlaps_voxel(body: &RigidBodyDescriptor, state: RigidBodyState, position: IVec3) -> bool {
@@ -1897,6 +2121,26 @@ mod tests {
     use super::*;
     use crate::Material;
 
+    const fn nearby_player_context() -> PlayerBuildContext {
+        PlayerBuildContext {
+            eye_position_um: FixedMicrometers3 {
+                x: 500_000,
+                y: 2_650_000,
+                z: 3_500_000,
+            },
+            bounds_minimum_um: FixedMicrometers3 {
+                x: 200_000,
+                y: 1_000_000,
+                z: 3_200_000,
+            },
+            bounds_maximum_um: FixedMicrometers3 {
+                x: 800_000,
+                y: 2_800_000,
+                z: 3_800_000,
+            },
+        }
+    }
+
     #[test]
     fn snapshot_validation_is_atomic_and_fail_closed() {
         let mut snapshot_world = World::default();
@@ -2009,7 +2253,9 @@ mod tests {
             material: Material::Wood,
         };
 
-        let (packet, report) = server.execute_build(7, command).expect("supported build");
+        let (packet, report) = server
+            .execute_build(7, command, nearby_player_context())
+            .expect("supported build");
 
         assert_eq!(packet.changes.len(), 1);
         assert_eq!(packet.changes[0].before, Voxel::AIR);
@@ -2036,6 +2282,8 @@ mod tests {
                 command_id: 1,
             })
         );
+        server.release_client(7);
+        assert_eq!(server.construction_units(7), DEFAULT_CONSTRUCTION_UNITS);
     }
 
     #[test]
@@ -2078,7 +2326,10 @@ mod tests {
                 CommandError::BuildPositionOccupied(IVec3::new(0, 0, 0)),
             ),
         ] {
-            assert_eq!(server.execute_build(9, command), Err(expected));
+            assert_eq!(
+                server.execute_build(9, command, nearby_player_context()),
+                Err(expected)
+            );
         }
         server.construction_units.insert(10, 1);
         assert_eq!(
@@ -2089,6 +2340,7 @@ mod tests {
                     position: IVec3::new(0, 1, 0),
                     material: Material::Brick,
                 },
+                nearby_player_context(),
             ),
             Err(CommandError::InsufficientConstructionUnits {
                 available: 1,
@@ -2128,6 +2380,7 @@ mod tests {
                     position: IVec3::new(0, 1, 0),
                     material: Material::Wood,
                 },
+                nearby_player_context(),
             ),
             Err(CommandError::BuildOverlapsBody {
                 position: IVec3::new(0, 1, 0),
@@ -2135,6 +2388,112 @@ mod tests {
             })
         );
         assert_eq!(server.world().voxel(IVec3::new(0, 1, 0)), Voxel::AIR);
+    }
+
+    #[test]
+    fn build_rejects_distance_occlusion_and_player_overlap_before_commit() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
+        world.set_voxel(IVec3::new(0, 2, 2), Voxel::new(Material::Steel));
+        let initial_fingerprint = world.fingerprint();
+        let mut server = AuthoritativeServer::new(world);
+        let command = BuildCommand {
+            command_id: 1,
+            position: IVec3::new(0, 1, 0),
+            material: Material::Wood,
+        };
+        let mut invalid_context = nearby_player_context();
+        invalid_context.bounds_maximum_um.x += 1;
+        assert_eq!(
+            server.execute_build(1, command, invalid_context),
+            Err(CommandError::InvalidPlayerBuildContext(1))
+        );
+        assert_eq!(
+            server.execute_build(1, command, nearby_player_context()),
+            Err(CommandError::BuildOccluded(command.position))
+        );
+        let mut distant = nearby_player_context();
+        distant.eye_position_um.z = 20 * MICROMETERS_PER_VOXEL;
+        distant.bounds_minimum_um.z = 20 * MICROMETERS_PER_VOXEL - 300_000;
+        distant.bounds_maximum_um.z = 20 * MICROMETERS_PER_VOXEL + 300_000;
+        assert_eq!(
+            server.execute_build(1, command, distant),
+            Err(CommandError::BuildOutOfReach(command.position))
+        );
+        let overlapping = PlayerBuildContext {
+            eye_position_um: FixedMicrometers3 {
+                x: 500_000,
+                y: 2_650_000,
+                z: 500_000,
+            },
+            bounds_minimum_um: FixedMicrometers3 {
+                x: 200_000,
+                y: 1_000_000,
+                z: 200_000,
+            },
+            bounds_maximum_um: FixedMicrometers3 {
+                x: 800_000,
+                y: 2_800_000,
+                z: 800_000,
+            },
+        };
+        assert_eq!(
+            server.execute_build(1, command, overlapping),
+            Err(CommandError::BuildOverlapsPlayer(command.position))
+        );
+        assert_eq!(server.world().fingerprint(), initial_fingerprint);
+        assert_eq!(server.next_sequence(), 1);
+    }
+
+    #[test]
+    fn line_of_sight_conservatively_checks_voxel_corner_ties() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(1, 0, 0), Voxel::new(Material::Steel));
+        let eye = FixedMicrometers3 {
+            x: 500_000,
+            y: 500_000,
+            z: 500_000,
+        };
+
+        assert!(!build_has_line_of_sight(&world, eye, IVec3::new(2, 2, 0)));
+        world.set_voxel(IVec3::new(1, 0, 0), Voxel::AIR);
+        assert!(build_has_line_of_sight(&world, eye, IVec3::new(2, 2, 0)));
+    }
+
+    #[test]
+    fn build_rejects_overlap_with_another_authoritative_player() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
+        let mut server = AuthoritativeServer::new(world);
+        let acting = nearby_player_context();
+        let other = PlayerBuildContext {
+            eye_position_um: FixedMicrometers3 {
+                x: 500_000,
+                y: 2_650_000,
+                z: 500_000,
+            },
+            bounds_minimum_um: FixedMicrometers3 {
+                x: 200_000,
+                y: 1_000_000,
+                z: 200_000,
+            },
+            bounds_maximum_um: FixedMicrometers3 {
+                x: 800_000,
+                y: 2_800_000,
+                z: 800_000,
+            },
+        };
+        let command = BuildCommand {
+            command_id: 1,
+            position: IVec3::new(0, 1, 0),
+            material: Material::Wood,
+        };
+
+        assert_eq!(
+            server.execute_build_with_players(1, command, acting, &[acting, other]),
+            Err(CommandError::BuildOverlapsPlayer(command.position))
+        );
+        assert_eq!(server.world().voxel(command.position), Voxel::AIR);
     }
 
     #[test]

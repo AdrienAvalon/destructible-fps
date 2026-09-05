@@ -1,10 +1,12 @@
 //! Fixed-size UDP control messages for dedicated-server discovery and commands.
 
-use crate::{BuildCommand, ExplosionCommand, IVec3, Material, material::InvalidMaterial};
+use crate::{
+    BuildCommand, ExplosionCommand, IVec3, Material, PlayerInputCommand, material::InvalidMaterial,
+};
 use core::fmt;
 
 const CONTROL_MAGIC: [u8; 4] = *b"DFCT";
-const CONTROL_VERSION: u8 = 2;
+const CONTROL_VERSION: u8 = 3;
 const HELLO_KIND: u8 = 1;
 const WELCOME_KIND: u8 = 2;
 const EXPLOSION_KIND: u8 = 3;
@@ -13,6 +15,7 @@ const SNAPSHOT_REQUEST_KIND: u8 = 5;
 const SNAPSHOT_FRAGMENTS_REQUEST_KIND: u8 = 6;
 const SNAPSHOT_ACK_KIND: u8 = 7;
 const BUILD_KIND: u8 = 8;
+const PLAYER_INPUT_KIND: u8 = 9;
 const HELLO_BYTES: usize = 14;
 const WELCOME_BYTES: usize = 22;
 const EXPLOSION_BYTES: usize = 40;
@@ -21,6 +24,7 @@ const SNAPSHOT_REQUEST_BYTES: usize = 14;
 const SNAPSHOT_FRAGMENTS_REQUEST_BYTES: usize = 32;
 const SNAPSHOT_ACK_BYTES: usize = 22;
 const BUILD_BYTES: usize = 35;
+const PLAYER_INPUT_BYTES: usize = 27;
 pub const MAX_UDP_DATAGRAM_BYTES: usize = 1_200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +39,10 @@ pub enum ClientControlMessage {
     Build {
         session_id: u64,
         command: BuildCommand,
+    },
+    PlayerInput {
+        session_id: u64,
+        input: PlayerInputCommand,
     },
     RepairRequest {
         session_id: u64,
@@ -68,6 +76,7 @@ pub enum ControlCodecError {
     UnsupportedVersion(u8),
     InvalidKind(u8),
     InvalidMaterial(InvalidMaterial),
+    InvalidPlayerInputFlags(u8),
 }
 
 impl fmt::Display for ControlCodecError {
@@ -84,6 +93,9 @@ impl fmt::Display for ControlCodecError {
             }
             Self::InvalidKind(kind) => write!(formatter, "invalid control message kind {kind}"),
             Self::InvalidMaterial(error) => error.fmt(formatter),
+            Self::InvalidPlayerInputFlags(flags) => {
+                write!(formatter, "invalid player input flags {flags:#04x}")
+            }
         }
     }
 }
@@ -125,6 +137,17 @@ pub fn encode_build_request(session_id: u64, command: BuildCommand) -> Vec<u8> {
     push_i32(&mut bytes, command.position.y);
     push_i32(&mut bytes, command.position.z);
     bytes.push(command.material as u8);
+    bytes
+}
+
+#[must_use]
+pub fn encode_player_input(session_id: u64, input: PlayerInputCommand) -> Vec<u8> {
+    let mut bytes = control_prefix(PLAYER_INPUT_KIND, PLAYER_INPUT_BYTES);
+    push_u64(&mut bytes, session_id);
+    push_u64(&mut bytes, input.input_sequence);
+    push_i16(&mut bytes, input.movement_x_per_mille);
+    push_i16(&mut bytes, input.movement_z_per_mille);
+    bytes.push(u8::from(input.jump) | (u8::from(input.sprint) << 1));
     bytes
 }
 
@@ -211,6 +234,27 @@ pub fn decode_client_control(bytes: &[u8]) -> Result<ClientControlMessage, Contr
                     command_id: cursor.take_u64(),
                     position: IVec3::new(cursor.take_i32(), cursor.take_i32(), cursor.take_i32()),
                     material: Material::from_wire(cursor.take_u8())?,
+                },
+            })
+        }
+        PLAYER_INPUT_KIND => {
+            require_length(bytes, PLAYER_INPUT_BYTES)?;
+            let session_id = cursor.take_u64();
+            let input_sequence = cursor.take_u64();
+            let motion_x = cursor.take_i16();
+            let motion_z = cursor.take_i16();
+            let flags = cursor.take_u8();
+            if flags & !0b11 != 0 {
+                return Err(ControlCodecError::InvalidPlayerInputFlags(flags));
+            }
+            Ok(ClientControlMessage::PlayerInput {
+                session_id,
+                input: PlayerInputCommand {
+                    input_sequence,
+                    movement_x_per_mille: motion_x,
+                    movement_z_per_mille: motion_z,
+                    jump: flags & 1 != 0,
+                    sprint: flags & 2 != 0,
                 },
             })
         }
@@ -327,6 +371,10 @@ impl ControlCursor<'_> {
         u16::from_le_bytes(self.take_array())
     }
 
+    fn take_i16(&mut self) -> i16 {
+        i16::from_le_bytes(self.take_array())
+    }
+
     fn take_u32(&mut self) -> u32 {
         u32::from_le_bytes(self.take_array())
     }
@@ -350,6 +398,10 @@ impl ControlCursor<'_> {
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i16(bytes: &mut Vec<u8>, value: i16) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -391,6 +443,23 @@ mod tests {
             Ok(ClientControlMessage::Explosion {
                 session_id: 9,
                 command,
+            })
+        );
+
+        let input = PlayerInputCommand {
+            input_sequence: 13,
+            movement_x_per_mille: 600,
+            movement_z_per_mille: -800,
+            jump: true,
+            sprint: true,
+        };
+        let request = encode_player_input(9, input);
+        assert_eq!(request.len(), PLAYER_INPUT_BYTES);
+        assert_eq!(
+            decode_client_control(&request),
+            Ok(ClientControlMessage::PlayerInput {
+                session_id: 9,
+                input,
             })
         );
 
@@ -492,11 +561,23 @@ mod tests {
             decode_client_control(&invalid_material),
             Err(ControlCodecError::InvalidMaterial(InvalidMaterial(u8::MAX)))
         );
+        let mut invalid_flags = encode_player_input(
+            1,
+            PlayerInputCommand {
+                input_sequence: 1,
+                ..PlayerInputCommand::default()
+            },
+        );
+        *invalid_flags.last_mut().expect("flags byte") = 0b100;
+        assert_eq!(
+            decode_client_control(&invalid_flags),
+            Err(ControlCodecError::InvalidPlayerInputFlags(0b100))
+        );
         let mut old_version = encode_client_hello(1);
-        old_version[4] = 1;
+        old_version[4] = 2;
         assert_eq!(
             decode_client_control(&old_version),
-            Err(ControlCodecError::UnsupportedVersion(1))
+            Err(ControlCodecError::UnsupportedVersion(2))
         );
     }
 }

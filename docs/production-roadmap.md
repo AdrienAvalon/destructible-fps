@@ -99,9 +99,13 @@ streaming, with no synchronous world meshing on the presentation thread.
   fragments, and settled static clusters;
 - player construction with shared replay ordering, bounded static placement, per-session resource
   costs, face support, static occupancy, conservative dynamic-body exclusion, fingerprinted
-  replication, a real authenticated-QUIC test, and a playable wood-placement control (first slice
-  delivered; authoritative reach, persistent inventory, recipes, removal and dynamic attachment
-  remain).
+  replication, six-metre server-player reach, conservative integer line of sight, a real
+  authenticated-QUIC movement-plus-build test, and a playable wood-placement control (authority
+  slice delivered; persistent inventory, recipes, removal and dynamic attachment remain);
+- fixed-step authoritative character movement with bounded newest-input retention, independent
+  input replay protection, stale-input expiry, gravity, jumping, static collision, fall recovery and
+  session cleanup (server slice delivered; replication, prediction/reconciliation, view authority
+  and dynamic-body contact remain).
 
 Exit gate: removing a load-bearing member causes a repeatable progressive collapse; the worst-case
 fixture remains inside the 60 Hz server budget and converges bit-for-bit on replicas.

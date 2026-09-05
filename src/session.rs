@@ -2,9 +2,11 @@
 
 use crate::{
     AuthoritativeServer, BodyId, BuildCommand, BuildReport, CHUNK_EDGE, ClientReplica, CodecError,
-    CommandError, DestructionReport, ExplosionCommand, FrameAssembler, IVec3, Material,
-    PhysicsTickReport, ReplicationError, RigidBodyDescriptor, RigidBodyState, VoxelChange, World,
-    chunk_position, decode_frame, demo_world, encode_frames, player::raycast,
+    CommandError, DestructionReport, ExplosionCommand, FixedMicrometers3, FrameAssembler, IVec3,
+    MAX_BUILD_REACH_VOXELS, MICROMETERS_PER_VOXEL, Material, PLAYER_EYE_HEIGHT_UM,
+    PLAYER_HEIGHT_UM, PLAYER_RADIUS_UM, PhysicsTickReport, PlayerBuildContext, ReplicationError,
+    RigidBodyDescriptor, RigidBodyState, VoxelChange, World, chunk_position, decode_frame,
+    demo_world, encode_frames, player::raycast,
 };
 use core::fmt;
 use glam::Vec3;
@@ -46,6 +48,7 @@ pub enum SessionError {
     Replication(ReplicationError),
     MissingCompletePacket,
     DivergedReplica,
+    InvalidBuildOrigin,
 }
 
 impl fmt::Display for SessionError {
@@ -59,6 +62,9 @@ impl fmt::Display for SessionError {
             }
             Self::DivergedReplica => {
                 write!(formatter, "authoritative and rendered replicas diverged")
+            }
+            Self::InvalidBuildOrigin => {
+                write!(formatter, "build origin is outside fixed world bounds")
             }
         }
     }
@@ -232,9 +238,14 @@ impl DemoSession {
         direction: Vec3,
         material: Material,
     ) -> Result<Option<BuildResult>, SessionError> {
-        let Some(target) = raycast(self.client.world(), origin, direction, 12.0)
-            .and_then(|hit| hit.adjacent_empty)
-        else {
+        let player = local_build_context(origin).ok_or(SessionError::InvalidBuildOrigin)?;
+        let Some(target) = raycast(
+            self.client.world(),
+            origin,
+            direction,
+            MAX_BUILD_REACH_VOXELS,
+        )
+        .and_then(|hit| hit.adjacent_empty) else {
             return Ok(None);
         };
         let command = BuildCommand {
@@ -243,7 +254,7 @@ impl DemoSession {
             material,
         };
         self.next_command_id = self.next_command_id.wrapping_add(1);
-        let (packet, report) = self.server.execute_build(CLIENT_ID, command)?;
+        let (packet, report) = self.server.execute_build(CLIENT_ID, command, player)?;
         let mut encoded = encode_frames(&packet, DATAGRAM_MTU)?;
         let encoded_bytes = encoded.iter().map(Vec::len).sum();
         let datagrams = encoded.len();
@@ -271,6 +282,37 @@ impl DemoSession {
             dirty_chunks: dirty_chunks(&packet.changes),
         }))
     }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn local_build_context(eye: Vec3) -> Option<PlayerBuildContext> {
+    fn fixed(value: f32) -> Option<i64> {
+        if !value.is_finite() || value.abs() > 1_000_016.0 {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        Some((f64::from(value) * MICROMETERS_PER_VOXEL as f64).round() as i64)
+    }
+
+    let eye = FixedMicrometers3 {
+        x: fixed(eye.x)?,
+        y: fixed(eye.y)?,
+        z: fixed(eye.z)?,
+    };
+    let bottom_y = eye.y.saturating_sub(PLAYER_EYE_HEIGHT_UM);
+    Some(PlayerBuildContext {
+        eye_position_um: eye,
+        bounds_minimum_um: FixedMicrometers3 {
+            x: eye.x.saturating_sub(PLAYER_RADIUS_UM),
+            y: bottom_y,
+            z: eye.z.saturating_sub(PLAYER_RADIUS_UM),
+        },
+        bounds_maximum_um: FixedMicrometers3 {
+            x: eye.x.saturating_add(PLAYER_RADIUS_UM),
+            y: bottom_y.saturating_add(PLAYER_HEIGHT_UM),
+            z: eye.z.saturating_add(PLAYER_RADIUS_UM),
+        },
+    })
 }
 
 #[must_use]
@@ -388,6 +430,16 @@ mod tests {
                 .is_none()
         );
         assert_eq!(session.world().tick(), 0);
+    }
+
+    #[test]
+    fn non_finite_build_origin_is_rejected_before_raycast_or_command_advance() {
+        let mut session = DemoSession::new(World::default());
+        assert!(matches!(
+            session.build(Vec3::splat(f32::NAN), -Vec3::Z, Material::Wood),
+            Err(SessionError::InvalidBuildOrigin)
+        ));
+        assert_eq!(session.next_command_id, 1);
     }
 
     #[test]

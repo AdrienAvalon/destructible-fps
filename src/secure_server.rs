@@ -1,10 +1,10 @@
 //! Bounded QUIC adapter for the transport-independent authoritative simulation.
 
 use crate::{
-    AuthenticatedSession, AuthoritativeServer, AuthorityCore, MAX_PENDING_QUIC_HANDSHAKES,
-    MAX_QUIC_DATAGRAM_PAYLOAD_BYTES, MAX_RECEIVED_DATAGRAMS_PER_TICK, MAX_SERVER_PEERS,
-    NetworkRuntimeError, NetworkTickReport, SessionCredentialVerifier, World, admit_session,
-    receive_gameplay_datagram, send_gameplay_datagram,
+    AuthenticatedSession, AuthoritativePlayerState, AuthoritativeServer, AuthorityCore,
+    MAX_PENDING_QUIC_HANDSHAKES, MAX_QUIC_DATAGRAM_PAYLOAD_BYTES, MAX_RECEIVED_DATAGRAMS_PER_TICK,
+    MAX_SERVER_PEERS, NetworkRuntimeError, NetworkTickReport, SessionCredentialVerifier, World,
+    admit_session, receive_gameplay_datagram, send_gameplay_datagram,
 };
 use bytes::Bytes;
 use quinn::{Endpoint, ServerConfig, VarInt};
@@ -332,6 +332,11 @@ impl SecureDedicatedServer {
     #[must_use]
     pub fn active_sessions(&self) -> usize {
         self.sessions.len()
+    }
+
+    #[must_use]
+    pub fn player_state(&self, session_id: u64) -> Option<AuthoritativePlayerState> {
+        self.authority.player_state(session_id)
     }
 
     /// Returns the bound endpoint address, including an ephemeral port selected for port zero.

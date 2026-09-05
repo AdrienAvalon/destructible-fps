@@ -32,6 +32,10 @@ name = "construction-benchmark"
 path = "src/bin/construction_benchmark.rs"
 
 [[bin]]
+name = "character-benchmark"
+path = "src/bin/character_benchmark.rs"
+
+[[bin]]
 name = "dedicated-server"
 path = "src/bin/dedicated_server.rs"
 

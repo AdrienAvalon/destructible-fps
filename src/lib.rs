@@ -3,6 +3,7 @@
 //! The simulation and wire protocol stay independent from rendering. The playable
 //! milestone adds a safe Vulkan presentation layer without moving authority into it.
 
+pub mod character;
 pub mod destruction;
 pub mod generator;
 pub mod material;
@@ -24,6 +25,11 @@ pub mod telemetry;
 pub mod transport;
 pub mod world;
 
+pub use character::{
+    AuthoritativePlayer, AuthoritativePlayerState, MAX_PLAYER_INPUT_HOLD_TICKS,
+    MAX_PLAYER_INPUT_PER_MILLE, PLAYER_EYE_HEIGHT_UM, PLAYER_HEIGHT_UM, PLAYER_RADIUS_UM,
+    PlayerBuildContext, PlayerInputCommand, PlayerInputError, PlayerStepReport,
+};
 pub use destruction::{DestructionReport, Explosion};
 pub use generator::demo_world;
 pub use material::{Material, MaterialProperties, Voxel};
@@ -53,8 +59,8 @@ pub use physics::{
 pub use replication::{
     AuthoritativeServer, BodyStateUpdate, BodyVoxelAssignment, BuildCommand, BuildReport,
     ClientReplica, ClientStatus, CodecError, CommandError, DEFAULT_CONSTRUCTION_UNITS, DeltaFrame,
-    DeltaPacket, ExplosionCommand, FrameAssembler, MAX_BUILD_COORDINATE, PhysicsTickReport,
-    ReplicationError, decode_frame, encode_frames,
+    DeltaPacket, ExplosionCommand, FrameAssembler, MAX_BUILD_COORDINATE, MAX_BUILD_REACH_UM,
+    MAX_BUILD_REACH_VOXELS, PhysicsTickReport, ReplicationError, decode_frame, encode_frames,
 };
 pub use secure_server::{
     MAX_CONSECUTIVE_GAMEPLAY_QUEUE_DROPS, MAX_SECURE_CONTROL_EVENTS, MAX_SECURE_GAMEPLAY_BYTES,
@@ -89,7 +95,8 @@ pub use telemetry::{DistributionSummary, SampleWindow};
 pub use transport::{
     ClientControlMessage, ControlCodecError, MAX_UDP_DATAGRAM_BYTES, ServerControlMessage,
     decode_client_control, decode_server_control, encode_build_request, encode_client_hello,
-    encode_explosion_request, encode_repair_request, encode_server_welcome, encode_snapshot_ack,
-    encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
+    encode_explosion_request, encode_player_input, encode_repair_request, encode_server_welcome,
+    encode_snapshot_ack, encode_snapshot_fragments_request, encode_snapshot_request,
+    is_delta_datagram,
 };
 pub use world::{CHUNK_EDGE, IVec3, VoxelChange, World, WorldError, WorldStats, chunk_position};

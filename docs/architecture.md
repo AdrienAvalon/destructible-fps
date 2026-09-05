@@ -208,10 +208,14 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - four-pass X/Z dynamic contact from swept coarse body bounds, rational orthogonal-overlap validation
   at time of impact, inverse-mass separation, material restitution, momentum-preserving tangential
   friction, impact wake-up, and deterministic short-chain propagation (delivered);
-- control-protocol-v2 static construction with shared command replay ordering, per-session resource
+- control-protocol-v3 static construction with shared command replay ordering, per-session resource
   budgets, deterministic material costs, coordinate/occupancy/face-support validation, conservative
-  dynamic-body exclusion, fingerprinted delta replication, and local plus authenticated-QUIC
-  execution (delivered as the first construction slice);
+  dynamic-body exclusion, six-metre authoritative-player reach, conservative integer line of sight,
+  fingerprinted delta replication, and local plus authenticated-QUIC execution (delivered);
+- fixed-step authoritative player position, velocity, gravity, jumping, static voxel collision,
+  bounded terminal velocity and swept contact resolution, newest-input retention, independent replay
+  sequencing, stale-input expiry, 16 distinct recyclable spawn slots, disconnect cleanup, and
+  packet-rate-independent simulation (delivered as the server movement slice);
 - persistent foundation and material constraint graph integrated into authoritative transactions;
 - compression, tension, shear, and connection limits by material;
 - local stress propagation after damage;
@@ -219,8 +223,9 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - rigid-body mass, centre of mass, and inertia derived from geometry (delivered);
 - oriented voxel contact, collision-generated torque, gyroscopic response, deeper constraint-island
   convergence, clustering, and distance-based solver budgets.
-- authoritative player transforms and reach checks, persistent inventories, recipes, removal tools,
-  material selection UI, and dynamic-body attachment for construction.
+- player-state replication, client prediction and reconciliation, authoritative view/weapon state,
+  persistent inventories, recipes, removal tools, material selection UI, dynamic-body character
+  contact, and dynamic-body attachment for construction.
 
 Gate: destroying a load-bearing member produces a repeatable progressive collapse and never stalls a
 60 Hz server tick in the agreed worst-case scene.

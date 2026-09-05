@@ -1,9 +1,11 @@
 //! Transport-independent bounded authority core, loopback UDP adapter, and client delta inbox.
 
 use crate::{
-    AuthenticatedPrincipal, AuthoritativeServer, BuildCommand, ClientControlMessage, CodecError,
-    DeltaPacket, ExplosionCommand, FrameAssembler, PhysicsTickReport, World, decode_client_control,
-    decode_frame, encode_frames, encode_server_welcome, encode_snapshot_frames,
+    AuthenticatedPrincipal, AuthoritativePlayer, AuthoritativePlayerState, AuthoritativeServer,
+    BuildCommand, ClientControlMessage, CodecError, DeltaPacket, ExplosionCommand,
+    FixedMicrometers3, FrameAssembler, MICROMETERS_PER_VOXEL, PhysicsTickReport,
+    PlayerInputCommand, World, decode_client_control, decode_frame, encode_frames,
+    encode_server_welcome, encode_snapshot_frames,
 };
 use core::fmt;
 use std::{
@@ -32,6 +34,24 @@ const MAX_COMPLETE_PACKET_BYTES: usize = 8 * 1_024 * 1_024;
 pub const MAX_APPLICATION_DATAGRAM_BYTES: usize = 1_200;
 pub const MIN_APPLICATION_DATAGRAM_BYTES: usize = 256;
 pub const LEGACY_UDP_APPLICATION_DATAGRAM_BYTES: usize = MAX_APPLICATION_DATAGRAM_BYTES;
+const PLAYER_SPAWN_OFFSETS: [(i8, i8); MAX_SERVER_PEERS] = [
+    (0, 0),
+    (2, 0),
+    (-2, 0),
+    (0, 2),
+    (0, -2),
+    (2, 2),
+    (-2, 2),
+    (2, -2),
+    (-2, -2),
+    (4, 0),
+    (-4, 0),
+    (0, 4),
+    (0, -4),
+    (4, 2),
+    (-4, 2),
+    (4, -2),
+];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NetworkTickReport {
@@ -55,6 +75,13 @@ pub struct NetworkTickReport {
     pub invalid_snapshot_controls: usize,
     pub commands_applied: usize,
     pub commands_rejected: usize,
+    pub player_inputs_accepted: usize,
+    pub player_inputs_rejected: usize,
+    pub players_simulated: usize,
+    pub players_moved: usize,
+    pub player_collisions: usize,
+    pub expired_player_inputs: usize,
+    pub player_spawn_rejections: usize,
     pub outbound_attempts: usize,
     pub outbound_datagrams: usize,
     pub outbound_drops: usize,
@@ -101,6 +128,7 @@ struct Peer {
     principal: Option<AuthenticatedPrincipal>,
     last_seen_tick: u64,
     last_snapshot_tick: Option<u64>,
+    spawn_slot: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -174,6 +202,7 @@ struct CachedSnapshot {
 pub struct AuthorityCore<PeerId> {
     authority: AuthoritativeServer,
     peers: BTreeMap<PeerId, Peer>,
+    players: BTreeMap<u64, AuthoritativePlayer>,
     commands: VecDeque<QueuedCommand>,
     repairs: VecDeque<QueuedRepair<PeerId>>,
     retained_deltas: VecDeque<RetainedDelta>,
@@ -210,6 +239,7 @@ where
         Ok(Self {
             authority: AuthoritativeServer::new(world),
             peers: BTreeMap::new(),
+            players: BTreeMap::new(),
             commands: VecDeque::new(),
             repairs: VecDeque::new(),
             retained_deltas: VecDeque::new(),
@@ -257,6 +287,10 @@ where
             report.peer_limit_drops += 1;
             return false;
         }
+        let Some(spawn_slot) = self.available_player_spawn_slot() else {
+            report.player_spawn_rejections += 1;
+            return false;
+        };
         self.peers.insert(
             source,
             Peer {
@@ -265,8 +299,11 @@ where
                 principal: Some(principal),
                 last_seen_tick: self.tick,
                 last_snapshot_tick: None,
+                spawn_slot,
             },
         );
+        self.players
+            .insert(session_id, player_for_spawn_slot(spawn_slot));
         true
     }
 
@@ -331,6 +368,9 @@ where
                 session_id,
                 command,
             } => self.enqueue_command(source, session_id, GameplayCommand::Build(command), report),
+            ClientControlMessage::PlayerInput { session_id, input } => {
+                self.accept_player_input(source, session_id, input, report);
+            }
             ClientControlMessage::RepairRequest {
                 session_id,
                 missing_sequence,
@@ -377,6 +417,7 @@ where
     ) -> Result<NetworkTickReport, NetworkRuntimeError> {
         self.process_repairs(sender, &mut report);
         self.service_snapshot_transfers(sender, &mut report);
+        self.simulate_players(&mut report);
         self.simulate_commands(sender, &mut report)?;
         let (physics_packet, physics) = self.authority.advance_physics();
         report.physics = physics;
@@ -394,6 +435,13 @@ where
     #[must_use]
     pub fn peer_count(&self) -> usize {
         self.peers.len()
+    }
+
+    #[must_use]
+    pub fn player_state(&self, session_id: u64) -> Option<AuthoritativePlayerState> {
+        self.players
+            .get(&session_id)
+            .map(AuthoritativePlayer::state)
     }
 
     #[must_use]
@@ -430,6 +478,8 @@ where
 
     fn remove_peer_state(&mut self, source: PeerId, session_id: u64) {
         self.peers.remove(&source);
+        self.players.remove(&session_id);
+        self.authority.release_client(session_id);
         self.snapshot_transfers.remove(&source);
         self.repairs
             .retain(|repair| repair.source != source && repair.session_id != session_id);
@@ -458,6 +508,10 @@ where
             report.peer_limit_drops += 1;
             return;
         }
+        let Some(spawn_slot) = self.available_player_spawn_slot() else {
+            report.player_spawn_rejections += 1;
+            return;
+        };
         while self
             .peers
             .values()
@@ -480,11 +534,48 @@ where
             principal: None,
             last_seen_tick: self.tick,
             last_snapshot_tick: None,
+            spawn_slot,
         };
         self.next_session_id = next_session_id;
         self.snapshot_transfers.remove(&source);
         self.peers.insert(source, peer);
+        self.players
+            .insert(session_id, player_for_spawn_slot(spawn_slot));
         send_welcome(sender, source, peer, report);
+    }
+
+    fn available_player_spawn_slot(&self) -> Option<u8> {
+        (0..u8::try_from(MAX_SERVER_PEERS).ok()?).find(|slot| {
+            self.peers.values().all(|peer| peer.spawn_slot != *slot)
+                && player_for_spawn_slot(*slot).is_clear_of_static_world(self.authority.world())
+        })
+    }
+
+    fn accept_player_input(
+        &mut self,
+        source: PeerId,
+        session_id: u64,
+        input: PlayerInputCommand,
+        report: &mut NetworkTickReport,
+    ) {
+        let Some(peer) = self.peers.get_mut(&source) else {
+            report.rejected_sessions += 1;
+            return;
+        };
+        if peer.session_id != session_id {
+            report.rejected_sessions += 1;
+            return;
+        }
+        peer.last_seen_tick = self.tick;
+        let Some(player) = self.players.get_mut(&session_id) else {
+            report.player_inputs_rejected += 1;
+            return;
+        };
+        if player.accept_input(input).is_ok() {
+            report.player_inputs_accepted += 1;
+        } else {
+            report.player_inputs_rejected += 1;
+        }
     }
 
     fn enqueue_command(
@@ -837,6 +928,19 @@ where
         sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
         report: &mut NetworkTickReport,
     ) -> Result<(), NetworkRuntimeError> {
+        let player_contexts = if self
+            .commands
+            .iter()
+            .take(MAX_SIMULATED_COMMANDS_PER_TICK)
+            .any(|queued| matches!(queued.command, GameplayCommand::Build(_)))
+        {
+            self.players
+                .values()
+                .map(AuthoritativePlayer::build_context)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         for _ in 0..MAX_SIMULATED_COMMANDS_PER_TICK {
             let Some(queued) = self.commands.pop_front() else {
                 break;
@@ -847,8 +951,20 @@ where
                     .execute_explosion(queued.session_id, command)
                     .map(|(packet, _report)| packet),
                 GameplayCommand::Build(command) => self
-                    .authority
-                    .execute_build(queued.session_id, command)
+                    .players
+                    .get(&queued.session_id)
+                    .map(AuthoritativePlayer::build_context)
+                    .ok_or(crate::CommandError::MissingAuthoritativePlayer(
+                        queued.session_id,
+                    ))
+                    .and_then(|player| {
+                        self.authority.execute_build_with_players(
+                            queued.session_id,
+                            command,
+                            player,
+                            &player_contexts,
+                        )
+                    })
                     .map(|(packet, _report)| packet),
             };
             match result {
@@ -860,6 +976,16 @@ where
             }
         }
         Ok(())
+    }
+
+    fn simulate_players(&mut self, report: &mut NetworkTickReport) {
+        for player in self.players.values_mut() {
+            let step = player.step(self.authority.world());
+            report.players_simulated += 1;
+            report.players_moved += usize::from(step.moved);
+            report.player_collisions += usize::from(step.collided);
+            report.expired_player_inputs += usize::from(step.input_expired);
+        }
     }
 
     fn broadcast(
@@ -961,6 +1087,8 @@ where
             keep
         });
         for (source, session_id) in expired {
+            self.players.remove(&session_id);
+            self.authority.release_client(session_id);
             self.snapshot_transfers.remove(&source);
             self.repairs
                 .retain(|repair| repair.source != source && repair.session_id != session_id);
@@ -970,6 +1098,17 @@ where
         self.snapshot_transfers
             .retain(|address, _transfer| self.peers.contains_key(address));
     }
+}
+
+fn player_for_spawn_slot(slot: u8) -> AuthoritativePlayer {
+    let (x, z) = PLAYER_SPAWN_OFFSETS[usize::from(slot)];
+    AuthoritativePlayer::new(FixedMicrometers3 {
+        x: i64::from(x).saturating_mul(MICROMETERS_PER_VOXEL),
+        y: MICROMETERS_PER_VOXEL,
+        z: i64::from(z)
+            .saturating_mul(MICROMETERS_PER_VOXEL)
+            .saturating_add(40 * MICROMETERS_PER_VOXEL),
+    })
 }
 
 /// Legacy real-UDP adapter retained for loopback protocol and impairment testing.
@@ -1302,6 +1441,7 @@ mod tests {
         assert!(!server.disconnect_authenticated(5, 14));
         assert!(server.disconnect_authenticated(5, 13));
         assert_eq!(server.principal(5), None);
+        assert_eq!(server.player_state(13), None);
         assert_eq!(server.queued_commands(), 0);
     }
 
@@ -1344,8 +1484,9 @@ mod tests {
     #[test]
     fn authenticated_build_command_is_validated_and_broadcast() {
         let mut world = World::default();
-        world.set_voxel(
-            crate::IVec3::new(0, 0, 0),
+        world.fill_box(
+            crate::IVec3::new(-1, 0, 35),
+            crate::IVec3::new(1, 0, 41),
             crate::Voxel::new(crate::Material::Stone),
         );
         let mut server = AuthorityCore::new(world, 1_100).expect("authority core");
@@ -1356,7 +1497,7 @@ mod tests {
         assert!(server.admit_authenticated(1_u8, 17, 19, principal, &mut report));
         let command = BuildCommand {
             command_id: 1,
-            position: crate::IVec3::new(0, 1, 0),
+            position: crate::IVec3::new(0, 1, 36),
             material: crate::Material::Wood,
         };
         server.ingest_datagram(
@@ -1395,6 +1536,105 @@ mod tests {
     }
 
     #[test]
+    fn player_input_burst_updates_intent_but_simulates_exactly_once() {
+        let mut world = World::default();
+        world.fill_box(
+            crate::IVec3::new(-4, 0, 35),
+            crate::IVec3::new(4, 0, 45),
+            crate::Voxel::new(crate::Material::Stone),
+        );
+        let mut server = AuthorityCore::new(world, 1_100).expect("authority core");
+        let principal = AuthenticatedPrincipal::new(
+            std::num::NonZeroU64::new(93).expect("non-zero test principal"),
+        );
+        let mut report = server.begin_tick();
+        assert!(server.admit_authenticated(1_u8, 17, 19, principal, &mut report));
+        for input_sequence in 1..=32 {
+            server.ingest_datagram(
+                1,
+                &crate::encode_player_input(
+                    19,
+                    PlayerInputCommand {
+                        input_sequence,
+                        movement_x_per_mille: 1_000,
+                        ..PlayerInputCommand::default()
+                    },
+                ),
+                &mut |_destination, _payload| true,
+                &mut report,
+            );
+        }
+        let report = server
+            .complete_tick(&mut |_destination, _payload| true, report)
+            .expect("bounded player tick");
+
+        assert_eq!(report.player_inputs_accepted, 32);
+        assert_eq!(report.players_simulated, 1);
+        assert_eq!(report.players_moved, 1);
+        assert_eq!(
+            server.player_state(19).expect("player").position_um.x,
+            21_666
+        );
+
+        let mut report = server.begin_tick();
+        server.ingest_datagram(
+            1,
+            &crate::encode_player_input(
+                19,
+                PlayerInputCommand {
+                    input_sequence: 32,
+                    movement_x_per_mille: 1_000,
+                    ..PlayerInputCommand::default()
+                },
+            ),
+            &mut |_destination, _payload| true,
+            &mut report,
+        );
+        assert_eq!(report.player_inputs_rejected, 1);
+    }
+
+    #[test]
+    fn player_spawns_are_distinct_and_a_disconnected_slot_is_reused() {
+        let mut server = AuthorityCore::new(World::default(), 1_100).expect("authority core");
+        let principal = AuthenticatedPrincipal::new(
+            std::num::NonZeroU64::new(94).expect("non-zero test principal"),
+        );
+        let mut report = server.begin_tick();
+        assert!(server.admit_authenticated(1_u8, 1, 11, principal, &mut report));
+        assert!(server.admit_authenticated(2_u8, 2, 12, principal, &mut report));
+        let first = server.player_state(11).expect("first spawn").position_um;
+        let second = server.player_state(12).expect("second spawn").position_um;
+        assert_ne!(first, second);
+
+        assert!(server.disconnect_authenticated(1, 11));
+        assert!(server.admit_authenticated(3_u8, 3, 13, principal, &mut report));
+        assert_eq!(
+            server.player_state(13).expect("reused spawn").position_um,
+            first
+        );
+    }
+
+    #[test]
+    fn admission_fails_closed_when_every_bounded_spawn_is_obstructed() {
+        let mut world = World::default();
+        world.fill_box(
+            crate::IVec3::new(-5, 1, 35),
+            crate::IVec3::new(5, 2, 45),
+            crate::Voxel::new(crate::Material::Concrete),
+        );
+        let mut server = AuthorityCore::new(world, 1_100).expect("authority core");
+        let principal = AuthenticatedPrincipal::new(
+            std::num::NonZeroU64::new(95).expect("non-zero test principal"),
+        );
+        let mut report = server.begin_tick();
+
+        assert!(!server.admit_authenticated(1_u8, 1, 11, principal, &mut report));
+        assert_eq!(report.player_spawn_rejections, 1);
+        assert_eq!(server.peer_count(), 0);
+        assert_eq!(server.player_state(11), None);
+    }
+
+    #[test]
     fn command_queue_and_session_validation_are_bounded() {
         let mut server =
             AuthorityCore::new(World::default(), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
@@ -1408,6 +1648,7 @@ mod tests {
                 principal: None,
                 last_seen_tick: 0,
                 last_snapshot_tick: None,
+                spawn_slot: 0,
             },
         );
         let mut report = NetworkTickReport::default();
@@ -1473,6 +1714,7 @@ mod tests {
                 principal: None,
                 last_seen_tick: 0,
                 last_snapshot_tick: None,
+                spawn_slot: 0,
             },
         );
         let mut report = NetworkTickReport {
@@ -1507,6 +1749,7 @@ mod tests {
                 principal: None,
                 last_seen_tick: 0,
                 last_snapshot_tick: None,
+                spawn_slot: 0,
             },
         );
         let mut report = NetworkTickReport::default();
@@ -1623,6 +1866,7 @@ mod tests {
                 principal: None,
                 last_seen_tick: 0,
                 last_snapshot_tick: None,
+                spawn_slot: 0,
             },
         );
         let mut report = NetworkTickReport::default();

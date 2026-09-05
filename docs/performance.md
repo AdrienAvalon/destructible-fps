@@ -3,6 +3,49 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — authoritative player movement and construction reach increment
+
+Source state: parent `1d714cf` plus the player-authority increment documented here. Control protocol
+v3 adds a fixed 27-byte player-input message with a separate monotonic sequence. Each authenticated
+session retains only its newest unit-bounded world-space movement intent and advances exactly once
+per 60 Hz authority tick, independent of datagram count. Inputs expire after 15 ticks; fixed
+micrometre position, velocity and division remainders make gravity, acceleration, jumping, bounded
+terminal velocity, swept static-voxel contact resolution and fall recovery repeatable. Sixteen
+deterministic, distinct spawn slots are recycled only after disconnect, and admission fails closed
+when every slot intersects static geometry. Idle expiry releases player, replay and ephemeral
+construction accounting together.
+
+Construction now requires a six-metre server-owned player context. Before commit, the authority
+rejects overlap with every connected player AABB and performs a bounded integer voxel traversal from
+the authoritative eye to the target. Edge and corner ties check every crossed neighbor
+conservatively, so an arbitrary axis order cannot permit corner clipping. The real authenticated-QUIC
+test sends a player input, observes server motion, and then places a voxel from that state.
+Player-state replication, client prediction
+and reconciliation, view authority, dynamic-body character contacts and persistent identity-backed
+inventory remain separate increments.
+
+```bash
+cargo run --release --bin character-benchmark -- --ticks 10000
+cargo run --release --bin construction-benchmark -- --iterations 200
+```
+
+The fixed movement fixture processed 160,000 player steps across 10,000 16-player ticks in 72.994 ms
+on this machine: 2,191,957 player steps/s, with aggregate-tick p50 6.835 us, p95 9.551 us, p99
+13.551 us, and maximum 52.258 us. With canonical context, reach, all-player overlap and line-of-sight
+checks enabled, the construction fixture processed 51,200 placements in 12.773 ms: 4,008,342
+placements/s, with per-placement p50 0.179 us, p95 0.194 us, p99 0.207 us, and maximum 4.640 us.
+These fixtures isolate authority work and do not include network scheduling or future player-state
+broadcast.
+
+The complete promotion passed 104 library tests, four binary tests, and 41 integration tests in both
+debug and release; strict Clippy was clean.
+
+The eight-second RTX 4050 Vulkan smoke initialized in 263.4 ms, streamed all 128 chunks in 34.3 ms,
+kept the single body asleep, and shut down with zero dropped GPU timestamp samples. GPU-total p50
+was 0.184 ms, p95 0.189 ms, p99 0.194 ms, and maximum 0.197 ms. Redraw cadence was compositor-bound
+and included a 33.366 ms p99, so this short window is retained as a renderer regression gate rather
+than a frame-pacing claim.
+
 ## 2026-09-05 — server-authoritative construction increment
 
 Source state: parent `f8d38d9` plus the construction increment documented here. A build request joins

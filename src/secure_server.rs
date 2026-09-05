@@ -177,7 +177,7 @@ impl SecureDedicatedServer {
     ///
     /// # Errors
     ///
-    /// Returns authoritative frame-encoding failures.
+    /// Returns authoritative world- or player-state encoding failures.
     pub fn tick(&mut self) -> Result<SecureNetworkTickReport, NetworkRuntimeError> {
         let mut authority_report = self.authority.begin_tick();
         let (admitted_sessions, mut disconnected_sessions) =

@@ -3,6 +3,27 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — bounded player-state replication increment
+
+Source state: parent `b084d66` plus the player-state increment documented here. Authenticated motion
+is sampled from the 60 Hz authority and broadcast as a complete latest-wins view at 20 Hz. The
+versioned packet stays allocation-bounded and session-sorted, carries the server tick and last input
+acknowledgement, and rejects partial, stale, replayed, duplicate, unordered, unknown-flag, and
+oversized states before replacing the client view. Join, update, and leave counts are derived from
+each accepted complete packet.
+
+At 16 players the exact packet is 1,054 bytes. Twenty packets per second therefore represent
+168,640 bit/s of application payload per client, excluding QUIC/IP overhead, beneath the 256 kbit/s
+sustained gameplay target. A one-player packet is 79 bytes. The server sends at most one state
+datagram per authenticated peer on a broadcast tick; it shares the global bounded egress accounting
+but is prioritized before world commands and body physics. Spatial interest, state deltas and an
+adaptive cadence remain later optimizations rather than unmeasured claims.
+
+The secure integration test proves two authenticated QUIC clients receive the same two-player view,
+then separately proves a moved player's replicated fixed position and acknowledged input before
+construction. The complete promotion passed 108 library tests, four binary tests, and 41 integration
+tests in debug and release; strict Clippy was clean.
+
 ## 2026-09-05 — authoritative player movement and construction reach increment
 
 Source state: parent `1d714cf` plus the player-authority increment documented here. Control protocol

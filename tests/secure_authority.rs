@@ -1,10 +1,11 @@
 use destructible_fps::{
     AuthenticatedPrincipal, BuildCommand, DeltaPacket, ExplosionCommand, IVec3,
     MAX_SESSION_DATAGRAMS_PER_SECOND, Material, OrderedDeltaInbox, PlayerInputCommand,
-    SecureDedicatedServer, SessionCredentialVerifier, Voxel, World, demo_world,
-    encode_build_request, encode_explosion_request, encode_player_input, encode_snapshot_request,
-    establish_session, receive_gameplay_datagram, secure_client_config, secure_server_config,
-    send_gameplay_datagram,
+    PlayerStateInbox, PlayerStateReceiveError, ReplicatedPlayerState, SecureDedicatedServer,
+    SessionCredentialVerifier, Voxel, World, demo_world, encode_build_request,
+    encode_explosion_request, encode_player_input, encode_snapshot_request, establish_session,
+    is_delta_datagram, is_player_state_datagram, receive_gameplay_datagram, secure_client_config,
+    secure_server_config, send_gameplay_datagram,
 };
 use quinn::rustls::{
     RootCertStore,
@@ -85,6 +86,16 @@ async fn two_authenticated_quic_clients_receive_one_authoritative_transaction() 
     }
     assert_eq!(admitted, 2);
     assert_eq!(server.active_sessions(), 2);
+    for _ in 0..=destructible_fps::PLAYER_STATE_BROADCAST_INTERVAL_TICKS {
+        let report = server.tick().expect("player-state broadcast tick");
+        if report.authority.player_state_broadcasts == 2 {
+            break;
+        }
+    }
+    let first_players = receive_player_view(&first, 2).await;
+    let second_players = receive_player_view(&second, 2).await;
+    assert_eq!(first_players, second_players);
+    assert_eq!(first_players.len(), 2);
 
     let command = ExplosionCommand {
         command_id: 1,
@@ -189,6 +200,15 @@ async fn authenticated_quic_client_builds_one_authoritative_voxel() {
             .x
             > 0
     );
+    for _ in 0..=destructible_fps::PLAYER_STATE_BROADCAST_INTERVAL_TICKS {
+        let report = server.tick().expect("player-motion broadcast tick");
+        if report.authority.player_state_broadcasts == 1 {
+            break;
+        }
+    }
+    let replicated = receive_player_motion(&connection, welcome.session_id).await;
+    assert!(replicated.position_um.x > 0);
+    assert_eq!(replicated.last_input_sequence, 1);
     let command = BuildCommand {
         command_id: 1,
         position: IVec3::new(0, 1, 36),
@@ -327,12 +347,73 @@ async fn receive_transaction(connection: &quinn::Connection) -> DeltaPacket {
         .await
         .expect("authoritative datagram deadline")
         .expect("bounded authoritative datagram");
+        if !is_delta_datagram(&payload) {
+            continue;
+        }
         let ready = inbox.push(&payload).expect("valid authoritative frame");
         if let Some(packet) = ready.into_iter().next() {
             return packet;
         }
     }
     panic!("authoritative transaction exceeded bounded test receive loop");
+}
+
+async fn receive_player_view(
+    connection: &quinn::Connection,
+    minimum_players: usize,
+) -> Vec<ReplicatedPlayerState> {
+    let mut inbox = PlayerStateInbox::default();
+    for _ in 0..256 {
+        let payload = timeout(
+            Duration::from_secs(2),
+            receive_gameplay_datagram(connection),
+        )
+        .await
+        .expect("player-state datagram deadline")
+        .expect("bounded player-state datagram");
+        if !is_player_state_datagram(&payload) {
+            continue;
+        }
+        match inbox.receive(&payload) {
+            Ok(_report) => {}
+            Err(PlayerStateReceiveError::StaleServerTick { .. }) => continue,
+            Err(error) => panic!("invalid player-state datagram: {error}"),
+        }
+        if inbox.players().len() >= minimum_players {
+            return inbox.players().collect();
+        }
+    }
+    panic!("player view exceeded bounded test receive loop");
+}
+
+async fn receive_player_motion(
+    connection: &quinn::Connection,
+    session_id: u64,
+) -> ReplicatedPlayerState {
+    let mut inbox = PlayerStateInbox::default();
+    for _ in 0..256 {
+        let payload = timeout(
+            Duration::from_secs(2),
+            receive_gameplay_datagram(connection),
+        )
+        .await
+        .expect("player-motion datagram deadline")
+        .expect("bounded player-motion datagram");
+        if !is_player_state_datagram(&payload) {
+            continue;
+        }
+        match inbox.receive(&payload) {
+            Ok(_report) => {}
+            Err(PlayerStateReceiveError::StaleServerTick { .. }) => continue,
+            Err(error) => panic!("invalid player-motion datagram: {error}"),
+        }
+        if let Some(player) = inbox.player(session_id)
+            && player.position_um.x > 0
+        {
+            return player;
+        }
+    }
+    panic!("player motion exceeded bounded test receive loop");
 }
 
 fn trusted_client(certificate: CertificateDer<'static>) -> Endpoint {

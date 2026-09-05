@@ -13,6 +13,7 @@ pub mod network;
 pub mod oidc;
 pub mod physics;
 pub mod player;
+pub mod player_replication;
 pub mod render;
 pub mod replication;
 pub mod secure_server;
@@ -55,6 +56,12 @@ pub use physics::{
     MAX_BROAD_PHASE_PAIRS, MICROMETERS_PER_VOXEL, RigidBodyDescriptor, RigidBodyState,
     SERVER_PHYSICS_HZ, apply_impulse_at_local_point, apply_linear_impulse, broad_phase_pairs,
     step_rigid_bodies, step_rigid_body, valid_fixed_quaternion, valid_rigid_body_state,
+};
+pub use player_replication::{
+    MAX_PLAYER_STATE_DATAGRAM_BYTES, MAX_REPLICATED_PLAYERS, PLAYER_STATE_BROADCAST_HZ,
+    PLAYER_STATE_BROADCAST_INTERVAL_TICKS, PlayerStateApplyReport, PlayerStateCodecError,
+    PlayerStateInbox, PlayerStatePacket, PlayerStateReceiveError, ReplicatedPlayerState,
+    decode_player_state_packet, encode_player_state_packet, is_player_state_datagram,
 };
 pub use replication::{
     AuthoritativeServer, BodyStateUpdate, BodyVoxelAssignment, BuildCommand, BuildReport,

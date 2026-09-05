@@ -23,7 +23,7 @@ The dedicated server owns commands, damage, fracture, structural separation, rig
 and persistent world state. Clients predict only reversible player and weapon motion. A client never
 announces that a wall was destroyed; it requests an action and receives the resulting transaction.
 
-Delta protocol v5 uses monotonically increasing sequences, independent 128-bit pre/post
+Delta protocol v6 uses monotonically increasing sequences, independent 128-bit pre/post
 fingerprints for the static world and active body set, bounded fragments, and before-state
 validation. Detached body membership and integer dynamic state travel in separate canonical frames;
 both are reconstructed and validated before any static-world write. Missing data stops application;
@@ -70,6 +70,17 @@ can use immutable connection IDs. An already-authenticated connection is admitte
 unique session ID and an opaque 256-bit principal; a wire `Hello` cannot replace it. Disconnect,
 legacy re-handshake, and idle expiry remove queued commands, recovery work, and snapshot state for
 the old session before its peer key may be reused.
+
+Authenticated character motion uses an independent player-state v1 datagram rather than entering
+the ordered permanent-world transaction stream. Every third 60 Hz authority tick, the server emits
+one complete session-sorted view at 20 Hz to every authenticated peer. The packet carries the server
+tick, fixed-micrometre position and velocity, grounded state, and latest accepted input sequence for
+at most 16 players; its maximum encoded size is 1,054 bytes, below the secure 1,100-byte application
+ceiling. A client atomically replaces its prior view only when the server tick advances, so loss does
+not stall motion while replay, reordering, duplicate IDs, malformed flags, and partial views cannot
+roll state backward. Absence from a newer complete view means the session left. At the cap, this
+correctness baseline consumes 168.64 kbit/s of payload per client; interpolation, delta baselines,
+and spatial interest remain required before the larger scale gate.
 
 The dedicated-authority sessions described above are deliberately loopback-only and unauthenticated;
 the snapshot hash is an integrity check, not a MAC, and that legacy transport provides no

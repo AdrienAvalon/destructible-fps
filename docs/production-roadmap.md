@@ -104,8 +104,10 @@ streaming, with no synchronous world meshing on the presentation thread.
   slice delivered; persistent inventory, recipes, removal and dynamic attachment remain);
 - fixed-step authoritative character movement with bounded newest-input retention, independent
   input replay protection, stale-input expiry, gravity, jumping, static collision, fall recovery and
-  session cleanup (server slice delivered; replication, prediction/reconciliation, view authority
-  and dynamic-body contact remain).
+  session cleanup (server slice delivered); a 20 Hz, single-datagram, full-view state stream now
+  replicates fixed position, velocity, grounded state and input acknowledgement for all 16 sessions
+  (delivered; interpolation, prediction/reconciliation, view authority and dynamic-body contact
+  remain).
 
 Exit gate: removing a load-bearing member causes a repeatable progressive collapse; the worst-case
 fixture remains inside the 60 Hz server budget and converges bit-for-bit on replicas.
@@ -133,11 +135,14 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - 32-task bounded concurrent admission, 64-event control and 256-datagram gameplay queues,
   cryptographic server nonces, monotonic session allocation, per-session ingress limits, and
   two-client secure-authority convergence (delivered in-process over real QUIC sockets);
+- player-state protocol v1 with a sorted 16-player cap, 1,054-byte maximum packet, 20 Hz latest-wins
+  broadcast, input acknowledgement, stale/replay rejection, disconnect removal, and real two-client
+  QUIC convergence (delivered; interpolation, prediction and spatial delta baselines remain);
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
   Unix permission checks, static-JWKS expiry, signal-aware shutdown, and a four-case external-process
   matrix (delivered for loopback; online refresh and remote policy remain);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
-- entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
+- broader entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
 - client input prediction, server reconciliation, interpolation, and bounded lag compensation;
 - configurable stochastic and trace-replay impairment plus a 32-client process harness;

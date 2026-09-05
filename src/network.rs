@@ -3,9 +3,10 @@
 use crate::{
     AuthenticatedPrincipal, AuthoritativePlayer, AuthoritativePlayerState, AuthoritativeServer,
     BuildCommand, ClientControlMessage, CodecError, DeltaPacket, ExplosionCommand,
-    FixedMicrometers3, FrameAssembler, MICROMETERS_PER_VOXEL, PhysicsTickReport,
-    PlayerInputCommand, World, decode_client_control, decode_frame, encode_frames,
-    encode_server_welcome, encode_snapshot_frames,
+    FixedMicrometers3, FrameAssembler, MAX_REPLICATED_PLAYERS, MICROMETERS_PER_VOXEL,
+    PLAYER_STATE_BROADCAST_INTERVAL_TICKS, PhysicsTickReport, PlayerInputCommand,
+    PlayerStateCodecError, ReplicatedPlayerState, World, decode_client_control, decode_frame,
+    encode_frames, encode_player_state_packet, encode_server_welcome, encode_snapshot_frames,
 };
 use core::fmt;
 use std::{
@@ -15,7 +16,7 @@ use std::{
     sync::Arc,
 };
 
-pub const MAX_SERVER_PEERS: usize = 16;
+pub const MAX_SERVER_PEERS: usize = MAX_REPLICATED_PLAYERS;
 pub const MAX_QUEUED_COMMANDS: usize = 256;
 pub const MAX_QUEUED_REPAIRS: usize = 64;
 pub const MAX_RECEIVED_DATAGRAMS_PER_TICK: usize = 64;
@@ -82,6 +83,8 @@ pub struct NetworkTickReport {
     pub player_collisions: usize,
     pub expired_player_inputs: usize,
     pub player_spawn_rejections: usize,
+    pub player_state_broadcasts: usize,
+    pub player_state_drops: usize,
     pub outbound_attempts: usize,
     pub outbound_datagrams: usize,
     pub outbound_drops: usize,
@@ -92,6 +95,7 @@ pub struct NetworkTickReport {
 pub enum NetworkRuntimeError {
     Io(io::Error),
     Codec(CodecError),
+    PlayerStateCodec(PlayerStateCodecError),
     InvalidApplicationDatagramBytes(usize),
 }
 
@@ -100,6 +104,7 @@ impl fmt::Display for NetworkRuntimeError {
         match self {
             Self::Io(error) => error.fmt(formatter),
             Self::Codec(error) => error.fmt(formatter),
+            Self::PlayerStateCodec(error) => error.fmt(formatter),
             Self::InvalidApplicationDatagramBytes(bytes) => {
                 write!(formatter, "invalid application datagram bound {bytes}")
             }
@@ -118,6 +123,12 @@ impl From<io::Error> for NetworkRuntimeError {
 impl From<CodecError> for NetworkRuntimeError {
     fn from(value: CodecError) -> Self {
         Self::Codec(value)
+    }
+}
+
+impl From<PlayerStateCodecError> for NetworkRuntimeError {
+    fn from(value: PlayerStateCodecError) -> Self {
+        Self::PlayerStateCodec(value)
     }
 }
 
@@ -409,7 +420,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an impossible authoritative frame-encoding failure.
+    /// Returns an impossible authoritative world- or player-state encoding failure.
     pub fn complete_tick(
         &mut self,
         sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
@@ -418,6 +429,7 @@ where
         self.process_repairs(sender, &mut report);
         self.service_snapshot_transfers(sender, &mut report);
         self.simulate_players(&mut report);
+        self.broadcast_player_states(sender, &mut report)?;
         self.simulate_commands(sender, &mut report)?;
         let (physics_packet, physics) = self.authority.advance_physics();
         report.physics = physics;
@@ -988,6 +1000,55 @@ where
         }
     }
 
+    fn broadcast_player_states(
+        &self,
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
+        report: &mut NetworkTickReport,
+    ) -> Result<(), NetworkRuntimeError> {
+        if !self
+            .tick
+            .is_multiple_of(PLAYER_STATE_BROADCAST_INTERVAL_TICKS)
+        {
+            return Ok(());
+        }
+        let players = self
+            .players
+            .iter()
+            .filter(|(session_id, _player)| {
+                self.peers
+                    .values()
+                    .any(|peer| peer.principal.is_some() && peer.session_id == **session_id)
+            })
+            .map(|(session_id, player)| {
+                ReplicatedPlayerState::from_authoritative(*session_id, player.state())
+            })
+            .collect::<Vec<_>>();
+        if players.is_empty() {
+            return Ok(());
+        }
+        let packet = encode_player_state_packet(self.tick, &players)?;
+        for (destination, _peer) in self
+            .peers
+            .iter()
+            .filter(|(_destination, peer)| peer.principal.is_some())
+        {
+            if report.outbound_attempts >= MAX_OUTBOUND_DATAGRAMS_PER_TICK {
+                report.outbound_drops += 1;
+                report.player_state_drops += 1;
+                continue;
+            }
+            report.outbound_attempts += 1;
+            if sender(*destination, &packet) {
+                report.outbound_datagrams += 1;
+                report.player_state_broadcasts += 1;
+            } else {
+                report.outbound_drops += 1;
+                report.player_state_drops += 1;
+            }
+        }
+        Ok(())
+    }
+
     fn broadcast(
         &mut self,
         packet: &DeltaPacket,
@@ -1141,7 +1202,7 @@ impl DedicatedServer {
     ///
     /// # Errors
     ///
-    /// Returns non-transient socket failures or authoritative frame-encoding failures.
+    /// Returns non-transient socket failures or authoritative state-encoding failures.
     pub fn tick(&mut self) -> Result<NetworkTickReport, NetworkRuntimeError> {
         let Self { socket, core } = self;
         let mut report = core.begin_tick();
@@ -1525,9 +1586,14 @@ mod tests {
             server.authority().world().voxel(command.position),
             crate::Voxel::new(crate::Material::Wood)
         );
+        assert_eq!(report.player_state_broadcasts, 0);
         assert_eq!(frames.len(), 1);
+        let delta = frames
+            .iter()
+            .find(|frame| crate::is_delta_datagram(frame))
+            .expect("construction delta frame");
         assert_eq!(
-            decode_frame(&frames[0])
+            decode_frame(delta)
                 .expect("construction delta")
                 .changes
                 .len(),
@@ -1591,6 +1657,80 @@ mod tests {
             &mut report,
         );
         assert_eq!(report.player_inputs_rejected, 1);
+    }
+
+    #[test]
+    fn authenticated_player_state_is_broadcast_at_a_bounded_cadence() {
+        let mut world = World::default();
+        world.fill_box(
+            crate::IVec3::new(-2, 0, 38),
+            crate::IVec3::new(2, 0, 42),
+            crate::Voxel::new(crate::Material::Stone),
+        );
+        let mut server = AuthorityCore::new(world, 1_100).expect("authority core");
+        let principal = AuthenticatedPrincipal::new(
+            std::num::NonZeroU64::new(94).expect("non-zero test principal"),
+        );
+        let mut report = server.begin_tick();
+        assert!(server.admit_authenticated(1_u8, 17, 19, principal, &mut report));
+        server.ingest_datagram(
+            1,
+            &crate::encode_player_input(
+                19,
+                PlayerInputCommand {
+                    input_sequence: 1,
+                    movement_x_per_mille: 1_000,
+                    ..PlayerInputCommand::default()
+                },
+            ),
+            &mut |_destination, _payload| true,
+            &mut report,
+        );
+        let mut datagrams = Vec::new();
+        let first = server
+            .complete_tick(
+                &mut |_destination, payload| {
+                    datagrams.push(payload.to_vec());
+                    true
+                },
+                report,
+            )
+            .expect("first player tick");
+        assert_eq!(first.player_state_broadcasts, 0);
+        assert!(datagrams.is_empty());
+
+        let second = server.begin_tick();
+        let second = server
+            .complete_tick(
+                &mut |_destination, payload| {
+                    datagrams.push(payload.to_vec());
+                    true
+                },
+                second,
+            )
+            .expect("second player tick");
+        assert_eq!(second.player_state_broadcasts, 0);
+        assert!(datagrams.is_empty());
+
+        let third = server.begin_tick();
+        let third = server
+            .complete_tick(
+                &mut |destination, payload| {
+                    assert_eq!(destination, 1);
+                    datagrams.push(payload.to_vec());
+                    true
+                },
+                third,
+            )
+            .expect("third player tick");
+        assert_eq!(third.player_state_broadcasts, 1);
+        assert_eq!(datagrams.len(), 1);
+        let packet = crate::decode_player_state_packet(&datagrams[0]).expect("player-state packet");
+        assert_eq!(packet.server_tick, 3);
+        assert_eq!(packet.players.len(), 1);
+        assert_eq!(packet.players[0].session_id, 19);
+        assert_eq!(packet.players[0].last_input_sequence, 1);
+        assert!(packet.players[0].position_um.x > 0);
     }
 
     #[test]

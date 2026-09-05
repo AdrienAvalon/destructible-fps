@@ -1,7 +1,7 @@
 //! In-process playable session that still crosses the authoritative wire-format boundary.
 
 use crate::{
-    AuthoritativeServer, BodyId, BuildCommand, BuildReport, CHUNK_EDGE, ClientReplica, CodecError,
+    AuthoritativeServer, BodyId, BuildCommand, BuildReport, ClientReplica, CodecError,
     CommandError, DestructionReport, ExplosionCommand, FixedMicrometers3, FrameAssembler, IVec3,
     MAX_BUILD_REACH_VOXELS, MICROMETERS_PER_VOXEL, Material, PLAYER_EYE_HEIGHT_UM,
     PLAYER_HEIGHT_UM, PLAYER_RADIUS_UM, PhysicsTickReport, PlayerBuildContext, ReplicationError,
@@ -319,50 +319,25 @@ fn local_build_context(eye: Vec3) -> Option<PlayerBuildContext> {
 pub fn dirty_chunks(changes: &[VoxelChange]) -> Vec<IVec3> {
     let mut chunks = HashSet::new();
     for change in changes {
-        let primary = chunk_position(change.position);
-        chunks.insert(primary);
-        insert_boundary_neighbor(
-            &mut chunks,
-            primary,
-            change.position.x.rem_euclid(CHUNK_EDGE),
-            IVec3::new(1, 0, 0),
-        );
-        insert_boundary_neighbor(
-            &mut chunks,
-            primary,
-            change.position.y.rem_euclid(CHUNK_EDGE),
-            IVec3::new(0, 1, 0),
-        );
-        insert_boundary_neighbor(
-            &mut chunks,
-            primary,
-            change.position.z.rem_euclid(CHUNK_EDGE),
-            IVec3::new(0, 0, 1),
-        );
+        // A Surface Nets vertex samples the eight voxel centres of its cell. At a chunk edge, one
+        // changed voxel can therefore alter meshes across a face, edge, or corner. Sampling the
+        // 3^3 voxel neighborhood yields at most 2^3 distinct chunks and also covers exact cube-face
+        // culling without separate boundary rules.
+        for x in -1_i32..=1 {
+            for y in -1_i32..=1 {
+                for z in -1_i32..=1 {
+                    chunks.insert(chunk_position(IVec3::new(
+                        change.position.x.saturating_add(x),
+                        change.position.y.saturating_add(y),
+                        change.position.z.saturating_add(z),
+                    )));
+                }
+            }
+        }
     }
     let mut chunks: Vec<_> = chunks.into_iter().collect();
     chunks.sort_unstable();
     chunks
-}
-
-fn insert_boundary_neighbor(
-    chunks: &mut HashSet<IVec3>,
-    primary: IVec3,
-    local: i32,
-    positive_axis: IVec3,
-) {
-    let direction = if local == 0 {
-        -1
-    } else if local == CHUNK_EDGE - 1 {
-        1
-    } else {
-        return;
-    };
-    chunks.insert(IVec3::new(
-        primary.x + positive_axis.x * direction,
-        primary.y + positive_axis.y * direction,
-        primary.z + positive_axis.z * direction,
-    ));
 }
 
 #[cfg(test)]
@@ -450,6 +425,8 @@ mod tests {
             after: Voxel::AIR,
         };
         assert_eq!(dirty_chunks(&[change(IVec3::new(4, 5, 6))]).len(), 1);
-        assert_eq!(dirty_chunks(&[change(IVec3::new(15, 0, -16))]).len(), 4);
+        assert_eq!(dirty_chunks(&[change(IVec3::new(15, 5, 6))]).len(), 2);
+        assert_eq!(dirty_chunks(&[change(IVec3::new(15, 0, 6))]).len(), 4);
+        assert_eq!(dirty_chunks(&[change(IVec3::new(15, 0, -16))]).len(), 8);
     }
 }

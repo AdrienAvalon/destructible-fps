@@ -965,7 +965,6 @@ fn missing_retained_delta_falls_back_to_a_process_snapshot() {
     let mut received_snapshot_frames = 0_usize;
     let mut dropped_snapshot_frame = false;
     let mut requested_missing_fragments = false;
-    let repair_at = Instant::now() + Duration::from_millis(1_200);
     let mut buffer = [0_u8; 1_201];
     while Instant::now() < deadline && snapshot.is_none() {
         loop {
@@ -988,7 +987,7 @@ fn missing_retained_delta_falls_back_to_a_process_snapshot() {
                 Err(error) => panic!("snapshot receive failed: {error}"),
             }
         }
-        if !requested_missing_fragments && Instant::now() >= repair_at {
+        if !requested_missing_fragments && exactly_one_snapshot_fragment_is_missing(&assembler) {
             let snapshot_id = assembler
                 .active_snapshot_id()
                 .expect("incomplete snapshot has an active ID");
@@ -1034,6 +1033,12 @@ fn missing_retained_delta_falls_back_to_a_process_snapshot() {
 
     let status = wait_for_child_exit(&mut child, Duration::from_secs(2));
     assert!(status.success());
+}
+
+fn exactly_one_snapshot_fragment_is_missing(assembler: &SnapshotAssembler) -> bool {
+    assembler
+        .active_fragment_progress()
+        .is_some_and(|(received, expected)| received.checked_add(1) == Some(expected))
 }
 
 #[test]

@@ -1202,8 +1202,11 @@ fn light_view_projection() -> Mat4 {
 
 fn chunk_intersects_frustum(chunk: IVec3, view_projection: Mat4) -> bool {
     let edge = CHUNK_EDGE as f32;
-    let minimum = Vec3::new(chunk.x as f32, chunk.y as f32, chunk.z as f32) * edge;
-    let maximum = minimum + Vec3::splat(edge);
+    // Natural Surface Nets vertices are owned by the chunk containing the solid endpoint, but a
+    // surrounding cell may extend one voxel beyond that chunk. Keep culling conservative at seams.
+    let exact_minimum = Vec3::new(chunk.x as f32, chunk.y as f32, chunk.z as f32) * edge;
+    let minimum = exact_minimum - Vec3::ONE;
+    let maximum = exact_minimum + Vec3::splat(edge + 1.0);
     aabb_intersects_frustum(minimum, maximum, view_projection)
 }
 

@@ -82,8 +82,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
-- face-culled chunk meshes, distance-prioritized asynchronous initial streaming, and bounded
-  background remeshing limited to chunks whose visible boundary changed;
+- exact face-culled architectural meshes plus crack-free Surface Nets for soil and stone, using a
+  fixed 17³-cell cache per chunk, distance-prioritized asynchronous initial streaming, and bounded
+  background remeshing across every affected face, edge, or corner;
 - bounded off-thread body meshing in local space, with fixed-capacity GPU instance transforms,
   independent body frustum culling, and participation in both world and shadow passes;
 - 60 Hz server-authoritative body motion in deterministic micrometre units, mass-weighted blast
@@ -105,9 +106,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not yet a photorealistic or production multiplayer
-game. The first realistic-material and atmosphere foundation is live, but smooth hybrid terrain and
-fracture surfaces, layered damage, authored/scanned assets, vegetation, reflections, temporal
-anti-aliasing and post-processing remain visual gates. Exact convex contact manifolds, gyroscopic
+game. The first realistic-material, atmosphere, and smooth hybrid-terrain foundations are live, but
+irregular fracture surfaces, layered damage, authored/scanned assets, vegetation, reflections,
+temporal anti-aliasing and post-processing remain visual gates. Exact convex contact manifolds, gyroscopic
 response, deeper constraint-island convergence, progressive structural stress, remote-authority
 exposure, automated certificate issuance, first-person arms/weapon presentation, transport pacing
 and congestion control, audio, and large-world residency streaming also remain explicit later
@@ -147,6 +148,8 @@ constraint-island convergence are not claimed yet.
 ![Showcase orbit around the multi-material building](docs/screenshots/03-orbit-interior.png)
 
 ![First procedural PBR and atmosphere pass](docs/screenshots/04-procedural-pbr-atmosphere.png)
+
+![Hybrid Surface Nets terrain around exact architecture](docs/screenshots/05-hybrid-natural-surface.png)
 
 ## Run
 

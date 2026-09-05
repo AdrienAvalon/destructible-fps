@@ -369,6 +369,14 @@ impl SnapshotAssembler {
         self.active.as_ref().map(|pending| pending.snapshot_id)
     }
 
+    /// Returns exact received and expected fragment counts for the active bounded transfer.
+    #[must_use]
+    pub fn active_fragment_progress(&self) -> Option<(usize, usize)> {
+        self.active
+            .as_ref()
+            .map(|pending| (pending.received_fragments, pending.fragments.len()))
+    }
+
     /// Returns at most 64 fixed bitmap windows describing every currently missing fragment.
     #[must_use]
     pub fn missing_fragment_windows(&self) -> Vec<(u16, u64)> {
@@ -827,6 +835,10 @@ mod tests {
         }
 
         assert_eq!(assembler.active_snapshot_id(), Some(7));
+        assert_eq!(
+            assembler.active_fragment_progress(),
+            Some((frames.len() - 2, frames.len()))
+        );
         assert_eq!(assembler.missing_fragment_windows(), vec![(0, 1), (64, 2)]);
     }
 

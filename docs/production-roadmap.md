@@ -64,6 +64,9 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
   image-based lighting, reflections, and a full HDR pipeline remain;
 - 3×3 PCF sun-shadow filtering (delivered); cascaded sun shadows, local lights, temporal
   anti-aliasing, and measured dynamic resolution remain;
+- hybrid chunk meshing with fixed-cache Surface Nets for soil/stone, exact authored architecture,
+  six-direction seam proofs, adaptive diagonals and corner-aware remeshing (delivered for static
+  terrain); smooth detached fracture surfaces and mesh-buffer deduplication remain;
 - deterministic screenshot scenes and image-difference regression thresholds.
 
 Exit gate: the representative breach scene stays within the client budgets while remeshing and
@@ -232,8 +235,8 @@ documented tools and source assets.
 ### Stage 6 — photorealistic environments
 
 - calibrated physically based materials and physically plausible sun, sky, exposure, and atmosphere
-  (procedural material/atmosphere foundation delivered; calibration, authored inputs and HDR
-  exposure remain);
+  (procedural material/atmosphere foundation and hybrid natural terrain delivered; calibration,
+  authored inputs and HDR exposure remain);
 - terrain blending, decals, vegetation, weather, water, particles, volumetric dust, and destruction
   residue;
 - scalable indirect lighting/reflections with explicit quality tiers and stable temporal behavior;

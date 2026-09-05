@@ -1468,3 +1468,46 @@ This first material and atmosphere pass uses under ten percent of one 60 Hz fram
 this machine. It is not photorealistic by itself: smooth hybrid surface extraction, layered
 fracture, calibrated assets, temporal stability and multi-platform image review remain explicit
 gates.
+
+## 2026-09-05 — hybrid natural surfaces and deterministic quarry terrain
+
+Source state: parent `a25baf8` plus the first hybrid-geometry increment. Soil and stone now render
+through Surface Nets while brick, concrete, wood, steel and glass keep exact authored edges. Each
+chunk uses one fixed 17³-cell temporary cache. Natural-air transitions have a unique solid-endpoint
+owner, adaptive quad diagonals, six-direction bit-identical seam tests, and conservative culling
+bounds. Exact architectural faces close natural/architecture junctions. A voxel edit invalidates at
+most the eight chunks sharing its face, edge, or corner; the authoritative world, collision,
+physics, snapshots and network formats remain unchanged.
+
+The deterministic showcase height field adds broad quarry banks while preserving a flat building
+pad, player spawn and shot corridor. The representative five-second release showcase used the RTX
+4050 Laptop GPU through Vulkan at a 1,440×900 logical window. After its scripted breach it rendered
+98,078 solid voxels, 48,635 surface quads, one detached body and two player instances. Initial
+asynchronous streaming completed in 44.3 ms. The final view submitted 94 visible world draws and 130
+shadow draws.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 185 passed debug; 185 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 70 passed debug; 70 passed release |
+| Destruction p99, 500 events | 0.386 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.352 ms |
+| Physics p99, 1,024 bodies | 1.163 ms |
+| Snapshot encode + decode + install p99 | 13.020 ms |
+| Snapshot wire size | 1,181 frames / 1.351 MiB |
+| Initial asynchronous streaming | 44.3 ms |
+| CPU frame-work p50 / p95 / p99 | 2.167 / 11.113 / 13.938 ms |
+| GPU shadows p50 / p95 / p99 | 0.067 / 0.090 / 0.097 ms |
+| GPU world + HUD p50 / p95 / p99 | 1.065 / 1.460 / 1.577 ms |
+| Vulkan GPU total p50 / p95 / p99 | 1.141 / 1.564 / 1.688 ms |
+| Vulkan GPU maximum | 1.701 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+The larger authored terrain increased the representative snapshot to 1.351 MiB and exposed a
+brittle process test that requested loss repair after a fixed 1.2 seconds while the initial paced
+transfer was still active. Repair now starts deterministically when the assembler has received all
+but the deliberately dropped fragment; this path passed three consecutive release runs before both
+complete matrices passed. GPU p99 remains about ten percent of one 60 Hz frame. The rounded mesh is
+deliberately visual-only for this increment: conservative voxel collision can precede the visible
+surface near curved edges, and smooth detached fracture bodies remain a later gate.

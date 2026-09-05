@@ -1,6 +1,7 @@
 use destructible_fps::{
-    MAX_LAN_CERTIFICATE_CHAIN_BYTES, MAX_LAN_POLICY_BYTES, MAX_PENDING_QUIC_HANDSHAKES,
-    MAX_SECURE_GAMEPLAY_EVENTS, MAX_SERVER_PEERS, MAX_SESSION_DATAGRAMS_PER_SECOND,
+    MAX_LAN_CERTIFICATE_CHAIN_BYTES, MAX_LAN_POLICY_BYTES, MAX_LAN_TLS_PRIVATE_KEY_BYTES,
+    MAX_PENDING_QUIC_HANDSHAKES, MAX_SECURE_GAMEPLAY_EVENTS, MAX_SERVER_PEERS,
+    MAX_SESSION_DATAGRAMS_PER_SECOND,
 };
 use rcgen::{
     BasicConstraints, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
@@ -30,6 +31,7 @@ fn checker_accepts_one_bounded_policy_without_echoing_topology() {
     assert!(!stdout.contains("identity"));
     assert!(!stdout.contains("team:avalon"));
     assert!(stdout.contains("certificate_verified=false"));
+    assert!(stdout.contains("private_key_verified=false"));
     assert!(output.stderr.is_empty());
 }
 
@@ -83,7 +85,7 @@ fn checker_attests_a_real_private_host_assignment_when_available() {
 #[test]
 fn checker_attests_an_exact_certificate_without_echoing_identity_or_paths() {
     let fixture = Fixture::new();
-    let (certificate_chain, trust_anchor) = fixture.write_certificate_material();
+    let (certificate_chain, trust_anchor, _private_key) = fixture.write_certificate_material();
     let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
         .arg("--certificate-chain")
         .arg(&certificate_chain)
@@ -95,6 +97,7 @@ fn checker_attests_an_exact_certificate_without_echoing_identity_or_paths() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 attestation output");
     assert!(stdout.contains("certificate_verified=true"));
+    assert!(stdout.contains("private_key_verified=false"));
     assert!(!stdout.contains("game.home.arpa"));
     assert!(!stdout.contains(&certificate_chain.display().to_string()));
     assert!(!stdout.contains(&trust_anchor.display().to_string()));
@@ -102,13 +105,66 @@ fn checker_attests_an_exact_certificate_without_echoing_identity_or_paths() {
 }
 
 #[test]
+fn checker_attests_a_matching_private_key_without_disclosing_it() {
+    let fixture = Fixture::new();
+    let (certificate_chain, trust_anchor, private_key) = fixture.write_certificate_material();
+    let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
+        .arg("--certificate-chain")
+        .arg(&certificate_chain)
+        .arg("--trust-anchor")
+        .arg(&trust_anchor)
+        .arg("--private-key")
+        .arg(&private_key)
+        .arg(&fixture.policy)
+        .output()
+        .expect("run LAN TLS identity attestation");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 identity output");
+    assert!(stdout.contains("certificate_verified=true"));
+    assert!(stdout.contains("private_key_verified=true"));
+    assert!(!stdout.contains(&private_key.display().to_string()));
+    assert!(!stdout.contains("PRIVATE KEY"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn checker_rejects_a_mismatched_private_key() {
+    let fixture = Fixture::new();
+    let (certificate_chain, trust_anchor, private_key) = fixture.write_certificate_material();
+    fs::write(
+        &private_key,
+        KeyPair::generate().expect("mismatched key").serialize_pem(),
+    )
+    .expect("replace TLS private key");
+    let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
+        .arg("--certificate-chain")
+        .arg(certificate_chain)
+        .arg("--trust-anchor")
+        .arg(trust_anchor)
+        .arg("--private-key")
+        .arg(&private_key)
+        .arg(&fixture.policy)
+        .output()
+        .expect("run mismatched TLS identity attestation");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 mismatch output");
+    assert!(!stderr.contains(&private_key.display().to_string()));
+    assert!(!stderr.contains("PRIVATE KEY"));
+}
+
+#[test]
 fn checker_requires_paired_absolute_certificate_paths() {
     let fixture = Fixture::new();
-    let (certificate_chain, trust_anchor) = fixture.write_certificate_material();
+    let (certificate_chain, trust_anchor, private_key) = fixture.write_certificate_material();
     for arguments in [
         vec![
             "--certificate-chain".into(),
             certificate_chain.as_os_str().to_owned(),
+            fixture.policy.as_os_str().to_owned(),
+        ],
+        vec![
+            "--private-key".into(),
+            private_key.as_os_str().to_owned(),
             fixture.policy.as_os_str().to_owned(),
         ],
         vec![
@@ -135,7 +191,7 @@ fn checker_requires_paired_absolute_certificate_paths() {
 #[test]
 fn checker_bounds_certificate_files_before_pem_parsing() {
     let fixture = Fixture::new();
-    let (certificate_chain, trust_anchor) = fixture.write_certificate_material();
+    let (certificate_chain, trust_anchor, _private_key) = fixture.write_certificate_material();
     fs::write(
         &certificate_chain,
         vec![b'A'; MAX_LAN_CERTIFICATE_CHAIN_BYTES + 1],
@@ -152,13 +208,54 @@ fn checker_bounds_certificate_files_before_pem_parsing() {
     assert!(!output.status.success());
 }
 
+#[test]
+fn checker_bounds_private_key_files_before_parsing() {
+    let fixture = Fixture::new();
+    let (certificate_chain, trust_anchor, private_key) = fixture.write_certificate_material();
+    fs::write(&private_key, vec![b'A'; MAX_LAN_TLS_PRIVATE_KEY_BYTES + 1])
+        .expect("oversized TLS private key");
+    let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
+        .arg("--certificate-chain")
+        .arg(certificate_chain)
+        .arg("--trust-anchor")
+        .arg(trust_anchor)
+        .arg("--private-key")
+        .arg(private_key)
+        .arg(&fixture.policy)
+        .output()
+        .expect("run oversized TLS identity attestation");
+    assert!(!output.status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn checker_rejects_a_group_readable_private_key() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let (certificate_chain, trust_anchor, private_key) = fixture.write_certificate_material();
+    fs::set_permissions(&private_key, fs::Permissions::from_mode(0o640))
+        .expect("unsafe TLS key permissions");
+    let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
+        .arg("--certificate-chain")
+        .arg(certificate_chain)
+        .arg("--trust-anchor")
+        .arg(trust_anchor)
+        .arg("--private-key")
+        .arg(private_key)
+        .arg(&fixture.policy)
+        .output()
+        .expect("run unsafe TLS identity attestation");
+    assert!(!output.status.success());
+}
+
 #[cfg(unix)]
 #[test]
 fn checker_rejects_a_symlinked_certificate_file() {
     use std::os::unix::fs::symlink;
 
     let fixture = Fixture::new();
-    let (certificate_chain, trust_anchor) = fixture.write_certificate_material();
+    let (certificate_chain, trust_anchor, _private_key) = fixture.write_certificate_material();
     let certificate_link = fixture.directory.join("server-link.pem");
     symlink(&certificate_chain, &certificate_link).expect("certificate symlink");
     let output = Command::new(env!("CARGO_BIN_EXE_lan-policy-check"))
@@ -229,7 +326,7 @@ impl Fixture {
         Self { directory, policy }
     }
 
-    fn write_certificate_material(&self) -> (PathBuf, PathBuf) {
+    fn write_certificate_material(&self) -> (PathBuf, PathBuf, PathBuf) {
         let mut root_parameters =
             rcgen::CertificateParams::new(Vec::<String>::new()).expect("root parameters");
         root_parameters.not_before = rcgen::date_time_ymd(2020, 1, 1);
@@ -255,9 +352,18 @@ impl Fixture {
 
         let certificate_chain = self.directory.join("server-chain.pem");
         let trust_anchor = self.directory.join("reviewed-root.pem");
+        let private_key = self.directory.join("server-key.pem");
         fs::write(&certificate_chain, leaf.pem()).expect("server certificate chain");
         fs::write(&trust_anchor, root.pem()).expect("reviewed trust anchor");
-        (certificate_chain, trust_anchor)
+        fs::write(&private_key, leaf_key.serialize_pem()).expect("TLS private key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600))
+                .expect("private TLS key permissions");
+        }
+        (certificate_chain, trust_anchor, private_key)
     }
 }
 

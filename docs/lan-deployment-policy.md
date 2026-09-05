@@ -26,15 +26,18 @@ cargo run --release --bin lan-policy-check -- \
   --verify-host \
   --certificate-chain /absolute/path/to/server-chain.pem \
   --trust-anchor /absolute/path/to/reviewed-root.pem \
+  --private-key /absolute/path/to/server-key.pem \
   /absolute/path/to/lan-policy.json
 ```
 
 The first command validates only the document. The second additionally takes one read-only host
 interface snapshot and proves the exact assignment. The certificate options are inseparable and
 accept only absolute paths to one ordered leaf/intermediate chain and one explicitly reviewed
-self-issued CA. They can be combined with host verification. The checker prints only the schema
-version, source-range count, remaining lifetime, and proof booleans. It does not echo topology,
-certificate names, paths, fingerprints, identities, or owner fields.
+self-issued CA. An optional absolute `--private-key` is valid only with both certificate options and
+proves that the protected key matches the attested leaf. All checks can be combined. The checker
+prints only the schema version, source-range count, remaining lifetime, and proof booleans. It does
+not echo topology, certificate names, paths, fingerprints, private material, identities, or owner
+fields.
 
 ## Offline certificate evidence
 
@@ -54,10 +57,19 @@ leaf, every intermediate and the trust anchor to cover both instants, including 
 The returned proof binds the material with length-prefixed SHA-256 fingerprints, but the CLI does
 not print them.
 
-This is a point-in-time offline chain proof. It does not read or validate a private key, contact a
-CA, fetch OCSP/CRL data, resolve DNS, or inspect the certificate installed in a running service.
-Automated issuance, atomic installation and renewal/revocation policy remain required before LAN
-promotion.
+Without `--private-key`, this remains a public-material-only chain proof. Identity mode accepts
+exactly one unencrypted canonical PKCS#8, PKCS#1 RSA, or SEC1 EC PEM key of at most 64 KiB. It derives
+the key's public identity through rustls, requires an exact match with the already attested leaf, and
+requires at least one supported TLS 1.3 signature scheme. The input buffer and parsed key wrapper are
+zeroized on drop; no private fingerprint or bytes are emitted. On Unix the checker refuses effective
+UID 0, requires the key file to belong to the current UID with no group/other permission bits, and
+keeps the same non-link parent plus kernel `O_NOFOLLOW` protections. Windows DACL and reparse-point
+evidence remains a separate promotion gate.
+
+Both modes are point-in-time offline proofs. Neither contacts a CA, fetches OCSP/CRL data, resolves
+DNS, constructs a server, binds a socket, or proves which identity a running service has installed.
+Automated issuance, atomic installation, runtime re-attestation and renewal/revocation policy remain
+required before LAN promotion.
 
 ## Fail-closed schema
 
@@ -84,7 +96,7 @@ textual assertions:
 
 - the named interface exists and owns exactly the declared address;
 - the socket is bound only to that address and port, never a wildcard or dual-stack alias;
-- the installed certificate repeats the offline exact-name/chain proof against the reviewed CA;
+- the installed identity repeats the offline exact-name/chain/key proof against the reviewed CA;
 - discovery returns the exact issuer and reviewed trust root;
 - the active host firewall permits only the declared source ranges;
 - service ACLs and secret-file ownership pass on the target operating system;

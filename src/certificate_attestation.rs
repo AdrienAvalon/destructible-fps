@@ -1,15 +1,17 @@
 //! Offline certificate evidence for a future private-LAN authority deployment.
 //!
-//! This module reads only public certificate material. It cannot load a private key, resolve a
-//! name, bind a socket, or construct the authority server.
+//! The certificate-only entry point reads public material. A separate identity entry point may
+//! inspect one protected private key solely to compare its public key with the attested leaf. This
+//! module cannot resolve a name, bind a socket, or construct the authority server.
 
 use crate::LanDeploymentPolicy;
 use core::fmt;
 use quinn::rustls::{
-    RootCertStore,
+    RootCertStore, SignatureScheme,
     client::{WebPkiServerVerifier, danger::ServerCertVerifier},
-    crypto::ring::default_provider,
-    pki_types::{CertificateDer, ServerName, UnixTime, pem::PemObject},
+    crypto::ring::{default_provider, sign::any_supported_type},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime, pem::PemObject},
+    sign::CertifiedKey,
 };
 use ring::digest::{Context, SHA256};
 use std::{
@@ -20,15 +22,32 @@ use std::{
     time::Duration,
 };
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
+use zeroize::Zeroizing;
 
 pub const MAX_LAN_CERTIFICATE_CHAIN_BYTES: usize = 256 * 1_024;
 pub const MAX_LAN_CERTIFICATE_CHAIN_ENTRIES: usize = 8;
 pub const MAX_LAN_TRUST_ANCHOR_BYTES: usize = 256 * 1_024;
 pub const MAX_LAN_TRUST_ANCHORS: usize = 1;
+pub const MAX_LAN_TLS_PRIVATE_KEY_BYTES: usize = 64 * 1_024;
 pub const LAN_CERTIFICATE_SAFETY_MARGIN_SECONDS: u64 = 60;
 
 const CERTIFICATE_CHAIN_PURPOSE: &str = "LAN certificate chain";
 const TRUST_ANCHOR_PURPOSE: &str = "LAN trust anchor";
+const PRIVATE_KEY_PURPOSE: &str = "LAN TLS private key";
+const TLS13_SIGNATURE_SCHEMES: &[SignatureScheme] = &[
+    SignatureScheme::ECDSA_NISTP256_SHA256,
+    SignatureScheme::ECDSA_NISTP384_SHA384,
+    SignatureScheme::ED25519,
+    SignatureScheme::RSA_PSS_SHA256,
+    SignatureScheme::RSA_PSS_SHA384,
+    SignatureScheme::RSA_PSS_SHA512,
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FilePermissionPolicy {
+    Integrity,
+    Private,
+}
 
 /// Bounded evidence that one exact public certificate chain is suitable for a LAN policy window.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,6 +86,19 @@ impl LanCertificateAttestation {
     }
 }
 
+/// Evidence that the protected private key belongs to an already attested public certificate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LanTlsIdentityAttestation {
+    certificate: LanCertificateAttestation,
+}
+
+impl LanTlsIdentityAttestation {
+    #[must_use]
+    pub const fn certificate(&self) -> &LanCertificateAttestation {
+        &self.certificate
+    }
+}
+
 #[derive(Debug)]
 pub enum LanCertificateAttestationError {
     InvalidAbsolutePath,
@@ -91,19 +123,24 @@ pub enum LanCertificateAttestationError {
     InvalidCertificateLifetime,
     ExpiredPolicy,
     UntrustedCertificateChain,
+    PrivilegedProcess,
+    InvalidPrivateKey,
+    PrivateKeyMismatch,
 }
 
 impl fmt::Display for LanCertificateAttestationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidAbsolutePath => write!(formatter, "certificate paths must be absolute"),
+            Self::InvalidAbsolutePath => {
+                write!(formatter, "certificate and key paths must be absolute")
+            }
             Self::File { purpose, source } => write!(formatter, "cannot read {purpose}: {source}"),
             Self::InvalidFileType(purpose) => write!(formatter, "{purpose} is not a regular file"),
             Self::UnsafeParentDirectory(purpose) => {
                 write!(formatter, "{purpose} has an unsafe parent directory")
             }
             Self::UnsafeFilePermissions(purpose) => {
-                write!(formatter, "{purpose} has unsafe integrity permissions")
+                write!(formatter, "{purpose} has unsafe permissions or ownership")
             }
             Self::OversizedFile {
                 purpose,
@@ -136,6 +173,16 @@ impl fmt::Display for LanCertificateAttestationError {
                     "server certificate does not chain to the reviewed anchor"
                 )
             }
+            Self::PrivilegedProcess => {
+                write!(formatter, "private-key attestation cannot run as root")
+            }
+            Self::InvalidPrivateKey => write!(formatter, "invalid TLS private key"),
+            Self::PrivateKeyMismatch => {
+                write!(
+                    formatter,
+                    "TLS private key does not match the server certificate"
+                )
+            }
         }
     }
 }
@@ -166,17 +213,101 @@ pub fn attest_lan_server_certificate(
     if !certificate_chain_path.is_absolute() || !trust_anchor_path.is_absolute() {
         return Err(LanCertificateAttestationError::InvalidAbsolutePath);
     }
-    let certificate_chain = read_bounded_integrity_file(
+    let certificate_chain = read_bounded_file(
         certificate_chain_path,
         CERTIFICATE_CHAIN_PURPOSE,
         MAX_LAN_CERTIFICATE_CHAIN_BYTES,
+        FilePermissionPolicy::Integrity,
     )?;
-    let trust_anchor = read_bounded_integrity_file(
+    let trust_anchor = read_bounded_file(
         trust_anchor_path,
         TRUST_ANCHOR_PURPOSE,
         MAX_LAN_TRUST_ANCHOR_BYTES,
+        FilePermissionPolicy::Integrity,
     )?;
     attest_certificate_material(policy, &certificate_chain, &trust_anchor, now_unix_seconds)
+}
+
+/// Proves that one protected private key belongs to the already attested server certificate.
+///
+/// # Errors
+///
+/// In addition to every certificate-attestation failure, rejects privileged Unix execution,
+/// unsafe key ownership or permissions, non-canonical or unsupported keys, and key mismatch.
+pub fn attest_lan_tls_identity(
+    policy: &LanDeploymentPolicy,
+    certificate_chain_path: impl AsRef<Path>,
+    trust_anchor_path: impl AsRef<Path>,
+    private_key_path: impl AsRef<Path>,
+    now_unix_seconds: u64,
+) -> Result<LanTlsIdentityAttestation, LanCertificateAttestationError> {
+    validate_unprivileged_process()?;
+    let certificate_chain_path = certificate_chain_path.as_ref();
+    let trust_anchor_path = trust_anchor_path.as_ref();
+    let private_key_path = private_key_path.as_ref();
+    if !certificate_chain_path.is_absolute()
+        || !trust_anchor_path.is_absolute()
+        || !private_key_path.is_absolute()
+    {
+        return Err(LanCertificateAttestationError::InvalidAbsolutePath);
+    }
+    let certificate_chain = read_bounded_file(
+        certificate_chain_path,
+        CERTIFICATE_CHAIN_PURPOSE,
+        MAX_LAN_CERTIFICATE_CHAIN_BYTES,
+        FilePermissionPolicy::Integrity,
+    )?;
+    let trust_anchor = read_bounded_file(
+        trust_anchor_path,
+        TRUST_ANCHOR_PURPOSE,
+        MAX_LAN_TRUST_ANCHOR_BYTES,
+        FilePermissionPolicy::Integrity,
+    )?;
+    let private_key = Zeroizing::new(read_bounded_file(
+        private_key_path,
+        PRIVATE_KEY_PURPOSE,
+        MAX_LAN_TLS_PRIVATE_KEY_BYTES,
+        FilePermissionPolicy::Private,
+    )?);
+    attest_tls_identity_material(
+        policy,
+        &certificate_chain,
+        &trust_anchor,
+        &private_key,
+        now_unix_seconds,
+    )
+}
+
+fn attest_tls_identity_material(
+    policy: &LanDeploymentPolicy,
+    certificate_chain_pem: &[u8],
+    trust_anchor_pem: &[u8],
+    private_key_pem: &[u8],
+    now_unix_seconds: u64,
+) -> Result<LanTlsIdentityAttestation, LanCertificateAttestationError> {
+    let certificate = attest_certificate_material(
+        policy,
+        certificate_chain_pem,
+        trust_anchor_pem,
+        now_unix_seconds,
+    )?;
+    let certificate_chain =
+        parse_canonical_certificate_pem(certificate_chain_pem, MAX_LAN_CERTIFICATE_CHAIN_ENTRIES)?;
+    let private_key = Zeroizing::new(parse_canonical_private_key_pem(private_key_pem)?);
+    let signing_key = any_supported_type(&private_key)
+        .map_err(|_| LanCertificateAttestationError::InvalidPrivateKey)?;
+    let certified_key = CertifiedKey::new(vec![certificate_chain[0].clone()], signing_key);
+    certified_key
+        .keys_match()
+        .map_err(|_| LanCertificateAttestationError::PrivateKeyMismatch)?;
+    if certified_key
+        .key
+        .choose_scheme(TLS13_SIGNATURE_SCHEMES)
+        .is_none()
+    {
+        return Err(LanCertificateAttestationError::InvalidPrivateKey);
+    }
+    Ok(LanTlsIdentityAttestation { certificate })
 }
 
 fn attest_certificate_material(
@@ -294,6 +425,65 @@ fn validate_canonical_pem_envelope(
         return Err(LanCertificateAttestationError::InvalidPem);
     }
     Ok(entries)
+}
+
+fn parse_canonical_private_key_pem(
+    bytes: &[u8],
+) -> Result<PrivateKeyDer<'static>, LanCertificateAttestationError> {
+    validate_canonical_private_key_envelope(bytes)?;
+    let mut keys = PrivateKeyDer::pem_slice_iter(bytes);
+    let key = keys
+        .next()
+        .ok_or(LanCertificateAttestationError::InvalidPrivateKey)?
+        .map_err(|_| LanCertificateAttestationError::InvalidPrivateKey)?;
+    if keys.next().is_some() {
+        return Err(LanCertificateAttestationError::InvalidPrivateKey);
+    }
+    Ok(key)
+}
+
+fn validate_canonical_private_key_envelope(
+    bytes: &[u8],
+) -> Result<(), LanCertificateAttestationError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| LanCertificateAttestationError::InvalidPrivateKey)?;
+    let mut expected_end = None;
+    let mut encoded_lines = 0_usize;
+    let mut complete = false;
+    for line in text.lines() {
+        if let Some(end_marker) = expected_end {
+            if line == end_marker {
+                if encoded_lines == 0 {
+                    return Err(LanCertificateAttestationError::InvalidPrivateKey);
+                }
+                expected_end = None;
+                complete = true;
+            } else if line.is_empty()
+                || !line
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+            {
+                return Err(LanCertificateAttestationError::InvalidPrivateKey);
+            } else {
+                encoded_lines += 1;
+            }
+        } else if !line.is_empty() {
+            if complete {
+                return Err(LanCertificateAttestationError::InvalidPrivateKey);
+            }
+            expected_end = Some(match line {
+                "-----BEGIN PRIVATE KEY-----" => "-----END PRIVATE KEY-----",
+                "-----BEGIN RSA PRIVATE KEY-----" => "-----END RSA PRIVATE KEY-----",
+                "-----BEGIN EC PRIVATE KEY-----" => "-----END EC PRIVATE KEY-----",
+                _ => return Err(LanCertificateAttestationError::InvalidPrivateKey),
+            });
+            encoded_lines = 0;
+        }
+    }
+    if expected_end.is_some() || !complete {
+        return Err(LanCertificateAttestationError::InvalidPrivateKey);
+    }
+    Ok(())
 }
 
 fn validate_unique_material(
@@ -494,10 +684,11 @@ fn certificate_fingerprint(certificates: &[CertificateDer<'_>]) -> [u8; 32] {
         .expect("SHA-256 has a fixed 32-byte output")
 }
 
-fn read_bounded_integrity_file(
+fn read_bounded_file(
     path: &Path,
     purpose: &'static str,
     maximum: usize,
+    permission_policy: FilePermissionPolicy,
 ) -> Result<Vec<u8>, LanCertificateAttestationError> {
     validate_parent_directory(path, purpose)?;
     let link_metadata = fs::symlink_metadata(path)
@@ -513,7 +704,7 @@ fn read_bounded_integrity_file(
     if !metadata.is_file() {
         return Err(LanCertificateAttestationError::InvalidFileType(purpose));
     }
-    validate_permissions(&metadata, purpose)?;
+    validate_permissions(&metadata, purpose, permission_policy)?;
     if metadata.len() > u64::try_from(maximum).unwrap_or(u64::MAX) {
         return Err(LanCertificateAttestationError::OversizedFile {
             purpose,
@@ -593,13 +784,20 @@ const fn validate_parent_directory(
 fn validate_permissions(
     metadata: &Metadata,
     purpose: &'static str,
+    permission_policy: FilePermissionPolicy,
 ) -> Result<(), LanCertificateAttestationError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let effective_uid = rustix::process::geteuid().as_raw();
-    if metadata.permissions().mode() & 0o022 != 0
-        || !integrity_owner_allowed(metadata.uid(), effective_uid)
-    {
+    let disallowed_mode = match permission_policy {
+        FilePermissionPolicy::Integrity => 0o022,
+        FilePermissionPolicy::Private => 0o077,
+    };
+    let owner_allowed = match permission_policy {
+        FilePermissionPolicy::Integrity => integrity_owner_allowed(metadata.uid(), effective_uid),
+        FilePermissionPolicy::Private => metadata.uid() == effective_uid,
+    };
+    if metadata.permissions().mode() & disallowed_mode != 0 || !owner_allowed {
         return Err(LanCertificateAttestationError::UnsafeFilePermissions(
             purpose,
         ));
@@ -616,7 +814,21 @@ const fn integrity_owner_allowed(owner_uid: u32, effective_uid: u32) -> bool {
 const fn validate_permissions(
     _metadata: &Metadata,
     _purpose: &'static str,
+    _permission_policy: FilePermissionPolicy,
 ) -> Result<(), LanCertificateAttestationError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_unprivileged_process() -> Result<(), LanCertificateAttestationError> {
+    if rustix::process::geteuid().as_raw() == 0 {
+        return Err(LanCertificateAttestationError::PrivilegedProcess);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+const fn validate_unprivileged_process() -> Result<(), LanCertificateAttestationError> {
     Ok(())
 }
 
@@ -652,6 +864,52 @@ mod tests {
         let proof = attest_certificate_material(&policy(NOW + 3_600), &chain, &root, NOW)
             .expect("ordered intermediate chain");
         assert_eq!(proof.certificate_entries(), 2);
+    }
+
+    #[test]
+    fn matching_private_key_is_loaded_without_constructing_a_server() {
+        let (chain, root, private_key) = tls_identity_material();
+        let proof = attest_tls_identity_material(
+            &policy(NOW + 3_600),
+            &chain,
+            &root,
+            private_key.as_bytes(),
+            NOW,
+        )
+        .expect("matching TLS identity");
+        assert_eq!(proof.certificate().certificate_entries(), 1);
+        assert_eq!(proof.certificate().trust_anchor_entries(), 1);
+    }
+
+    #[test]
+    fn mismatched_unsupported_and_ambiguous_private_keys_fail_closed() {
+        let (chain, root, private_key) = tls_identity_material();
+        let wrong_key = KeyPair::generate().expect("wrong key").serialize_pem();
+        assert!(matches!(
+            attest_tls_identity_material(
+                &policy(NOW + 3_600),
+                &chain,
+                &root,
+                wrong_key.as_bytes(),
+                NOW
+            ),
+            Err(LanCertificateAttestationError::PrivateKeyMismatch)
+        ));
+
+        for invalid in [
+            b"-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n".as_slice(),
+            [private_key.as_bytes(), private_key.as_bytes()]
+                .concat()
+                .as_slice(),
+            [private_key.as_bytes(), chain.as_slice()]
+                .concat()
+                .as_slice(),
+        ] {
+            assert!(matches!(
+                attest_tls_identity_material(&policy(NOW + 3_600), &chain, &root, invalid, NOW),
+                Err(LanCertificateAttestationError::InvalidPrivateKey)
+            ));
+        }
     }
 
     #[test]
@@ -799,6 +1057,10 @@ mod tests {
             LAN_CERTIFICATE_SAFETY_MARGIN_SECONDS,
             crate::MIN_TLS_CERTIFICATE_REMAINING_SECONDS
         );
+        assert_eq!(
+            MAX_LAN_TLS_PRIVATE_KEY_BYTES,
+            crate::MAX_TLS_PRIVATE_KEY_BYTES
+        );
     }
 
     fn valid_certificate_material() -> (Vec<u8>, Vec<u8>) {
@@ -807,6 +1069,22 @@ mod tests {
             &[ExtendedKeyUsagePurpose::ServerAuth],
             ((2024, 1, 1), (2030, 1, 1)),
             ((2024, 1, 1), (2030, 1, 1)),
+        )
+    }
+
+    fn tls_identity_material() -> (Vec<u8>, Vec<u8>, String) {
+        let root = root_issuer(((2024, 1, 1), (2030, 1, 1)));
+        let key = KeyPair::generate().expect("leaf key");
+        let mut parameters = rcgen::CertificateParams::new(vec!["game.home.arpa".to_owned()])
+            .expect("leaf parameters");
+        set_window(&mut parameters, ((2024, 1, 1), (2030, 1, 1)));
+        parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let certificate = parameters.signed_by(&key, &root).expect("signed leaf");
+        (
+            certificate.pem().into_bytes(),
+            root.pem().into_bytes(),
+            key.serialize_pem(),
         )
     }
 

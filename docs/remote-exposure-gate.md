@@ -20,7 +20,7 @@ non-loopback variant. Configuration fields or operator assertions alone do not c
 | Loss and reordering | Distinct delay, duplication, and loss traces with bounded repair | Four-client real-process trace replay | Pass for deterministic loopback; add WAN profiles |
 | Trust outage | Discovery, static trust, or renewal reaches its monotonic deadline | Real-process TLS outage and static OIDC expiry tests pass; discovery retains failed-refresh controller tests | Pass for local mechanisms; repeat live discovery outage against the disposable realm |
 | Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix non-root service identity plus file/parent owner, mode, type, and no-follow tests | Partial: Windows service DACL validation missing |
-| Deployment policy | Exact interface/address/port, certificate name, issuer, source ranges, budgets, owner, and expiry | Bounded `LanDeploymentPolicy`, read-only exact host-assignment attestation, offline exact-SAN/ordered-chain/single-reviewed-CA attestation, negative matrix, and `lan-policy-check` | Partial: instantiate and review; installed key, port/firewall/OIDC/ACL proofs remain |
+| Deployment policy | Exact interface/address/port, certificate name, issuer, source ranges, budgets, owner, and expiry | Bounded `LanDeploymentPolicy`, read-only exact host-assignment attestation, offline exact-SAN/ordered-chain/single-reviewed-CA/key attestation, negative matrix, and `lan-policy-check` | Partial: instantiate and review; installed runtime identity, port/firewall/OIDC/ACL proofs remain |
 
 Every executable row is part of the normal test suite; no network namespace, firewall exception, or
 remote bind is needed to rehearse it. A failure in any row blocks promotion.
@@ -37,9 +37,10 @@ remote bind is needed to rehearse it. A failure in any row blocks promotion.
    queue pressure, packet loss, duplication, reordering, and reconnect storms without exceeding the
    fixed simulation budget or leaking credentials.
 5. Instantiate and review the bounded deployment-policy contract for the target host, repeat its
-   host and certificate attestations against installed material, then prove the private key matches,
-   exact UDP port, identity issuer, firewall source ranges, observability budget, rollback owner, and
-   expiry against live state. Wildcard binds remain forbidden for the first private-network demo.
+   host and certificate/key attestations against the exact files installed for the service, then
+   prove the running identity, exact UDP port, identity issuer, firewall source ranges, observability
+   budget, rollback owner, and expiry against live state. Wildcard binds remain forbidden for the
+   first private-network demo.
 
 The in-process hostile client rehearsal now establishes 32 concurrent trusted TLS connections while
 withholding every application hello. The 33rd connection is refused within a fixed deadline, the
@@ -91,11 +92,16 @@ under any other interface name and never echoes topology or identity values. Pai
 `--certificate-chain` and `--trust-anchor` options read only public, integrity-protected files. They
 require one literal policy SAN, explicit server-auth usage, one ordered eight-entry-maximum chain,
 one reviewed self-issued CA, and cryptographic validity now and through policy expiry plus the
-60-second safety margin. No private key, DNS request, socket or revocation service is involved.
+60-second safety margin. An optional `--private-key` accepts exactly one protected 64 KiB-bounded
+canonical key and proves that it matches the leaf and supports TLS 1.3. On Unix that mode refuses
+root, requires current-UID ownership and rejects every group/other permission bit. It zeroizes the
+key buffers and emits only a proof boolean. No DNS request, socket, server construction or revocation
+service is involved.
 
 An offline `POLICY_OK` means only that a proposal is bounded and unambiguous; a host-verified result
 adds only a point-in-time interface assignment, while a certificate-verified result adds only a
-point-in-time public chain proof. None makes the proposal approved, proves installed private-key
-correspondence or the remaining target state, or unlocks the loopback-only server. A future launcher
-must repeat both proofs immediately before bind and fail closed if subsequent interface, certificate
-or policy monitoring reports drift.
+point-in-time public chain proof; a private-key-verified result adds only correspondence for the
+candidate files read by that invocation. None makes the proposal approved, proves the running
+service identity or the remaining target state, or unlocks the loopback-only server. A future
+launcher must repeat these proofs immediately before bind and fail closed if subsequent interface,
+identity or policy monitoring reports drift.

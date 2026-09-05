@@ -328,15 +328,17 @@ ownership, an absent/down interface, a missing index, an unsafe prefix or more t
 records fails closed. This point-in-time proof must be repeated immediately before any future bind
 and monitored afterward; it does not attest firewall, OIDC or service ACL state.
 
-The sibling certificate-attestation module also points only from the policy toward public evidence.
-It accepts an eight-entry/256 KiB maximum canonical PEM chain and exactly one 256 KiB-bounded,
-self-issued reviewed CA. It rejects duplicate, embedded, unrelated or out-of-order certificates;
-requires a single literal policy DNS SAN plus explicit server-auth usage; verifies the cryptographic
-path with rustls/webpki; and requires every certificate to remain valid through policy expiry plus
-the same 60-second margin reserved by the runtime. Unix reads inherit the integrity ownership,
-parent-directory and `O_NOFOLLOW` contract, while Windows DACL proof remains outstanding. The proof
-contains length-prefixed SHA-256 fingerprints but the CLI emits only a boolean. This module has no
-private-key, resolver, socket, endpoint or server dependency and cannot promote the policy.
+The sibling certificate-attestation module also points only from the policy toward offline evidence.
+Its public-material entry point accepts an eight-entry/256 KiB maximum canonical PEM chain and
+exactly one 256 KiB-bounded, self-issued reviewed CA. It rejects duplicate, embedded, unrelated or
+out-of-order certificates; requires a single literal policy DNS SAN plus explicit server-auth usage;
+verifies the path with rustls/webpki; and requires every certificate to remain valid through policy
+expiry plus the same 60-second margin reserved by the runtime. A separate identity entry point reads
+one 64 KiB-bounded canonical private key, under stricter non-root Unix ownership and mode checks,
+solely to prove leaf-key equality and TLS 1.3 signing support. Private buffers are zeroized and never
+fingerprinted or emitted. Unix reads inherit the parent-directory and `O_NOFOLLOW` contract, while
+Windows DACL proof remains outstanding. The module has no resolver, socket, endpoint or server
+dependency and cannot promote the policy.
 
 ## Planned engine layers
 

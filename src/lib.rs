@@ -35,9 +35,9 @@ pub mod world;
 
 pub use certificate_attestation::{
     LAN_CERTIFICATE_SAFETY_MARGIN_SECONDS, LanCertificateAttestation,
-    LanCertificateAttestationError, MAX_LAN_CERTIFICATE_CHAIN_BYTES,
-    MAX_LAN_CERTIFICATE_CHAIN_ENTRIES, MAX_LAN_TRUST_ANCHOR_BYTES, MAX_LAN_TRUST_ANCHORS,
-    attest_lan_server_certificate,
+    LanCertificateAttestationError, LanTlsIdentityAttestation, MAX_LAN_CERTIFICATE_CHAIN_BYTES,
+    MAX_LAN_CERTIFICATE_CHAIN_ENTRIES, MAX_LAN_TLS_PRIVATE_KEY_BYTES, MAX_LAN_TRUST_ANCHOR_BYTES,
+    MAX_LAN_TRUST_ANCHORS, attest_lan_server_certificate, attest_lan_tls_identity,
 };
 pub use character::{
     AuthoritativePlayer, AuthoritativePlayerState, MAX_PLAYER_INPUT_HOLD_TICKS,

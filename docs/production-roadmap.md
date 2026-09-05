@@ -177,8 +177,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   remote bind capability), plus bounded read-only POSIX/Windows host enumeration proving the exact
   operational interface/address/index/private-prefix assignment, and an offline exact-SAN,
   ordered-chain, single-reviewed-CA proof covering the full policy lifetime plus the TLS safety
-  margin (delivered; live policy review, installed-key correspondence and the other environment
-  proofs remain);
+  margin, with optional strict private-key correspondence and TLS 1.3 signing-capability proof
+  (delivered for candidate files; live policy review, installed runtime identity and the other
+  environment proofs remain);
   bounded certificate/key hot reload changes future handshakes without disrupting current sessions
   (delivered for loopback; automated issuance, platform ACLs, production issuer/root provisioning,
   and remote policy remain);

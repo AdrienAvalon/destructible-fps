@@ -1,11 +1,11 @@
 use destructible_fps::{
     AuthenticatedPrincipal, BuildCommand, ClientPrediction, DeltaPacket, ExplosionCommand, IVec3,
-    MAX_SESSION_DATAGRAMS_PER_SECOND, Material, OrderedDeltaInbox, PlayerInputCommand,
-    PlayerStateInbox, PlayerStateReceiveError, ReplicatedPlayerState, SecureDedicatedServer,
-    SessionCredentialVerifier, Voxel, World, demo_world, encode_build_request,
-    encode_explosion_request, encode_player_input, encode_snapshot_request, establish_session,
-    is_delta_datagram, is_player_state_datagram, receive_gameplay_datagram, secure_client_config,
-    secure_server_config, send_gameplay_datagram,
+    MAX_PENDING_QUIC_HANDSHAKES, MAX_SESSION_DATAGRAMS_PER_SECOND, Material, OrderedDeltaInbox,
+    PlayerInputCommand, PlayerStateInbox, PlayerStateReceiveError, ReplicatedPlayerState,
+    SecureDedicatedServer, SessionCredentialVerifier, Voxel, World, demo_world,
+    encode_build_request, encode_explosion_request, encode_player_input, encode_snapshot_request,
+    establish_session, is_delta_datagram, is_player_state_datagram, receive_gameplay_datagram,
+    secure_client_config, secure_server_config, send_gameplay_datagram,
 };
 use quinn::rustls::{
     RootCertStore,
@@ -327,6 +327,70 @@ async fn invalid_credential_never_enters_the_authority() {
     }
     assert_eq!(admission_failures, 1);
     assert_eq!(server.active_sessions(), 0);
+    server.shutdown().await;
+    client.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_admission_saturation_refuses_excess_without_simulation_work() {
+    let (certificate, private_key) = test_identity();
+    let server_config =
+        secure_server_config(vec![certificate.clone()], private_key).expect("server config");
+    let mut server = SecureDedicatedServer::bind(
+        LOOPBACK_EPHEMERAL,
+        server_config,
+        Arc::new(TestVerifier),
+        demo_world(),
+    )
+    .expect("bounded secure authority");
+    let address = server.local_addr().expect("server address");
+    let client = trusted_client(certificate);
+
+    let mut handshakes = tokio::task::JoinSet::new();
+    for _ in 0..MAX_PENDING_QUIC_HANDSHAKES {
+        let connecting = client
+            .connect(address, "localhost")
+            .expect("start stalled-admission connection");
+        handshakes.spawn(async move {
+            timeout(Duration::from_secs(2), connecting)
+                .await
+                .expect("stalled-admission TLS deadline")
+                .expect("trusted stalled-admission TLS connection")
+        });
+    }
+
+    let mut stalled_connections = Vec::with_capacity(MAX_PENDING_QUIC_HANDSHAKES);
+    while let Some(result) = handshakes.join_next().await {
+        stalled_connections.push(result.expect("stalled-admission handshake task"));
+    }
+    assert_eq!(stalled_connections.len(), MAX_PENDING_QUIC_HANDSHAKES);
+
+    let excess = timeout(
+        Duration::from_secs(2),
+        client
+            .connect(address, "localhost")
+            .expect("start excess connection"),
+    )
+    .await
+    .expect("excess connection refusal deadline");
+    assert!(excess.is_err(), "excess admission unexpectedly connected");
+
+    let mut refused_connections = 0_usize;
+    for _ in 0..120 {
+        let report = server.tick().expect("authority tick under admission load");
+        refused_connections += report.refused_connections;
+        assert_eq!(report.active_sessions, 0);
+        assert_eq!(report.authority.received_datagrams, 0);
+        assert_eq!(report.authority.commands_applied, 0);
+        assert_eq!(report.authority.players_simulated, 0);
+        assert_eq!(report.authority.outbound_attempts, 0);
+    }
+    assert_eq!(refused_connections, 1);
+    assert_eq!(server.active_sessions(), 0);
+
+    for connection in stalled_connections {
+        connection.close(VarInt::from_u32(0), b"hostile-load test complete");
+    }
     server.shutdown().await;
     client.wait_idle().await;
 }

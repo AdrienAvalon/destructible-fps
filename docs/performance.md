@@ -1206,3 +1206,33 @@ replacement file itself is read-only.
 This completes the current Unix file and immediate-directory ownership gate. Windows DACL/reparse
 validation, automated issuance with expiry-outage evidence, and hostile external load still block
 any non-loopback policy.
+
+## 2026-09-05 — concurrent QUIC admission saturation
+
+Source state: parent `b42498b` plus the hostile-admission integration case. Thirty-two concurrent
+real QUIC/TLS connections complete their server-authenticated handshake and deliberately withhold
+the bounded application hello. While those admission tasks remain occupied, a 33rd connection is
+refused within two seconds. The authority reports exactly one refusal, keeps zero active sessions,
+and performs zero received-datagram, command, player-simulation, or outbound work throughout the
+test. Every connection remains bounded by the existing five-second admission deadline and transport
+memory ceilings.
+
+The exact case passed ten consecutive debug and ten consecutive release repetitions before the
+complete promotion. This is a same-process real-socket adversarial rehearsal; reconnect storms and
+malformed/queue-pressure campaigns driven by separate hostile processes remain required before LAN
+exposure.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 155 passed debug; 155 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 52 passed debug; 52 passed release |
+| Destruction p99, 500 events | 0.385 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.412 ms |
+| Physics p99, 1,024 bodies | 1.224 ms |
+| Snapshot encode + decode + install p99 | 9.364 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.232 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+Graphify was refreshed after the new test path and reported 1,982 nodes, 5,601 post-build edges,
+zero unverified code nodes, and zero modified, added, deleted, or excluded freshness entries.

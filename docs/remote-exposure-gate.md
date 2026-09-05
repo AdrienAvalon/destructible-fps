@@ -16,7 +16,7 @@ non-loopback variant. Configuration fields or operator assertions alone do not c
 | Application admission | Invalid credential, stalled hello, or nonce mismatch | Secure transport and standalone process negative tests | Pass |
 | OIDC provenance | Discovery issuer mismatch, unsafe endpoint, malformed or stale key set, and replay | OIDC discovery/verifier tests and standalone discovery refusal | Pass |
 | Gameplay authorization | Invalid session and malformed or replayed command | Network, transport, and secure authority tests | Pass |
-| Resource abuse | Per-session datagram burst, queue pressure, pending handshake cap, and authority capacity | Secure authority rate-limit test plus bounded constants and unit tests | Partial: add concurrent hostile-process load |
+| Resource abuse | Per-session datagram burst, queue pressure, pending handshake cap, and authority capacity | `pending_admission_saturation_refuses_excess_without_simulation_work`, the secure-authority rate-limit test, and bounded queue/capacity unit tests | Partial: stalled real-QUIC admission saturation passes; add external reconnect, malformed-input, and queue-pressure storms |
 | Loss and reordering | Distinct delay, duplication, and loss traces with bounded repair | Four-client real-process trace replay | Pass for deterministic loopback; add WAN profiles |
 | Trust outage | Discovery or renewal repeatedly fails until monotonic expiry | Refresh controller tests and deadline shutdown logic | Partial: add process-level expiry outage cases |
 | Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix non-root service identity plus file/parent owner, mode, type, and no-follow tests | Partial: Windows service DACL validation missing |
@@ -38,6 +38,12 @@ remote bind is needed to rehearse it. A failure in any row blocks promotion.
 5. A reviewed deployment policy names the exact interface, UDP port, certificate name, identity
    issuer, firewall source ranges, observability budget, rollback owner, and expiry. Wildcard binds
    remain forbidden for the first private-network demo.
+
+The in-process hostile client rehearsal now establishes 32 concurrent trusted TLS connections while
+withholding every application hello. The 33rd connection is refused within a fixed deadline, the
+counter reports exactly one refusal, no session becomes authoritative, and repeated authority ticks
+perform no gameplay work. This covers the pending-admission cap through real sockets; it does not
+replace the remaining separate-process reconnect, malformed-input, and queue-pressure campaign.
 
 Only after all five proofs are reproducible may the internal validated binder gain a private-network
 capability. Internet publication remains a separate later gate with capacity protection and incident

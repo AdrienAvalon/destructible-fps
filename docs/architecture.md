@@ -327,8 +327,9 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
   sweep-and-prune with atomic overload rollback, protocol-v6/snapshot-v2 state replication, and
   mass-centred GPU rotation with conservative rotated render bounds (delivered; static angular motion
   is sampled at a radius-derived maximum travel of 0.25 m with at most eight substeps and 262,144
-  tested cells per body tick; over-budget or intersecting rotation stops, rotated bodies fail closed
-  out of the legacy vertical-column solver);
+  tested cells per body tick; over-budget or intersecting rotation stops; inclined vertical body
+  support uses occupied physical-bottom ordering plus rational-time refinement through at most 4,096
+  conservative voxel-proxy pairs, and fail-closed support on budget exhaustion);
 - four-pass X/Z dynamic contact from swept coarse body bounds, rational orthogonal-overlap validation
   at time of impact, bounded refinement through at most 4,096 canonical pairs of conservative
   rotated per-voxel proxies, deterministic contact centroids, inverse-mass separation, material
@@ -348,8 +349,8 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - local stress propagation after damage;
 - unsupported island extraction (delivered for topology-changing voxel edits);
 - rigid-body mass, centre of mass, and inertia derived from geometry (delivered);
-- exact convex dynamic-body contact manifolds, rotated vertical support, gyroscopic response, deeper
-  constraint-island convergence, clustering, and distance-based solver budgets.
+- exact convex dynamic-body contact manifolds, full vertical impulse exchange, gyroscopic response,
+  deeper constraint-island convergence, clustering, and distance-based solver budgets.
 - player-state replication, client prediction and reconciliation, authoritative view/weapon state,
   persistent inventories, recipes, removal tools, material selection UI, dynamic-body character
   contact, and dynamic-body attachment for construction.

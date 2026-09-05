@@ -1088,10 +1088,16 @@ fn resolve_vertical_body_contacts(
     adjacency: &BTreeMap<BodyId, Vec<BodyId>>,
 ) -> usize {
     let mut ordered_bodies = bodies
-        .keys()
-        .filter_map(|&body_id| {
-            next.get(&body_id)
-                .map(|state| (state.translation_um.y, body_id))
+        .iter()
+        .filter_map(|(&body_id, body)| {
+            next.get(&body_id).map(|state| {
+                let support_height = if state.orientation == FixedQuaternion::IDENTITY {
+                    state.translation_um.y
+                } else {
+                    occupied_body_aabb(body, *state).0.y
+                };
+                (support_height, body_id)
+            })
         })
         .collect::<Vec<_>>();
     ordered_bodies.sort_unstable();
@@ -1340,9 +1346,11 @@ fn settle_on_dynamic_support(
     state.translation_um.y = height;
     state.linear_velocity_um_per_second.y = 0;
     state.integration_remainder[1] = 0;
+    damp_supported_angular_motion(state);
     let stopped_horizontally =
         state.linear_velocity_um_per_second.x == 0 && state.linear_velocity_um_per_second.z == 0;
-    if stable_contact && stopped_horizontally {
+    let stopped_angular = state.angular_velocity_mrad_per_second == FixedMilliradians3::default();
+    if stable_contact && stopped_horizontally && stopped_angular {
         state.sleep_ticks = before.sleep_ticks.saturating_add(1).min(SLEEP_TICKS);
         state.sleeping = state.sleep_ticks == SLEEP_TICKS;
     } else {
@@ -2778,6 +2786,48 @@ fn body_aabb(
     )
 }
 
+fn occupied_body_aabb(
+    body: &RigidBodyDescriptor,
+    state: RigidBodyState,
+) -> (FixedMicrometers3, FixedMicrometers3) {
+    if state.orientation == FixedQuaternion::IDENTITY {
+        return body_aabb(body, state);
+    }
+    let shape = RotatedVoxelShape::new(body, state.orientation);
+    let mut minimum = FixedMicrometers3 {
+        x: i64::MAX,
+        y: i64::MAX,
+        z: i64::MAX,
+    };
+    let mut maximum = FixedMicrometers3 {
+        x: i64::MIN,
+        y: i64::MIN,
+        z: i64::MIN,
+    };
+    for body_voxel in &body.voxels {
+        let local = shape.voxel_bounds(body, body_voxel.position);
+        minimum.x = minimum
+            .x
+            .min(state.translation_um.x.saturating_add(local.0.x));
+        minimum.y = minimum
+            .y
+            .min(state.translation_um.y.saturating_add(local.0.y));
+        minimum.z = minimum
+            .z
+            .min(state.translation_um.z.saturating_add(local.0.z));
+        maximum.x = maximum
+            .x
+            .max(state.translation_um.x.saturating_add(local.1.x));
+        maximum.y = maximum
+            .y
+            .max(state.translation_um.y.saturating_add(local.1.y));
+        maximum.z = maximum
+            .z
+            .max(state.translation_um.z.saturating_add(local.1.z));
+    }
+    (minimum, maximum)
+}
+
 fn local_center_of_mass_um(body: &RigidBodyDescriptor) -> [i128; 3] {
     let absolute = [
         body.center_of_mass_mm.x,
@@ -2847,14 +2897,45 @@ fn swept_dynamic_support_origin(
     support_before: RigidBodyState,
     support_after: RigidBodyState,
 ) -> Option<i64> {
-    if after.translation_um.y >= before.translation_um.y
-        || before.orientation != FixedQuaternion::IDENTITY
-        || after.orientation != FixedQuaternion::IDENTITY
-        || support_before.orientation != FixedQuaternion::IDENTITY
-        || support_after.orientation != FixedQuaternion::IDENTITY
-    {
+    if after.translation_um.y >= before.translation_um.y {
         return None;
     }
+    if [
+        before.orientation,
+        after.orientation,
+        support_before.orientation,
+        support_after.orientation,
+    ]
+    .into_iter()
+    .all(|orientation| orientation == FixedQuaternion::IDENTITY)
+    {
+        return axis_aligned_swept_dynamic_support_origin(
+            body,
+            before,
+            after,
+            support,
+            support_before,
+            support_after,
+        );
+    }
+    rotated_swept_dynamic_support_origin(
+        body,
+        before,
+        after,
+        support,
+        support_before,
+        support_after,
+    )
+}
+
+fn axis_aligned_swept_dynamic_support_origin(
+    body: &RigidBodyDescriptor,
+    before: RigidBodyState,
+    after: RigidBodyState,
+    support: &RigidBodyDescriptor,
+    support_before: RigidBodyState,
+    support_after: RigidBodyState,
+) -> Option<i64> {
     let mut body_index = 0_usize;
     let mut support_index = 0_usize;
     let mut highest_origin = None;
@@ -2893,6 +2974,57 @@ fn swept_dynamic_support_origin(
     highest_origin
 }
 
+fn rotated_swept_dynamic_support_origin(
+    body: &RigidBodyDescriptor,
+    before: RigidBodyState,
+    after: RigidBodyState,
+    support: &RigidBodyDescriptor,
+    support_before: RigidBodyState,
+    support_after: RigidBodyState,
+) -> Option<i64> {
+    let body_before_bounds = occupied_body_aabb(body, before);
+    let body_after_bounds = occupied_body_aabb(body, after);
+    let support_before_bounds = occupied_body_aabb(support, support_before);
+    let support_after_bounds = occupied_body_aabb(support, support_after);
+    let contact = axis_body_contact(
+        Axis::Y,
+        body_before_bounds,
+        body_after_bounds,
+        support_before_bounds,
+        support_after_bounds,
+    )?;
+    if contact.first_before_second
+        || !overlaps_on_orthogonal_axes_at_contact(
+            contact,
+            body_before_bounds,
+            body_after_bounds,
+            support_before_bounds,
+            support_after_bounds,
+        )
+    {
+        return None;
+    }
+    match dynamic_voxel_contact_at_time(
+        body,
+        before,
+        after,
+        support,
+        support_before,
+        support_after,
+        Axis::Y,
+        contact.gap_um,
+        contact.closing_travel_um,
+    ) {
+        DynamicNarrowPhase::Separated => None,
+        DynamicNarrowPhase::Contact(_) | DynamicNarrowPhase::Saturated => Some(
+            after
+                .translation_um
+                .y
+                .saturating_add(i64::try_from(contact.penetration_um).unwrap_or(i64::MAX)),
+        ),
+    }
+}
+
 fn rests_on(
     body: &RigidBodyDescriptor,
     state: RigidBodyState,
@@ -2902,7 +3034,7 @@ fn rests_on(
     if state.orientation != FixedQuaternion::IDENTITY
         || support_state.orientation != FixedQuaternion::IDENTITY
     {
-        return false;
+        return rotated_rests_on(body, state, support, support_state);
     }
     let mut body_index = 0_usize;
     let mut support_index = 0_usize;
@@ -2930,6 +3062,36 @@ fn rests_on(
         }
     }
     highest_origin == Some(state.translation_um.y)
+}
+
+fn rotated_rests_on(
+    body: &RigidBodyDescriptor,
+    state: RigidBodyState,
+    support: &RigidBodyDescriptor,
+    support_state: RigidBodyState,
+) -> bool {
+    let body_bounds = occupied_body_aabb(body, state);
+    let support_bounds = occupied_body_aabb(support, support_state);
+    if body_bounds.0.y != support_bounds.1.y
+        || !bounds_overlap_on_axis(body_bounds, support_bounds, Axis::X)
+        || !bounds_overlap_on_axis(body_bounds, support_bounds, Axis::Z)
+    {
+        return false;
+    }
+    !matches!(
+        dynamic_voxel_contact_at_time(
+            body,
+            state,
+            state,
+            support,
+            support_state,
+            support_state,
+            Axis::Y,
+            0,
+            1,
+        ),
+        DynamicNarrowPhase::Separated
+    )
 }
 
 fn world_column(body: &RigidBodyDescriptor, state: RigidBodyState, surface: IVec3) -> (i64, i64) {
@@ -4169,7 +4331,7 @@ mod tests {
     }
 
     #[test]
-    fn rotated_bodies_cannot_enter_the_axis_aligned_dynamic_support_solver() {
+    fn rotated_dynamic_support_uses_the_bounded_voxel_proxy_path() {
         let body = one_voxel_body(1, Material::Wood);
         let support = one_voxel_body(2, Material::Wood);
         let mut body_before = RigidBodyState::at_spawn(&body);
@@ -4182,18 +4344,97 @@ mod tests {
         body_before.orientation = normalize_quaternion([0, 0, scale, scale]);
         body_after.orientation = body_before.orientation;
 
+        let origin = swept_dynamic_support_origin(
+            &body,
+            body_before,
+            body_after,
+            &support,
+            support_state,
+            support_state,
+        )
+        .expect("rotated support origin");
+        body_after.translation_um.y = origin;
+        assert!(rests_on(&body, body_after, &support, support_state));
+    }
+
+    #[test]
+    fn inclined_voxel_proxy_has_a_deterministic_vertical_extent() {
+        let body = one_voxel_body(1, Material::Wood);
+        let state = RigidBodyState {
+            orientation: FixedQuaternion {
+                x: 0,
+                y: 0,
+                z: 382_683,
+                w: 923_880,
+            },
+            ..RigidBodyState::at_spawn(&body)
+        };
+
+        assert!(valid_rigid_body_state(state));
+        let bounds = occupied_body_aabb(&body, state);
+        assert_eq!(bounds.0.y, state.translation_um.y - 207_111);
+        assert_eq!(bounds.1.y, state.translation_um.y + 1_207_111);
+    }
+
+    #[test]
+    fn rotated_body_settles_and_sleeps_on_a_dynamic_support() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
+        let support = one_voxel_body(1, Material::Concrete);
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            2,
+            vec![
+                BodyVoxel {
+                    position: IVec3::new(0, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                BodyVoxel {
+                    position: IVec3::new(1, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )
+        .expect("rotated supported bar");
+        let support_state = RigidBodyState {
+            translation_um: FixedMicrometers3 {
+                y: MICROMETERS_PER_VOXEL,
+                ..FixedMicrometers3::default()
+            },
+            sleep_ticks: SLEEP_TICKS,
+            sleeping: true,
+            ..RigidBodyState::at_spawn(&support)
+        };
+        let body_state = RigidBodyState {
+            translation_um: FixedMicrometers3 {
+                y: 5 * MICROMETERS_PER_VOXEL,
+                ..FixedMicrometers3::default()
+            },
+            orientation: normalize_quaternion([0, 0, 414_214, 1_000_000]),
+            angular_velocity_mrad_per_second: FixedMilliradians3 {
+                y: 120,
+                ..FixedMilliradians3::default()
+            },
+            ..RigidBodyState::at_spawn(&body)
+        };
+        let bodies = BTreeMap::from([(support.id, support), (body.id, body)]);
+        let mut states = BTreeMap::from([(1, support_state), (2, body_state)]);
+        let mut observed_contact = false;
+
+        for _ in 0..300 {
+            let report = step_rigid_bodies(&world, &bodies, &mut states);
+            assert!(!report.broad_phase_saturated);
+            observed_contact |= report.body_collisions > 0;
+        }
+
+        assert!(observed_contact);
+        assert!(states[&2].sleeping);
+        assert!(valid_rigid_body_state(states[&2]));
+        assert!(rests_on(&bodies[&2], states[&2], &bodies[&1], states[&1]));
         assert_eq!(
-            swept_dynamic_support_origin(
-                &body,
-                body_before,
-                body_after,
-                &support,
-                support_state,
-                support_state,
-            ),
-            None
+            occupied_body_aabb(&bodies[&2], states[&2]).0.y,
+            occupied_body_aabb(&bodies[&1], states[&1]).1.y
         );
-        assert!(!rests_on(&body, body_after, &support, support_state));
     }
 
     #[test]

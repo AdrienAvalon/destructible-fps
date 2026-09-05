@@ -89,8 +89,9 @@ streaming, with no synchronous world meshing on the presentation thread.
   sweep-and-prune with fail-closed overflow, protocol-v6/snapshot-v2 state updates, and mass-centred
   GPU transforms with conservative rotated render bounds (delivered; static angular motion uses a
   radius-derived 0.25 m sample bound, at most eight substeps and 262,144 tested cells per body tick;
-  over-budget or intersecting rotation stops, rotated bodies fail closed out of the legacy
-  vertical-column solver);
+  over-budget or intersecting rotation stops; inclined vertical support uses physical-bottom
+  ordering and rational-time refinement through at most 4,096 conservative voxel-proxy pairs, with
+  fail-closed support on pair-budget exhaustion);
 - four-pass swept X/Z body contacts with rational time-of-impact overlap validation, bounded
   refinement through 4,096 canonical rotated per-voxel proxy pairs, deterministic contact centroids,
   inverse-mass separation, material restitution, off-centre angular impulse, momentum-preserving
@@ -100,8 +101,9 @@ streaming, with no synchronous world meshing on the presentation thread.
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
 - unsupported component extraction with mass, centre of mass, and inertia from voxel geometry;
-- exact convex dynamic-body contact manifolds, rotated vertical support, gyroscopic response, deeper
-  collision-island convergence, and continuous multi-contact resolution between fast moving bodies;
+- exact convex dynamic-body contact manifolds, full vertical impulse exchange, gyroscopic response,
+  deeper collision-island convergence, and continuous multi-contact resolution between fast moving
+  bodies;
 - debris relevance tiers: authoritative hazards, replicated coarse bodies, deterministic cosmetic
   fragments, and settled static clusters;
 - player construction with shared replay ordering, bounded static placement, per-session resource
@@ -262,8 +264,9 @@ The next three bounded increments are:
 
 1. add automated certificate issuance, Windows service DACL checks, production OIDC issuer/root
    provisioning, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
-2. extend the delivered oriented per-voxel dynamic contact with rotated vertical support, continuous
-   multi-contact manifolds, gyroscopic response, and deeper collision-island convergence;
+2. extend the delivered oriented per-voxel dynamic contact and rotated vertical support with
+   continuous multi-contact manifolds, full vertical impulse exchange, gyroscopic response, and
+   deeper collision-island convergence;
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at
    least four clients, with RTT estimation, adaptive retransmission, and bandwidth fairness.
 

@@ -9,6 +9,14 @@ const DEFAULT_TICKS: usize = 300;
 const MAX_BODIES: usize = 1_024;
 const MAX_TICKS: usize = 10_000;
 const BODIES_PER_COLUMN: usize = 4;
+const INCLINED_STACK_PROXY_MINIMUM_Y_UM: i64 = -207_111;
+const INCLINED_STACK_PROXY_HEIGHT_UM: i64 = 1_414_222;
+const INCLINED_STACK_ORIENTATION: FixedQuaternion = FixedQuaternion {
+    x: 0,
+    y: 0,
+    z: 382_683,
+    w: 923_880,
+};
 
 type BodyMap = BTreeMap<BodyId, RigidBodyDescriptor>;
 type StateMap = BTreeMap<BodyId, RigidBodyState>;
@@ -17,6 +25,7 @@ type Fixture = (World, BodyMap, StateMap);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Scenario {
     Stacks,
+    RotatedStacks,
     LateralSweep,
     RotatedLateralSweep,
     AngularSweep,
@@ -28,6 +37,7 @@ impl Scenario {
     const fn name(self) -> &'static str {
         match self {
             Self::Stacks => "stacks",
+            Self::RotatedStacks => "rotated-stacks",
             Self::LateralSweep => "lateral-sweep",
             Self::RotatedLateralSweep => "rotated-lateral-sweep",
             Self::AngularSweep => "angular-sweep",
@@ -95,11 +105,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  body contacts        {body_collisions}");
     println!("  sleeping             {sleeping}/{body_count}");
     match scenario {
-        Scenario::Stacks => {
+        Scenario::Stacks | Scenario::RotatedStacks => {
             if sleeping != body_count {
                 return Err("not every benchmark body settled within the requested ticks".into());
             }
-            verify_stacks(&states, body_count)?;
+            verify_stacks(&states, body_count, scenario == Scenario::RotatedStacks)?;
         }
         Scenario::LateralSweep => {
             if static_collisions != body_count.saturating_mul(ticks) {
@@ -261,28 +271,41 @@ fn verify_lateral_sweeps(
     Ok(())
 }
 
-fn verify_stacks(states: &StateMap, body_count: usize) -> Result<(), Box<dyn Error>> {
+fn verify_stacks(
+    states: &StateMap,
+    body_count: usize,
+    rotated: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut heights = states
-        .values()
-        .map(|state| {
+        .iter()
+        .map(|(&body_id, state)| {
             (
                 state.translation_um.x,
                 state.translation_um.z,
                 state.translation_um.y,
+                body_id,
+                state.orientation,
             )
         })
         .collect::<Vec<_>>();
-    heights.sort_unstable();
+    heights.sort_unstable_by_key(|&(x, z, y, body_id, _)| (x, z, y, body_id));
     for (index, column) in heights.chunks(BODIES_PER_COLUMN).enumerate() {
         let expected_len = BODIES_PER_COLUMN.min(body_count - index * BODIES_PER_COLUMN);
         if column.len() != expected_len {
             return Err("benchmark stack grouping is incomplete".into());
         }
-        for (level, &(_, _, height)) in column.iter().enumerate() {
-            let expected = i64::try_from(level + 1)? * destructible_fps::MICROMETERS_PER_VOXEL;
+        for (level, &(_, _, height, body_id, orientation)) in column.iter().enumerate() {
+            let level = i64::try_from(level + 1)?;
+            let expected = if rotated {
+                level
+                    .saturating_mul(INCLINED_STACK_PROXY_HEIGHT_UM)
+                    .saturating_add(INCLINED_STACK_PROXY_MINIMUM_Y_UM)
+            } else {
+                level * destructible_fps::MICROMETERS_PER_VOXEL
+            };
             if height != expected {
                 return Err(format!(
-                    "body stack did not settle canonically: expected {expected}, got {height}"
+                    "body {body_id} stack did not settle canonically: expected {expected}, got {height}, orientation {orientation:?}"
                 )
                 .into());
             }
@@ -294,6 +317,7 @@ fn verify_stacks(states: &StateMap, body_count: usize) -> Result<(), Box<dyn Err
 fn fixture(body_count: usize, scenario: Scenario) -> Result<Fixture, Box<dyn Error>> {
     match scenario {
         Scenario::Stacks => stack_fixture(body_count),
+        Scenario::RotatedStacks => rotated_stack_fixture(body_count),
         Scenario::LateralSweep => lateral_sweep_fixture(body_count),
         Scenario::RotatedLateralSweep => rotated_lateral_sweep_fixture(body_count),
         Scenario::AngularSweep => angular_sweep_fixture(body_count),
@@ -393,8 +417,8 @@ fn stack_fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
     let side_i32 = i32::try_from(side)?;
     let mut world = World::default();
     world.fill_box(
-        IVec3::new(0, 0, 0),
-        IVec3::new(side_i32 * 2, 0, side_i32 * 2),
+        IVec3::new(-1, 0, -1),
+        IVec3::new(side_i32 * 2 + 1, 0, side_i32 * 2 + 1),
         Voxel::new(Material::Stone),
     );
     let mut bodies = BTreeMap::new();
@@ -416,6 +440,14 @@ fn stack_fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
         world.set_voxel(position, Voxel::AIR);
         states.insert(body.id, RigidBodyState::at_spawn(&body));
         bodies.insert(body.id, body);
+    }
+    Ok((world, bodies, states))
+}
+
+fn rotated_stack_fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
+    let (world, bodies, mut states) = stack_fixture(body_count)?;
+    for state in states.values_mut() {
+        state.orientation = INCLINED_STACK_ORIENTATION;
     }
     Ok((world, bodies, states))
 }
@@ -542,11 +574,12 @@ fn parse_arguments() -> Result<(usize, usize, Scenario), Box<dyn Error>> {
                 scenario = match arguments
                     .next()
                     .ok_or(
-                        "--scenario requires stacks, lateral-sweep, rotated-lateral-sweep, angular-sweep, dynamic-head-on, or rotated-dynamic-head-on",
+                        "--scenario requires stacks, rotated-stacks, lateral-sweep, rotated-lateral-sweep, angular-sweep, dynamic-head-on, or rotated-dynamic-head-on",
                     )?
                     .as_str()
                 {
                     "stacks" => Scenario::Stacks,
+                    "rotated-stacks" => Scenario::RotatedStacks,
                     "lateral-sweep" => Scenario::LateralSweep,
                     "rotated-lateral-sweep" => Scenario::RotatedLateralSweep,
                     "angular-sweep" => Scenario::AngularSweep,

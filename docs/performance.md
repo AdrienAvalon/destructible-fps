@@ -3,6 +3,31 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — bounded inclined dynamic support
+
+Source state: parent `2956991` plus the rotated-support increment documented here. Identity bodies
+retain their exact canonical vertical-column path. A contact involving any rotated state instead
+orders candidates by the minimum occupied proxy boundary, computes a rational vertical impact time
+from swept occupied bounds, and refines it through at most 4,096 canonical pairs of the same
+conservative fixed-point voxel proxies used by oriented lateral contact. An empty refinement rejects
+the coarse overlap. Pair-budget exhaustion retains fail-closed support without inventing a torque.
+The correction removes only downward penetration, zeros the vertical integration remainder, damps
+existing angular motion, and permits deterministic sleep only once horizontal and angular velocity
+are zero. Exact convex manifolds and full vertical impulse exchange remain later work.
+
+The dedicated `rotated-stacks` release fixture dropped 1,024 concrete voxel bodies, fixed at a 45
+degree Z inclination, into 256 four-body columns for 300 ticks. It observed 72,192 dynamic contacts,
+never exceeded 768 broad-phase pairs, verified the exact conservative 1,414,222 micrometre vertical
+proxy extent, and ended with all 1,024 states canonically asleep. Tick time measured p50 2.154 ms,
+p95 4.660 ms, p99 4.795 ms and maximum 5.004 ms on this machine, below the 16.67 ms server interval.
+
+The complete promotion passed 148 library tests, ten binary tests and 48 integration tests in debug
+and release with strict Clippy clean. Required release baselines measured destruction p99 0.361 ms,
+8,192-voxel structural analysis plus promotion p99 4.211 ms, unchanged axis-aligned 1,024-body
+stacking p99 1.199 ms, and snapshot total p99 9.538 ms. A real five-second Vulkan smoke on the RTX
+4050 initialized the GPU in 292.9 ms, streamed all 128 chunks in 35.3 ms, and completed with GPU-total
+p99 0.800 ms, maximum 0.801 ms, and zero abandoned timestamp samples.
+
 ## 2026-09-05 — bounded live TLS identity reload
 
 Source state: parent `ddc682b` plus the TLS-lifecycle increment documented here. Optional reload

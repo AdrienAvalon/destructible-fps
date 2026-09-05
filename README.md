@@ -89,10 +89,11 @@ The Linux demo now combines the authoritative core with a real-time first-person
   impulses, inertia-weighted off-centre angular response, canonical fixed-quaternion integration,
   three-axis swept static collision using rotation-aware per-voxel conservative proxies, off-centre
   static-contact torque, material ground friction and normal restitution, vertical voxel-column body
-  collision, four-pass swept X/Z body contacts with bounded oriented per-voxel proxy refinement,
-  mass-weighted impulse exchange, off-centre dynamic-contact torque and tangential friction, stable
-  stacking, wake propagation, sleeping, bounded sweep-and-prune broad phase, atomic overload
-  rollback, and replicated GPU transforms about the mass centre;
+  collision, rotation-aware vertical dynamic support through bounded per-voxel proxy refinement,
+  four-pass swept X/Z body contacts, mass-weighted impulse exchange, off-centre dynamic-contact
+  torque and tangential friction, stable stacking, wake propagation, sleeping, bounded
+  sweep-and-prune broad phase, atomic overload rollback, and replicated GPU transforms about the
+  mass centre;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map, energy-aware Cook-Torrance
@@ -115,21 +116,23 @@ canonical detached-island proofs. The server revalidates each proof, derives int
 properties, removes its voxels from the static world, and replicates the new body atomically. The
 body is rendered from its preserved material voxels and receives a deterministic material-weighted
 blast impulse. It sweeps all translation axes against static voxels, applies bounded restitution and
-ground friction, stacks on exact vertical body columns, and sleeps after a deterministic rest
-interval. Four bounded passes separate coarse swept X/Z body bounds, exchange normal velocity from
-mass and restitution, reduce tangential slip without losing linear momentum, and propagate a short
-contact chain. A nearest-voxel blast application point additionally generates deterministic angular
-velocity through the diagonal inertia tensor; protocol-v6 deltas and snapshot-v2 transfers replicate
-the canonical quaternion, and the GPU rotates the mesh around its mass centre. Rotated static sweeps
-use a deterministic conservative AABB for each material voxel and derive their contact lever from the
-  actual overlapped cell. Rotated bodies fail closed out of the legacy axis-aligned vertical-support
-  solver. Angular motion against static geometry is sampled from a radius-derived travel bound; it
-  stops before overlap or before exceeding its fixed substep/cell budgets. Swept X/Z body contacts
-  involving rotation refine the coarse bounds through at most 4,096 canonical pairs of conservative
-  per-voxel proxies at impact time, discard empty proxy intersections, and apply the resolved impulse
-  at the deterministic contact centroid. Pair-budget exhaustion retains the coarse separating
-  response but cannot manufacture contact torque. Exact convex manifolds, rotated vertical support,
-  and full constraint-island convergence are not claimed yet.
+ground friction, stacks on exact vertical body columns or conservative rotated voxel proxies, and
+sleeps after a deterministic rest interval. Four bounded passes separate coarse swept X/Z body
+bounds, exchange normal velocity from mass and restitution, reduce tangential slip without losing
+linear momentum, and propagate a short contact chain. A nearest-voxel blast application point
+additionally generates deterministic angular velocity through the diagonal inertia tensor;
+protocol-v6 deltas and snapshot-v2 transfers replicate the canonical quaternion, and the GPU rotates
+the mesh around its mass centre. Rotated static sweeps use a deterministic conservative AABB for each
+material voxel and derive their contact lever from the actual overlapped cell. Angular motion against
+static geometry is sampled from a radius-derived travel bound; it stops before overlap or before
+exceeding its fixed substep/cell budgets. Swept body contacts involving rotation refine the coarse
+bounds through at most 4,096 canonical pairs of
+conservative per-voxel proxies at rational impact time and discard empty proxy intersections.
+Vertical support orders inclined bodies by their physical occupied bottom, corrects downward
+penetration to the proxy boundary, damps residual angular motion, and propagates wake-up through the
+same contact graph. Pair-budget exhaustion retains conservative separation or support but cannot
+manufacture contact torque. Exact convex manifolds, full vertical impulse exchange and full
+constraint-island convergence are not claimed yet.
 
 ## Screenshots
 
@@ -151,6 +154,7 @@ cargo test oidc::tests
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario rotated-stacks
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario lateral-sweep
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario rotated-lateral-sweep
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario angular-sweep

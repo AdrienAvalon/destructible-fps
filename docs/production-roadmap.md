@@ -84,15 +84,15 @@ streaming, with no synchronous world meshing on the presentation thread.
   material ground friction and normal restitution, vertical body-column collision, stable stacking,
   wake propagation, deterministic sleeping, bounded sweep-and-prune with fail-closed overflow,
   protocol-v5 state updates, and batched GPU transforms (delivered for axis-aligned bodies);
-- single-pass coarse swept X/Z body contacts with rational time-of-impact overlap validation,
-  inverse-mass separation, material restitution, deterministic momentum exchange, and sleep wake-up
-  (delivered for isolated pairs);
+- four-pass coarse swept X/Z body contacts with rational time-of-impact overlap validation,
+  inverse-mass separation, material restitution, momentum-preserving tangential friction, sleep
+  wake-up, and deterministic short-chain propagation (delivered);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
 - unsupported component extraction with mass, centre of mass, and inertia from voxel geometry;
-- angular integration, voxel-exact lateral contact, iterative collision islands, dynamic-body
-  friction, and continuous multi-contact resolution between fast moving bodies;
+- angular integration, voxel-exact lateral contact, deeper collision-island convergence, and
+  continuous multi-contact resolution between fast moving bodies;
 - debris relevance tiers: authoritative hazards, replicated coarse bodies, deterministic cosmetic
   fragments, and settled static clusters;
 - player construction with server-validated placement, resource cost, support, and collision.

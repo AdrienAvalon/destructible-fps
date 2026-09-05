@@ -204,16 +204,16 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
   stable stacking, wake propagation, sleeping, bounded sweep-and-prune with atomic overload
   rollback, protocol state replication, and batched GPU transform updates (delivered for
   axis-aligned bodies);
-- bounded single-pass X/Z dynamic contact from swept coarse body bounds, rational orthogonal-overlap
-  validation at time of impact, inverse-mass separation, material restitution, momentum exchange,
-  and impact wake-up (delivered for isolated body pairs);
+- four-pass X/Z dynamic contact from swept coarse body bounds, rational orthogonal-overlap validation
+  at time of impact, inverse-mass separation, material restitution, momentum-preserving tangential
+  friction, impact wake-up, and deterministic short-chain propagation (delivered);
 - persistent foundation and material constraint graph integrated into authoritative transactions;
 - compression, tension, shear, and connection limits by material;
 - local stress propagation after damage;
 - unsupported island extraction (delivered for topology-changing voxel edits);
 - rigid-body mass, centre of mass, and inertia derived from geometry (delivered);
-- angular motion, voxel-exact lateral contact, iterative multi-contact islands, dynamic-body
-  friction, clustering, and distance-based solver budgets.
+- angular motion, voxel-exact lateral contact, deeper constraint-island convergence, clustering, and
+  distance-based solver budgets.
 
 Gate: destroying a load-bearing member produces a repeatable progressive collapse and never stalls a
 60 Hz server tick in the agreed worst-case scene.

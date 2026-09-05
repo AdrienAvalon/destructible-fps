@@ -11,6 +11,7 @@ const MILLIMETERS_PER_VOXEL: i64 = 1_000;
 const SQUARE_MILLIMETERS_PER_VOXEL: u128 = 1_000_000;
 pub const MICROMETERS_PER_VOXEL: i64 = 1_000_000;
 pub const SERVER_PHYSICS_HZ: i64 = 60;
+pub const MAX_BODY_SOLVER_PASSES: usize = 4;
 const GRAVITY_UM_PER_SECOND_SQUARED: i64 = -9_810_000;
 const MAX_LINEAR_SPEED_UM_PER_SECOND: i64 = 250_000_000;
 const MAX_WORLD_TRANSLATION_UM: i64 = 3_000_000_000_000_000;
@@ -660,6 +661,23 @@ fn resolve_lateral_body_contacts(
     pairs: &[(BodyId, BodyId)],
 ) -> usize {
     let mut collisions = 0_usize;
+    for _ in 0..MAX_BODY_SOLVER_PASSES {
+        let resolved = resolve_lateral_body_contact_pass(bodies, before, next, pairs);
+        collisions = collisions.saturating_add(resolved);
+        if resolved == 0 {
+            break;
+        }
+    }
+    collisions
+}
+
+fn resolve_lateral_body_contact_pass(
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    before: &BTreeMap<BodyId, RigidBodyState>,
+    next: &mut BTreeMap<BodyId, RigidBodyState>,
+    pairs: &[(BodyId, BodyId)],
+) -> usize {
+    let mut resolved = 0_usize;
     for &(first_id, second_id) in pairs {
         let (Some(first_body), Some(second_body)) = (bodies.get(&first_id), bodies.get(&second_id))
         else {
@@ -683,12 +701,14 @@ fn resolve_lateral_body_contacts(
         ) else {
             continue;
         };
-        separate_lateral_contact(first_body, &mut first, second_body, &mut second, contact);
+        if !separate_lateral_contact(first_body, &mut first, second_body, &mut second, contact) {
+            continue;
+        }
         next.insert(first_id, first);
         next.insert(second_id, second);
-        collisions = collisions.saturating_add(1);
+        resolved = resolved.saturating_add(1);
     }
-    collisions
+    resolved
 }
 
 fn state_transitions(
@@ -1047,7 +1067,17 @@ fn separate_lateral_contact(
     second_body: &RigidBodyDescriptor,
     second: &mut RigidBodyState,
     contact: LateralBodyContact,
-) {
+) -> bool {
+    let initial_first_velocity = contact.axis.component(first.linear_velocity_um_per_second);
+    let initial_second_velocity = contact.axis.component(second.linear_velocity_um_per_second);
+    let approaching = if contact.first_before_second {
+        initial_first_velocity > initial_second_velocity
+    } else {
+        initial_second_velocity > initial_first_velocity
+    };
+    if contact.penetration_um == 0 && !approaching {
+        return false;
+    }
     let total_mass = u128::from(first_body.mass_kg).saturating_add(u128::from(second_body.mass_kg));
     let penetration = u128::from(contact.penetration_um);
     let first_correction = penetration
@@ -1074,31 +1104,36 @@ fn separate_lateral_contact(
         .axis
         .set_component(&mut second.translation_um, second_origin);
 
-    let first_velocity = contact.axis.component(first.linear_velocity_um_per_second);
-    let second_velocity = contact.axis.component(second.linear_velocity_um_per_second);
-    let approaching = if contact.first_before_second {
-        first_velocity > second_velocity
-    } else {
-        second_velocity > first_velocity
-    };
     if approaching {
         let restitution = combined_response(
             first_body.restitution_per_mille,
             second_body.restitution_per_mille,
         );
-        let (first_velocity, second_velocity) = dynamic_contact_velocities(
+        let (resolved_first_velocity, resolved_second_velocity) = dynamic_contact_velocities(
             first_body.mass_kg,
-            first_velocity,
+            initial_first_velocity,
             second_body.mass_kg,
-            second_velocity,
+            initial_second_velocity,
             restitution,
         );
-        contact
-            .axis
-            .set_component(&mut first.linear_velocity_um_per_second, first_velocity);
-        contact
-            .axis
-            .set_component(&mut second.linear_velocity_um_per_second, second_velocity);
+        contact.axis.set_component(
+            &mut first.linear_velocity_um_per_second,
+            resolved_first_velocity,
+        );
+        contact.axis.set_component(
+            &mut second.linear_velocity_um_per_second,
+            resolved_second_velocity,
+        );
+        let initial_relative = initial_first_velocity.saturating_sub(initial_second_velocity);
+        let resolved_relative = resolved_first_velocity.saturating_sub(resolved_second_velocity);
+        apply_dynamic_friction(
+            first_body,
+            first,
+            second_body,
+            second,
+            contact.axis,
+            initial_relative.abs_diff(resolved_relative),
+        );
     }
     first.integration_remainder[contact.axis.index()] = 0;
     second.integration_remainder[contact.axis.index()] = 0;
@@ -1106,6 +1141,44 @@ fn separate_lateral_contact(
     first.sleeping = false;
     second.sleep_ticks = 0;
     second.sleeping = false;
+    true
+}
+
+fn apply_dynamic_friction(
+    first_body: &RigidBodyDescriptor,
+    first: &mut RigidBodyState,
+    second_body: &RigidBodyDescriptor,
+    second: &mut RigidBodyState,
+    normal_axis: Axis,
+    normal_relative_change: u64,
+) {
+    let friction = combined_response(
+        first_body.friction_per_mille,
+        second_body.friction_per_mille,
+    );
+    let reduction = u128::from(normal_relative_change).saturating_mul(u128::from(friction))
+        / u128::from(RESPONSE_SCALE.cast_unsigned());
+    let reduction = i64::try_from(reduction).unwrap_or(i64::MAX);
+    for axis in normal_axis.orthogonal() {
+        let first_velocity = axis.component(first.linear_velocity_um_per_second);
+        let second_velocity = axis.component(second.linear_velocity_um_per_second);
+        let relative = first_velocity.saturating_sub(second_velocity);
+        let target_relative = approach_zero(relative, reduction);
+        if target_relative == relative {
+            continue;
+        }
+        let (resolved_first, resolved_second) = contact_velocities_for_relative(
+            first_body.mass_kg,
+            first_velocity,
+            second_body.mass_kg,
+            second_velocity,
+            target_relative,
+        );
+        axis.set_component(&mut first.linear_velocity_um_per_second, resolved_first);
+        axis.set_component(&mut second.linear_velocity_um_per_second, resolved_second);
+        first.integration_remainder[axis.index()] = 0;
+        second.integration_remainder[axis.index()] = 0;
+    }
 }
 
 fn dynamic_contact_velocities(
@@ -1115,38 +1188,46 @@ fn dynamic_contact_velocities(
     second_velocity: i64,
     restitution_per_mille: u16,
 ) -> (i64, i64) {
+    let relative = first_velocity.saturating_sub(second_velocity);
+    let retained = i128::from(relative).saturating_mul(i128::from(restitution_per_mille))
+        / i128::from(RESPONSE_SCALE);
+    let target_relative = i64::try_from(retained.saturating_neg())
+        .unwrap_or_else(|_| -relative.signum() * MAX_LINEAR_SPEED_UM_PER_SECOND);
+    contact_velocities_for_relative(
+        first_mass,
+        first_velocity,
+        second_mass,
+        second_velocity,
+        target_relative,
+    )
+}
+
+fn contact_velocities_for_relative(
+    first_mass: u64,
+    first_velocity: i64,
+    second_mass: u64,
+    second_velocity: i64,
+    target_relative: i64,
+) -> (i64, i64) {
     let first_mass = i128::from(first_mass);
     let second_mass = i128::from(second_mass);
     let total_mass = first_mass.saturating_add(second_mass);
     let momentum = first_mass
         .saturating_mul(i128::from(first_velocity))
         .saturating_add(second_mass.saturating_mul(i128::from(second_velocity)));
-    let relative_velocity = i128::from(first_velocity).saturating_sub(i128::from(second_velocity));
-    let restitution = i128::from(restitution_per_mille);
-    let first_exchange = second_mass
-        .saturating_mul(restitution)
-        .saturating_mul(relative_velocity)
-        / i128::from(RESPONSE_SCALE);
-    let second_exchange = first_mass
-        .saturating_mul(restitution)
-        .saturating_mul(relative_velocity)
-        / i128::from(RESPONSE_SCALE);
-    let first = momentum.saturating_sub(first_exchange) / total_mass;
-    let second = momentum.saturating_add(second_exchange) / total_mass;
-    (
-        i64::try_from(first)
-            .unwrap_or_else(|_| first.signum() as i64 * MAX_LINEAR_SPEED_UM_PER_SECOND)
-            .clamp(
-                -MAX_LINEAR_SPEED_UM_PER_SECOND,
-                MAX_LINEAR_SPEED_UM_PER_SECOND,
-            ),
-        i64::try_from(second)
-            .unwrap_or_else(|_| second.signum() as i64 * MAX_LINEAR_SPEED_UM_PER_SECOND)
-            .clamp(
-                -MAX_LINEAR_SPEED_UM_PER_SECOND,
-                MAX_LINEAR_SPEED_UM_PER_SECOND,
-            ),
-    )
+    let target_relative = i128::from(target_relative);
+    let first = momentum.saturating_add(second_mass.saturating_mul(target_relative)) / total_mass;
+    let second = momentum.saturating_sub(first_mass.saturating_mul(target_relative)) / total_mass;
+    (bounded_velocity(first), bounded_velocity(second))
+}
+
+fn bounded_velocity(value: i128) -> i64 {
+    i64::try_from(value)
+        .unwrap_or_else(|_| value.signum() as i64 * MAX_LINEAR_SPEED_UM_PER_SECOND)
+        .clamp(
+            -MAX_LINEAR_SPEED_UM_PER_SECOND,
+            MAX_LINEAR_SPEED_UM_PER_SECOND,
+        )
 }
 
 const fn axis_bounds(bounds: (FixedMicrometers3, FixedMicrometers3), axis: Axis) -> (i64, i64) {
@@ -2135,6 +2216,90 @@ mod tests {
         let first_bounds = body_aabb(&bodies[&1], states[&1]);
         let second_bounds = body_aabb(&bodies[&2], states[&2]);
         assert_eq!(first_bounds.1.x, second_bounds.0.x);
+    }
+
+    #[test]
+    fn dynamic_contact_friction_reduces_tangential_slip_without_losing_momentum() {
+        let first = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![BodyVoxel {
+                position: IVec3::new(0, 5, 0),
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("glancing first body");
+        let second = RigidBodyDescriptor::from_replicated_voxels(
+            2,
+            vec![BodyVoxel {
+                position: IVec3::new(3, 5, 0),
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("glancing second body");
+        let mut first_state = RigidBodyState::at_spawn(&first);
+        first_state.linear_velocity_um_per_second.x = 120_000_000;
+        first_state.linear_velocity_um_per_second.z = 10_000_000;
+        let mut second_state = RigidBodyState::at_spawn(&second);
+        second_state.linear_velocity_um_per_second.x = -120_000_000;
+        let bodies = BTreeMap::from([(first.id, first), (second.id, second)]);
+        let mut states = BTreeMap::from([(1, first_state), (2, second_state)]);
+
+        let report = step_rigid_bodies(&World::default(), &bodies, &mut states);
+
+        assert_eq!(report.body_collisions, 1);
+        assert_eq!(states[&1].linear_velocity_um_per_second.z, 5_000_000);
+        assert_eq!(states[&2].linear_velocity_um_per_second.z, 5_000_000);
+        assert_eq!(states[&1].integration_remainder[2], 0);
+        assert_eq!(states[&2].integration_remainder[2], 0);
+    }
+
+    #[test]
+    fn bounded_solver_passes_propagate_a_reverse_order_contact_chain() {
+        let mut bodies = BTreeMap::new();
+        let mut initial_states = BTreeMap::new();
+        for index in 0..4_u64 {
+            let position = IVec3::new(i32::try_from(index).expect("small chain"), 5, 0);
+            let body = RigidBodyDescriptor::from_replicated_voxels(
+                index + 1,
+                vec![BodyVoxel {
+                    position,
+                    voxel: Voxel::new(Material::Concrete),
+                }],
+                BodyLimits::default(),
+            )
+            .expect("chain body");
+            let mut state = RigidBodyState::at_spawn(&body);
+            if index == 3 {
+                state.linear_velocity_um_per_second.x = -120_000_000;
+            }
+            initial_states.insert(body.id, state);
+            bodies.insert(body.id, body);
+        }
+        let mut first_run = initial_states.clone();
+        let mut second_run = initial_states;
+
+        let first_report = step_rigid_bodies(&World::default(), &bodies, &mut first_run);
+        let second_report = step_rigid_bodies(&World::default(), &bodies, &mut second_run);
+
+        assert_eq!(first_run, second_run);
+        assert_eq!(first_report, second_report);
+        assert_eq!(first_report.broad_phase_pairs, 5);
+        assert!((3..=5 * MAX_BODY_SOLVER_PASSES).contains(&first_report.body_collisions));
+        assert!(first_run[&1].linear_velocity_um_per_second.x < 0);
+        for pair in [
+            (&bodies[&1], first_run[&1], &bodies[&2], first_run[&2]),
+            (&bodies[&2], first_run[&2], &bodies[&3], first_run[&3]),
+            (&bodies[&3], first_run[&3], &bodies[&4], first_run[&4]),
+        ] {
+            let left = body_aabb(pair.0, pair.1);
+            let right = body_aabb(pair.2, pair.3);
+            assert!(
+                left.1.x.saturating_sub(right.0.x) <= MICROMETERS_PER_VOXEL / 8,
+                "bounded passes left excessive penetration: {left:?} versus {right:?}"
+            );
+        }
     }
 
     #[test]

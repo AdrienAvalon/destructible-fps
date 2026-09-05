@@ -3,6 +3,32 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — four-pass contact and friction increment
+
+Source state: parent `62519ab` plus the bounded contact-iteration increment documented here. The
+lateral solver now performs at most four deterministic passes over the already capped 8,192-pair
+broad phase and stops early when a pass changes no constraint. This allows a right-to-left impact to
+propagate through a short chain despite the canonical left-to-right pair order. Dynamic Coulomb
+friction reduces relative tangential velocity by a value bounded from the normal impulse while
+reconstructing both velocities from their shared momentum; changed-axis integration remainders are
+discarded.
+
+New tests prove bit-identical four-body reverse-order propagation with residual penetration below
+one eighth of a voxel, and an equal-mass glancing contact whose 10 m/s tangential slip converges to a
+shared 5 m/s velocity without momentum loss. The exported `MAX_BODY_SOLVER_PASSES` makes the work
+ceiling inspectable. The complete promotion passed 82 library tests, four binary tests, and 40
+integration tests in debug and release.
+
+```bash
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 1000 --scenario dynamic-head-on
+```
+
+The 1,024-body fixture still resolved exactly 512 independent contacts per sample and all 512,000
+expected contact resolutions. Across 1,000 samples, tick p50 was 0.944 ms, p95 0.980 ms, p99
+0.994 ms, and maximum 1.014 ms. The usual independent-pair path performs one productive pass and one
+empty early-exit pass. This remains below the 12 ms server-work target; voxel-exact contact, rotation,
+and convergence of large constraint islands remain outside this result.
+
 ## 2026-09-05 — bounded lateral body-contact increment
 
 Source state: parent `66741fe` plus the isolated-pair dynamic-contact increment documented here.

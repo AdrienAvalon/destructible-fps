@@ -70,6 +70,8 @@ streaming, with no synchronous world meshing on the presentation thread.
 - deterministic bounded topology analysis around edits, foundation/authored anchors, canonical
   islands, mass, bounds, fingerprints, negative tests, and an 8,192-voxel benchmark (delivered as an
   isolated primitive);
+- bounded promotion into revalidated authoritative body descriptors with integer-millimetre centre
+  of mass and integer inertia (delivered as an isolated primitive);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
@@ -172,9 +174,10 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. promote unsupported islands into bounded authoritative rigid-body descriptors;
-2. integrate topology analysis and detachment into one atomic authoritative transaction;
-3. replicate structural detachments through fingerprinted server transactions.
+1. integrate topology analysis, body promotion, and static-voxel detachment into one atomic
+   authoritative transaction;
+2. replicate structural detachments through fingerprinted server transactions;
+3. add fixed-step gravity and broad-phase collisions for detached bodies.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

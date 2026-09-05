@@ -77,11 +77,38 @@ impl StructuralAnchors {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetachedIsland {
-    pub voxels: Vec<IVec3>,
-    pub minimum: IVec3,
-    pub maximum: IVec3,
-    pub mass_kg: u64,
-    pub fingerprint: u128,
+    pub(crate) voxels: Vec<IVec3>,
+    pub(crate) minimum: IVec3,
+    pub(crate) maximum: IVec3,
+    pub(crate) mass_kg: u64,
+    pub(crate) fingerprint: u128,
+}
+
+impl DetachedIsland {
+    #[must_use]
+    pub fn voxels(&self) -> &[IVec3] {
+        &self.voxels
+    }
+
+    #[must_use]
+    pub const fn minimum(&self) -> IVec3 {
+        self.minimum
+    }
+
+    #[must_use]
+    pub const fn maximum(&self) -> IVec3 {
+        self.maximum
+    }
+
+    #[must_use]
+    pub const fn mass_kg(&self) -> u64 {
+        self.mass_kg
+    }
+
+    #[must_use]
+    pub const fn fingerprint(&self) -> u128 {
+        self.fingerprint
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -328,7 +355,7 @@ fn classify_component(
     Ok((component, supported))
 }
 
-fn describe_island(world: &World, mut voxels: Vec<IVec3>) -> DetachedIsland {
+pub(crate) fn describe_island(world: &World, mut voxels: Vec<IVec3>) -> DetachedIsland {
     voxels.sort_unstable();
     let (minimum, maximum) = voxels.iter().copied().fold(
         (

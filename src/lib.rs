@@ -8,6 +8,7 @@ pub mod generator;
 pub mod material;
 pub mod mesh;
 pub mod mesh_scheduler;
+pub mod physics;
 pub mod player;
 pub mod render;
 pub mod replication;
@@ -19,6 +20,9 @@ pub mod world;
 pub use destruction::{DestructionReport, Explosion};
 pub use generator::demo_world;
 pub use material::{Material, MaterialProperties, Voxel};
+pub use physics::{
+    BodyError, BodyLimits, FixedMillimeters3, InertiaDiagonalKgMm2, RigidBodyDescriptor,
+};
 pub use replication::{
     AuthoritativeServer, ClientReplica, ClientStatus, CodecError, CommandError, DeltaFrame,
     DeltaPacket, ExplosionCommand, FrameAssembler, ReplicationError, decode_frame, encode_frames,

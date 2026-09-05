@@ -1,6 +1,6 @@
 use destructible_fps::{
-    IVec3, Material, SampleWindow, StructuralAnchors, StructuralLimits, Voxel, VoxelChange, World,
-    analyze_structural_changes,
+    BodyLimits, IVec3, Material, RigidBodyDescriptor, SampleWindow, StructuralAnchors,
+    StructuralLimits, Voxel, VoxelChange, World, analyze_structural_changes,
 };
 use std::{error::Error, hint::black_box, time::Instant};
 
@@ -13,37 +13,51 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (world, changes) = benchmark_fixture();
     let anchors = StructuralAnchors::foundation_plane(0);
     let limits = StructuralLimits::default();
-    let mut samples = SampleWindow::new(iterations);
+    let mut analysis_samples = SampleWindow::new(iterations);
+    let mut promotion_samples = SampleWindow::new(iterations);
+    let mut total_samples = SampleWindow::new(iterations);
     let started = Instant::now();
     let mut expected_fingerprint = None;
 
     for _ in 0..iterations {
         let iteration_started = Instant::now();
+        let analysis_started = Instant::now();
         let report = analyze_structural_changes(&world, &changes, &anchors, limits)?;
-        samples.record_ms(iteration_started.elapsed().as_secs_f64() * 1_000.0);
+        analysis_samples.record_ms(analysis_started.elapsed().as_secs_f64() * 1_000.0);
         let [island] = report.detached_islands.as_slice() else {
             return Err("benchmark fixture did not produce exactly one detached island".into());
         };
-        if island.voxels.len() != EXPECTED_ISLAND_VOXELS {
+        if island.voxels().len() != EXPECTED_ISLAND_VOXELS {
             return Err(format!(
                 "benchmark island has {} voxels instead of {EXPECTED_ISLAND_VOXELS}",
-                island.voxels.len()
+                island.voxels().len()
             )
             .into());
         }
+        let promotion_started = Instant::now();
+        let body =
+            RigidBodyDescriptor::from_detached_island(&world, island, BodyLimits::default())?;
+        promotion_samples.record_ms(promotion_started.elapsed().as_secs_f64() * 1_000.0);
+        total_samples.record_ms(iteration_started.elapsed().as_secs_f64() * 1_000.0);
         if expected_fingerprint
-            .replace(island.fingerprint)
-            .is_some_and(|expected| expected != island.fingerprint)
+            .replace(body.id)
+            .is_some_and(|expected| expected != body.id)
         {
             return Err("structural island fingerprint changed between iterations".into());
         }
-        black_box(report);
+        black_box((report, body));
     }
 
     let elapsed = started.elapsed();
-    let summary = samples
+    let analysis = analysis_samples
         .summary()
         .ok_or("structural benchmark produced no samples")?;
+    let promotion = promotion_samples
+        .summary()
+        .ok_or("rigid-body benchmark produced no samples")?;
+    let total = total_samples
+        .summary()
+        .ok_or("combined structural benchmark produced no samples")?;
     let iterations_float = f64::from(u32::try_from(iterations)?);
     println!("Destructible FPS structural benchmark — detached slab");
     println!("  iterations           {iterations}");
@@ -56,10 +70,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         "  throughput           {:.0} analyses/s",
         iterations_float / elapsed.as_secs_f64()
     );
-    println!("  analysis p50         {:.3} ms", summary.p50_ms);
-    println!("  analysis p95         {:.3} ms", summary.p95_ms);
-    println!("  analysis p99         {:.3} ms", summary.p99_ms);
-    println!("  analysis max         {:.3} ms", summary.max_ms);
+    println!("  analysis p50         {:.3} ms", analysis.p50_ms);
+    println!("  analysis p95         {:.3} ms", analysis.p95_ms);
+    println!("  analysis p99         {:.3} ms", analysis.p99_ms);
+    println!("  promotion p50        {:.3} ms", promotion.p50_ms);
+    println!("  promotion p95        {:.3} ms", promotion.p95_ms);
+    println!("  promotion p99        {:.3} ms", promotion.p99_ms);
+    println!("  combined p50         {:.3} ms", total.p50_ms);
+    println!("  combined p95         {:.3} ms", total.p95_ms);
+    println!("  combined p99         {:.3} ms", total.p99_ms);
+    println!("  combined max         {:.3} ms", total.max_ms);
     println!(
         "  island fingerprint  {:032x}",
         expected_fingerprint.ok_or("missing structural fingerprint")?

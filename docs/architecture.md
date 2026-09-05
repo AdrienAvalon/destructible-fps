@@ -67,6 +67,8 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 
 - bounded incremental topology analysis around changed voxels, foundation/authored anchors, and
   canonical detached-island descriptors (delivered as an isolated server-side primitive);
+- revalidated rigid-body descriptors with fixed integer centre of mass, diagonal inertia, mass,
+  bounds, canonical geometry, and stable identity (delivered without integration yet);
 - persistent foundation and material constraint graph integrated into authoritative transactions;
 - compression, tension, shear, and connection limits by material;
 - local stress propagation after damage;

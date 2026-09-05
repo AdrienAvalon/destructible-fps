@@ -79,12 +79,19 @@ foundation path, computes mass/bounds, and reproduces the same 128-bit island fi
 
 | Measurement | Result |
 |---|---:|
-| Throughput | 381 analyses/s |
-| Analysis p50 | 2.618 ms |
-| Analysis p95 | 2.632 ms |
-| Analysis p99 | 2.662 ms |
-| Analysis max | 2.891 ms |
+| Combined throughput | 317 analyses and promotions/s |
+| Topology analysis p50 | 2.561 ms |
+| Topology analysis p95 | 2.605 ms |
+| Topology analysis p99 | 2.664 ms |
+| Body promotion p50 | 0.582 ms |
+| Body promotion p95 | 0.630 ms |
+| Body promotion p99 | 0.638 ms |
+| Combined p50 | 3.147 ms |
+| Combined p95 | 3.203 ms |
+| Combined p99 | 3.295 ms |
+| Combined max | 3.400 ms |
 
-The result is below the 12 ms server-work target on this fixture. It is not yet a full collapse tick:
-rigid-body creation, collision solving, transaction integration, and replication remain separate
-promotion gates.
+The promotion step revalidates the read-only island proof, computes the fixed-unit centre of mass,
+and computes diagonal inertia. The combined result is below the 12 ms server-work target on this
+fixture. It is not yet a full collapse tick: static-world detachment, body integration, collision
+solving, transaction integration, and replication remain separate promotion gates.

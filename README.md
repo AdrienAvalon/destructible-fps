@@ -34,8 +34,10 @@ temporal anti-aliasing, and large-world residency streaming remain explicit late
 
 The first server-side structural primitive is also available: a deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
-canonical detached-island descriptors with mass, bounds, and a 128-bit fingerprint. It is benchmarked
-but not yet wired into the playable explosion transaction or rigid-body simulation.
+read-only canonical detached-island proofs. A second bounded step revalidates each proof and produces
+an authoritative body descriptor with integer-millimetre centre of mass, integer inertia, mass,
+bounds, canonical voxels, and a 128-bit identity. These primitives are benchmarked but not yet wired
+into the playable explosion transaction or rigid-body integration.
 
 ## Screenshots
 

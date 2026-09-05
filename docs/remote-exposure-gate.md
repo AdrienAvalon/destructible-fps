@@ -20,6 +20,7 @@ non-loopback variant. Configuration fields or operator assertions alone do not c
 | Loss and reordering | Distinct delay, duplication, and loss traces with bounded repair | Four-client real-process trace replay | Pass for deterministic loopback; add WAN profiles |
 | Trust outage | Discovery, static trust, or renewal reaches its monotonic deadline | Real-process TLS outage and static OIDC expiry tests pass; discovery retains failed-refresh controller tests | Pass for local mechanisms; repeat live discovery outage against the disposable realm |
 | Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix non-root service identity plus file/parent owner, mode, type, and no-follow tests | Partial: Windows service DACL validation missing |
+| Deployment policy | Exact interface/address/port, certificate name, issuer, source ranges, budgets, owner, and expiry | Bounded `LanDeploymentPolicy` parser, negative matrix, and `lan-policy-check` | Partial: offline contract only; instantiate, review, and verify against the live host |
 
 Every executable row is part of the normal test suite; no network namespace, firewall exception, or
 remote bind is needed to rehearse it. A failure in any row blocks promotion.
@@ -35,9 +36,10 @@ remote bind is needed to rehearse it. A failure in any row blocks promotion.
 4. Hostile external clients exercise handshake saturation, malformed datagrams, replay, burst rate,
    queue pressure, packet loss, duplication, reordering, and reconnect storms without exceeding the
    fixed simulation budget or leaking credentials.
-5. A reviewed deployment policy names the exact interface, UDP port, certificate name, identity
-   issuer, firewall source ranges, observability budget, rollback owner, and expiry. Wildcard binds
-   remain forbidden for the first private-network demo.
+5. Instantiate and review the bounded deployment-policy contract for the target host, then prove its
+   exact interface/address relation, UDP port, certificate name, identity issuer, firewall source
+   ranges, observability budget, rollback owner, and expiry against live state. Wildcard binds remain
+   forbidden for the first private-network demo.
 
 The in-process hostile client rehearsal now establishes 32 concurrent trusted TLS connections while
 withholding every application hello. The 33rd connection is refused within a fixed deadline, the
@@ -71,3 +73,17 @@ through the reviewed LAN interface and firewall profile.
 Only after all five proofs are reproducible may the internal validated binder gain a private-network
 capability. Internet publication remains a separate later gate with capacity protection and incident
 response evidence.
+
+## Offline deployment-policy contract
+
+`config/lan-deployment-policy.example.json` is a non-secret template, not an approved policy. The
+`lan-policy-check` binary reads at most 16 KiB, rejects unknown fields, and accepts only a canonical
+schema-v1 document that expires in more than 60 seconds and no more than 24 hours. The source CIDRs
+must be private, canonical, non-overlapping, and in the same address family as the exact bind address.
+The declared authority limits must exactly match the compiled player, pending-handshake, gameplay
+queue, and per-session datagram ceilings; a document cannot raise them.
+
+The checker performs no socket operation and intentionally does not inspect or mutate a network
+interface, firewall, certificate store, identity provider, or service manager. A successful
+`POLICY_OK` therefore means only that a proposal is bounded and unambiguous. It does not make the
+proposal approved, does not prove the target state, and cannot unlock the loopback-only server.

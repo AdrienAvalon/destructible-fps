@@ -4,6 +4,7 @@
 //! milestone adds a safe Vulkan presentation layer without moving authority into it.
 
 pub mod character;
+pub mod deployment_policy;
 pub mod destruction;
 pub mod generator;
 pub mod material;
@@ -34,6 +35,10 @@ pub use character::{
     AuthoritativePlayer, AuthoritativePlayerState, MAX_PLAYER_INPUT_HOLD_TICKS,
     MAX_PLAYER_INPUT_PER_MILLE, PLAYER_EYE_HEIGHT_UM, PLAYER_HEIGHT_UM, PLAYER_RADIUS_UM,
     PlayerBuildContext, PlayerInputCommand, PlayerInputError, PlayerStepReport,
+};
+pub use deployment_policy::{
+    LAN_POLICY_SCHEMA_VERSION, LanDeploymentPolicy, LanDeploymentPolicyError, MAX_LAN_POLICY_BYTES,
+    MAX_LAN_POLICY_LIFETIME_SECONDS,
 };
 pub use destruction::{DestructionReport, Explosion};
 pub use generator::demo_world;

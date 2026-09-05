@@ -312,6 +312,15 @@ decoded as malformed, and no command is applied. A fifteenth performs 32 complet
 connect/disconnect cycles and finishes with exact admission/disconnection parity and no leaked active
 session.
 
+The LAN deployment policy is intentionally a separate offline module. It parses a 16 KiB-bounded,
+versioned JSON contract and can describe only one short-lived RFC1918 or IPv6 ULA deployment. It
+rejects wildcard, public, loopback and IPv4-mapped IPv6 addresses; non-canonical, overlapping or
+mixed-family firewall ranges; wildcard certificate names; unsafe OIDC URLs; and any runtime limit
+that differs from the compiled authority ceilings. Its type has no endpoint or server constructor,
+and the secure launch configuration neither imports nor references it. A later promotion must add a
+distinct capability that proves the declared interface/address relation, certificate SAN, exact
+issuer, firewall state, ACLs and monotonic expiry before calling a non-loopback binder.
+
 ## Planned engine layers
 
 ### First playable slice — delivered

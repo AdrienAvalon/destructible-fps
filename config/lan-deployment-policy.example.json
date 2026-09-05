@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "deployment_id": "replace-with-reviewed-demo-id",
+  "interface": "replace-with-exact-interface",
+  "bind_address": "192.168.42.20",
+  "udp_port": 40001,
+  "certificate_dns_name": "game.home.arpa",
+  "oidc_issuer": "https://identity.home.arpa/realms/game",
+  "firewall_source_cidrs": [
+    "192.168.42.0/24"
+  ],
+  "runtime_limits": {
+    "max_players": 16,
+    "max_pending_handshakes": 32,
+    "max_gameplay_queue_events": 256,
+    "max_session_datagrams_per_second": 240
+  },
+  "observability": {
+    "max_status_silence_seconds": 15,
+    "max_log_events_per_minute": 1000,
+    "max_metric_series": 64
+  },
+  "rollback_owner": "team:replace-me",
+  "expires_at_unix_seconds": 0
+}

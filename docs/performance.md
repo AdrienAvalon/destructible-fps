@@ -1365,3 +1365,33 @@ three consecutive debug and three consecutive release executions before complete
 Graphify reported 2,002 nodes, 5,673 post-build edges, zero unverified code nodes, and a fully fresh
 index. This closes the deterministic loopback hostile-load matrix. The same campaign remains required
 through the reviewed LAN interface and firewall profile before non-loopback exposure.
+
+## 2026-09-05 — offline private-LAN policy contract
+
+Source state: parent `2a082a2` plus the bounded deployment-policy increment. A separate schema-v1
+module now validates one exact short-lived private-LAN proposal without being referenced by either
+the secure launch configuration or the endpoint binder. Six unit tests exercise a valid RFC1918
+contract, schema and unknown-field rejection, wildcard/public/loopback/mapped bind rejection,
+identity and interface ambiguity, canonical private source ranges, compiled runtime-limit parity,
+bounded observability, rollback ownership, and expiry. Three process tests execute the releaseable
+checker path, prove its successful output omits topology and identity values, and reject relative
+paths and oversized files.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 163 passed debug; 163 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 61 passed debug; 61 passed release |
+| Destruction p99, 500 events | 0.355 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.363 ms |
+| Physics p99, 1,024 bodies | 1.231 ms |
+| Snapshot encode + decode + install p99 | 14.679 ms |
+| CPU frame-work p99, RTX 4050 smoke | 16.910 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.265 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+The snapshot run contained one 9.444 ms encode outlier but its complete 14.679 ms p99 remained below
+one 60 Hz interval. The graphical CPU cadence crossed that interval while GPU work remained below
+0.4 ms maximum; this is recorded as presentation scheduling rather than attributed to the offline
+parser. Graphify reported 2,069 nodes, 5,818 post-build edges, zero unverified code nodes, a fully
+fresh index, and no directed path from `LanDeploymentPolicy` to `SecureDedicatedServer`.

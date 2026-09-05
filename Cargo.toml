@@ -51,6 +51,10 @@ path = "src/bin/snapshot_benchmark.rs"
 name = "secure-dedicated-server"
 path = "src/bin/secure_dedicated_server.rs"
 
+[[bin]]
+name = "lan-policy-check"
+path = "src/bin/lan_policy_check.rs"
+
 [dependencies]
 base64 = "=0.22.1"
 bytes = "=1.12.1"

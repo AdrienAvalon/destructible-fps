@@ -246,6 +246,21 @@ Automated certificate issuance, reliable control/snapshot streams, and remote de
 still required. The current executable
 coverage and every remaining promotion proof are explicit in
 [`docs/remote-exposure-gate.md`](docs/remote-exposure-gate.md).
+
+The future LAN path also has a bounded offline policy contract and checker. It records one exact
+private address, interface, UDP port, certificate name, OIDC issuer, canonical firewall source
+ranges, engine limits, observability budget, rollback owner, and an expiry no more than 24 hours
+away. Validation deliberately grants no network capability: `secure-dedicated-server` still accepts
+only loopback. Copy `config/lan-deployment-policy.example.json` outside the repository, replace every
+placeholder, set a fresh expiry, then lint the proposed document with:
+
+```bash
+cargo run --release --bin lan-policy-check -- /absolute/path/to/lan-policy.json
+```
+
+The live interface, certificate SAN, firewall state, issuer and platform ACLs must still be checked
+independently before this contract can participate in a private-network launch.
+
 For local protocol development the legacy authority can be started directly:
 
 ```bash

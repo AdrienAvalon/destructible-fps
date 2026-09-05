@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "observed_date": "2026-09-05",
+  "purpose": "Local development-tool receipt, not a runtime dependency or automatic installer",
+  "platform": "CachyOS x86_64",
+  "packages": {
+    "renderdoc": "1.45-1.1",
+    "blender": "17:5.2.1-2",
+    "perf": "7.2.2-1",
+    "cmake": "4.4.3-2.1",
+    "ninja": "1.13.2-3.1"
+  },
+  "perf_archive": {
+    "url": "https://archive.archlinux.org/packages/p/perf/perf-7.2.2-1-x86_64.pkg.tar.zst",
+    "sha256": "de2ca4570345c663d13957b9d28b92e03ae26f1b997a0345959db14de0c4a62e",
+    "verified_signing_key": "F00B96D15228013FFC9C9D0393B11DAA4C197E3D"
+  },
+  "tracy": {
+    "repository": "https://github.com/wolfpld/tracy",
+    "tag": "v0.14.1",
+    "commit": "30997d5ca6bb632cc10807a1da8a6d3de0aeeb3c",
+    "license": "BSD-3-Clause",
+    "build": "GCC 16.2.1, CMake Release/Ninja, NO_ISA_EXTENSIONS=ON, NO_LTO=ON, profiler LEGACY=ON, parallel=4",
+    "binaries_sha256": {
+      "tracy-capture": "53dffc359aa29e6e451f5493493c11dba66104b2803f368fd05116c575263518",
+      "tracy-profiler": "a0546a9e3c4cfde1406f2ad5c86fd7e45bb536c93166664b19372c44656ad934",
+      "tracy-csvexport": "39e0ba77295f6a4d0f880eb00e10bc983b45e59d4cb3434d5e7cc0b65c085b1f"
+    },
+    "vendor_git_heads_before_upstream_cmake_patches": {
+      "capstone-engine/capstone": "6ef3f4856689e340db794cceec23b155eefb541b",
+      "facebook/zstd": "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+      "GabTux/PPQSort": "21c5a20ca3daf572caaf0a8522db32e27e28fa1d",
+      "TheLartians/PackageProject.cmake": "ac46aef9aaf69a59928a41529cbe30c920e84af4",
+      "nlohmann/json": "55f93686c01528224f448c19128836e7df245f72",
+      "ocornut/imgui": "b48d1afbe8ee8b238e2961dc363a949dd7304e23",
+      "btzy/nativefiledialog-extended": "3cd252a8f7ca32419b1ca235c2990ba6a0ecba7c",
+      "mity/md4c": "65c6c9d72cebd9a731aaa5597414ce04d9ea5de3",
+      "aklomp/base64": "8bdda2d47caf8b066999c5bd01069e55bcd0d396",
+      "htacg/tidy-html5": "1ca37471b48a3498f985509828cb3cf85ea129f8",
+      "unum-cloud/usearch": "cc23bbaf21ef52313c5a495adbc40cbd733cdcfb"
+    }
+  }
+}

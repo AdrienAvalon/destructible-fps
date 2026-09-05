@@ -2,3 +2,4 @@
 # configuration examples outside the code graph to avoid perpetual stale scans.
 config/*.json
 assets/materials/sources.json
+tools/toolchain-observed.json

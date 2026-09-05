@@ -176,6 +176,9 @@ constraint-island convergence are not claimed yet.
 
 ## Run
 
+Development tools, isolated GPU captures and authoring checks are documented in
+[`docs/tooling.md`](docs/tooling.md). Installing them does not add dependencies to the shipped game.
+
 ```bash
 cargo test --all-targets
 cargo test --test network

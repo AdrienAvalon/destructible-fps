@@ -153,12 +153,14 @@ changed chunks are capped at 512 pending entries, prioritized from the current c
 in batches of at most 256; body batches retain the existing 16-body/32,768-voxel cap. Results from a
 stale immutable world snapshot are never uploaded and their chunks are requeued against the newest
 replica. Initial snapshot rebuild remains synchronous until the residency-streaming gate.
-After bootstrap, a complete future delta starts a 100 ms gap timer. The graphical client requests
-the exact expected sequence at most four times per second while the later transaction remains in
-the bounded ordered inbox. An intentionally impaired Vulkan smoke drops the complete first
-transaction, accepts the second, obtains the retained frames, releases both in order and requires
-their mesh queues to drain before success. An expired retained sequence can still move the client
-back through the same atomic snapshot path.
+After bootstrap, a complete future delta starts a bounded reordering grace period. The graphical
+client initially waits 100 ms and retransmits after 250 ms, then adapts both values from clean repair
+round trips using integer Jacobson/Karels smoothing. RTO stays between 100 ms and two seconds,
+reordering grace between 50 and 500 ms, and repeated requests back off exponentially. Karn filtering
+excludes ambiguous responses after retransmission. An intentionally impaired Vulkan smoke drops the
+complete first transaction, accepts the second, obtains the retained frames, releases both in order,
+reports RTT/RTO evidence, and requires its mesh queues to drain before success. An expired retained
+sequence can still move the client back through the same atomic snapshot path.
 This does not relax exposure: the legacy client/server pair and current secure authority refuse
 non-loopback operation. The graphical QUIC client is transport-ready for a remote address, but that
 path remains unavailable until the authority's remote security gate is satisfied.
@@ -168,14 +170,17 @@ the snapshot hash is an integrity check, not a MAC, and that legacy transport pr
 confidentiality, identity, packet authenticity, or congestion control. It must not be exposed beyond
 the developer machine.
 
-A test-only source-bound UDP proxy now injects a fixed 2–6-pump-tick delay pattern, deliberate
-whole-transaction and snapshot-fragment loss, duplication, and reordering between real client and
-server sockets. Its queue is capped at 2,048 datagrams and 2 MiB, rejects datagrams above the
-application MTU before allocation, and accounts delivered bytes by control, delta, snapshot, and
+A test-only source-bound UDP proxy injects either its fixed regression profile or a finite
+declarative trace independently for every direction/channel. A trace holds at most 256 steps, limits
+delay to 128 pump ticks and deliveries to zero, one, or two, then becomes clean so recovery remains
+provable. The queue is capped at 2,048 datagrams and 2 MiB, rejects datagrams above the application
+MTU before allocation, and accounts received and delivered bytes by control, delta, snapshot, and
 unknown channel. One process test repairs a completely lost first delta while later packets are
-buffered; another repairs the lost snapshot fragments and survives a lost first install ACK through
-bounded client retry. This is deterministic fault injection for correctness and byte accounting,
-not an Internet congestion algorithm or a substitute for authenticated transport.
+buffered; another repairs lost snapshot fragments and a lost first install ACK. A four-client test
+replays distinct loss/jitter/duplication traces, obtains one clean adaptive RTT sample per client,
+proves identical replicas and exact equality of offered server delta bytes. This is deterministic
+fault injection and a fairness regression, not an Internet congestion algorithm or a substitute for
+authenticated transport.
 
 The secure runtime now wires the transport-independent authority core to Quinn/rustls TLS 1.3. A
 server certificate is verified against explicit client roots and the `destructible-fps/1` ALPN. The

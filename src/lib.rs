@@ -10,6 +10,7 @@ pub mod material;
 pub mod mesh;
 pub mod mesh_scheduler;
 pub mod network;
+pub mod network_timing;
 pub mod oidc;
 pub mod oidc_discovery;
 pub mod physics;
@@ -47,6 +48,10 @@ pub use network::{
     MAX_SNAPSHOT_CATCHUP_BYTES, MAX_SNAPSHOT_CATCHUP_PACKETS,
     MAX_SNAPSHOT_FRAMES_PER_PEER_PER_TICK, MIN_APPLICATION_DATAGRAM_BYTES, NetworkRuntimeError,
     NetworkTickReport, OrderedDeltaInbox,
+};
+pub use network_timing::{
+    AdaptiveRepairTimer, INITIAL_REORDER_GRACE, INITIAL_REPAIR_RTO, MAX_REORDER_GRACE,
+    MAX_REPAIR_RTO, MIN_REORDER_GRACE, MIN_REPAIR_RTO,
 };
 pub use oidc::{
     MAX_OIDC_JWKS_BYTES, MAX_OIDC_JWKS_KEYS, MAX_OIDC_REPLAY_ENTRIES,

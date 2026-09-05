@@ -1,10 +1,10 @@
 use destructible_fps::{
-    AuthoritativeServer, ClientReplica, ExplosionCommand, IVec3, OrderedDeltaInbox,
-    PlayerInputCommand, ServerControlMessage, SnapshotAssembler, World, decode_frame,
-    decode_player_state_packet, decode_server_control, demo_world, encode_client_hello,
-    encode_explosion_request, encode_player_input, encode_repair_request, encode_snapshot_ack,
-    encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
-    is_player_state_datagram, is_snapshot_datagram,
+    AdaptiveRepairTimer, AuthoritativeServer, ClientReplica, ExplosionCommand, IVec3,
+    MAX_REPAIR_RTO, MIN_REPAIR_RTO, OrderedDeltaInbox, PlayerInputCommand, ServerControlMessage,
+    SnapshotAssembler, World, decode_frame, decode_player_state_packet, decode_server_control,
+    demo_world, encode_client_hello, encode_explosion_request, encode_player_input,
+    encode_repair_request, encode_snapshot_ack, encode_snapshot_fragments_request,
+    encode_snapshot_request, is_delta_datagram, is_player_state_datagram, is_snapshot_datagram,
 };
 use std::{
     io,
@@ -35,6 +35,9 @@ struct Endpoint {
 const MAX_PROXY_PENDING_DATAGRAMS: usize = 2_048;
 const MAX_PROXY_PENDING_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_PROXY_RECEIVES_PER_PUMP: usize = 128;
+const MAX_IMPAIRMENT_TRACE_STEPS: usize = 256;
+const MAX_IMPAIRMENT_TRACE_DELAY_TICKS: u16 = 128;
+const IMPAIRMENT_FLOW_COUNT: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProxyDirection {
@@ -70,9 +73,82 @@ impl DatagramChannel {
     }
 }
 
+const fn impairment_flow(direction: ProxyDirection, channel: DatagramChannel) -> usize {
+    direction.index() * 4 + channel.index()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TraceStep {
+    delay_ticks: u16,
+    deliveries: u8,
+}
+
+impl TraceStep {
+    const CLEAN: Self = Self {
+        delay_ticks: 0,
+        deliveries: 1,
+    };
+}
+
+const fn trace_step(delay_ticks: u16, deliveries: u8) -> TraceStep {
+    TraceStep {
+        delay_ticks,
+        deliveries,
+    }
+}
+
+struct ImpairmentTrace {
+    flows: [Vec<TraceStep>; IMPAIRMENT_FLOW_COUNT],
+}
+
+impl ImpairmentTrace {
+    fn new() -> Self {
+        Self {
+            flows: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+
+    fn with_flow(
+        mut self,
+        direction: ProxyDirection,
+        channel: DatagramChannel,
+        steps: &[TraceStep],
+    ) -> Result<Self, &'static str> {
+        if steps.len() > MAX_IMPAIRMENT_TRACE_STEPS {
+            return Err("impairment trace has too many steps");
+        }
+        if steps
+            .iter()
+            .any(|step| step.delay_ticks > MAX_IMPAIRMENT_TRACE_DELAY_TICKS || step.deliveries > 2)
+        {
+            return Err("impairment trace step is out of bounds");
+        }
+        self.flows[impairment_flow(direction, channel)] = steps.to_vec();
+        Ok(self)
+    }
+
+    fn step(
+        &self,
+        direction: ProxyDirection,
+        channel: DatagramChannel,
+        cursor: usize,
+    ) -> TraceStep {
+        self.flows[impairment_flow(direction, channel)]
+            .get(cursor)
+            .copied()
+            .unwrap_or(TraceStep::CLEAN)
+    }
+}
+
+enum ImpairmentProfile {
+    SelectiveRegression,
+    Trace(ImpairmentTrace),
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct ChannelStats {
     received: usize,
+    received_bytes: usize,
     delivered: usize,
     dropped: usize,
     duplicated: usize,
@@ -112,11 +188,37 @@ struct DeterministicUdpProxy {
     dropped_snapshot_once: [bool; 4_096],
     duplicated_snapshot_once: [bool; 4_096],
     dropped_first_ack: bool,
+    profile: ImpairmentProfile,
+    trace_cursors: [usize; IMPAIRMENT_FLOW_COUNT],
     stats: ImpairmentStats,
+}
+
+struct TracedEndpoint {
+    socket: UdpSocket,
+    proxy: DeterministicUdpProxy,
+    proxy_address: SocketAddr,
+    session_id: u64,
+    inbox: OrderedDeltaInbox,
+    replica: ClientReplica,
+    repair_timer: AdaptiveRepairTimer,
+    gap_since: Option<Duration>,
+    applied: usize,
+    repairs: usize,
 }
 
 impl DeterministicUdpProxy {
     fn bind(server_address: SocketAddr) -> io::Result<Self> {
+        Self::bind_with_profile(server_address, ImpairmentProfile::SelectiveRegression)
+    }
+
+    fn bind_with_trace(server_address: SocketAddr, trace: ImpairmentTrace) -> io::Result<Self> {
+        Self::bind_with_profile(server_address, ImpairmentProfile::Trace(trace))
+    }
+
+    fn bind_with_profile(
+        server_address: SocketAddr,
+        profile: ImpairmentProfile,
+    ) -> io::Result<Self> {
         let client_socket = UdpSocket::bind("127.0.0.1:0")?;
         let server_socket = UdpSocket::bind("127.0.0.1:0")?;
         client_socket.set_nonblocking(true)?;
@@ -136,6 +238,8 @@ impl DeterministicUdpProxy {
             dropped_snapshot_once: [false; 4_096],
             duplicated_snapshot_once: [false; 4_096],
             dropped_first_ack: false,
+            profile,
+            trace_cursors: [0; IMPAIRMENT_FLOW_COUNT],
             stats: ImpairmentStats::default(),
         })
     }
@@ -198,6 +302,11 @@ impl DeterministicUdpProxy {
         let channel = classify_datagram(bytes);
         let channel_stats = &mut self.stats.channels[channel.index()];
         channel_stats.received = channel_stats.received.saturating_add(1);
+        channel_stats.received_bytes = channel_stats.received_bytes.saturating_add(bytes.len());
+        if let Some(step) = self.trace_step(direction, channel) {
+            self.schedule_trace_step(direction, channel, bytes, step);
+            return;
+        }
         if self.should_drop(direction, channel, bytes) {
             self.stats.channels[channel.index()].dropped = self.stats.channels[channel.index()]
                 .dropped
@@ -216,6 +325,58 @@ impl DeterministicUdpProxy {
             bytes: bytes.to_vec(),
         });
         if self.should_duplicate(direction, channel, bytes) {
+            self.stats.channels[channel.index()].duplicated = self.stats.channels[channel.index()]
+                .duplicated
+                .saturating_add(1);
+            self.admit(ScheduledDatagram {
+                direction,
+                channel,
+                deliver_at: self.tick.saturating_add(delay),
+                ordinal,
+                bytes: bytes.to_vec(),
+            });
+        }
+    }
+
+    fn trace_step(
+        &mut self,
+        direction: ProxyDirection,
+        channel: DatagramChannel,
+    ) -> Option<TraceStep> {
+        let ImpairmentProfile::Trace(trace) = &self.profile else {
+            return None;
+        };
+        let flow = impairment_flow(direction, channel);
+        let cursor = self.trace_cursors[flow];
+        self.trace_cursors[flow] = cursor.saturating_add(1);
+        Some(trace.step(direction, channel, cursor))
+    }
+
+    fn schedule_trace_step(
+        &mut self,
+        direction: ProxyDirection,
+        channel: DatagramChannel,
+        bytes: &[u8],
+        step: TraceStep,
+    ) {
+        if step.deliveries == 0 {
+            self.stats.channels[channel.index()].dropped = self.stats.channels[channel.index()]
+                .dropped
+                .saturating_add(1);
+            return;
+        }
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self.next_ordinal.saturating_add(1);
+        let delay = u64::from(step.delay_ticks);
+        self.stats.max_delay_ticks = self.stats.max_delay_ticks.max(delay);
+        self.admit(ScheduledDatagram {
+            direction,
+            channel,
+            deliver_at: self.tick.saturating_add(delay),
+            ordinal,
+            bytes: bytes.to_vec(),
+        });
+        if step.deliveries == 2 {
             self.stats.channels[channel.index()].duplicated = self.stats.channels[channel.index()]
                 .duplicated
                 .saturating_add(1);
@@ -433,6 +594,70 @@ fn impairment_metadata_parsers_reject_out_of_range_frames() {
     delta[86..88].copy_from_slice(&u16::MAX.to_le_bytes());
     assert_eq!(delta_identity(&delta), None);
     assert_eq!(delta_identity(&[]), None);
+}
+
+#[test]
+fn impairment_trace_is_bounded_and_becomes_clean_after_replay() {
+    let steps = [
+        TraceStep {
+            delay_ticks: 7,
+            deliveries: 0,
+        },
+        TraceStep {
+            delay_ticks: 3,
+            deliveries: 2,
+        },
+    ];
+    let trace = ImpairmentTrace::new()
+        .with_flow(
+            ProxyDirection::ServerToClient,
+            DatagramChannel::Delta,
+            &steps,
+        )
+        .expect("bounded trace");
+    assert_eq!(
+        trace.step(ProxyDirection::ServerToClient, DatagramChannel::Delta, 0),
+        steps[0]
+    );
+    assert_eq!(
+        trace.step(ProxyDirection::ServerToClient, DatagramChannel::Delta, 1),
+        steps[1]
+    );
+    assert_eq!(
+        trace.step(ProxyDirection::ServerToClient, DatagramChannel::Delta, 2),
+        TraceStep::CLEAN
+    );
+
+    let oversized = vec![TraceStep::CLEAN; MAX_IMPAIRMENT_TRACE_STEPS + 1];
+    assert!(
+        ImpairmentTrace::new()
+            .with_flow(
+                ProxyDirection::ServerToClient,
+                DatagramChannel::Delta,
+                &oversized,
+            )
+            .is_err()
+    );
+    for invalid in [
+        TraceStep {
+            delay_ticks: MAX_IMPAIRMENT_TRACE_DELAY_TICKS + 1,
+            deliveries: 1,
+        },
+        TraceStep {
+            delay_ticks: 0,
+            deliveries: 3,
+        },
+    ] {
+        assert!(
+            ImpairmentTrace::new()
+                .with_flow(
+                    ProxyDirection::ServerToClient,
+                    DatagramChannel::Delta,
+                    &[invalid],
+                )
+                .is_err()
+        );
+    }
 }
 
 #[test]
@@ -1025,6 +1250,146 @@ fn retained_delta_converges_through_deterministic_network_impairments() {
 }
 
 #[test]
+fn four_trace_replay_clients_converge_with_adaptive_fair_repair() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
+    let server_address = reservation.local_addr().expect("reserved address");
+    drop(reservation);
+    let mut child = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
+            .args(["--bind", &server_address.to_string(), "--max-ticks", "1200"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start four-client trace server"),
+    );
+    let mut endpoints = Vec::with_capacity(4);
+    for index in 0..4 {
+        let mut proxy =
+            DeterministicUdpProxy::bind_with_trace(server_address, four_client_trace(index))
+                .expect("bind traced proxy");
+        let proxy_address = proxy.client_address().expect("traced proxy address");
+        let socket = client_socket();
+        socket
+            .set_nonblocking(true)
+            .expect("nonblocking traced client");
+        let session_id = handshake_through_proxy(
+            &socket,
+            proxy_address,
+            &mut proxy,
+            0x9000 + u64::try_from(index).expect("small client index"),
+            &mut child,
+        );
+        endpoints.push(TracedEndpoint {
+            socket,
+            proxy,
+            proxy_address,
+            session_id,
+            inbox: OrderedDeltaInbox::default(),
+            replica: ClientReplica::new(demo_world()),
+            repair_timer: AdaptiveRepairTimer::default(),
+            gap_since: None,
+            applied: 0,
+            repairs: 0,
+        });
+    }
+
+    let commands = impaired_commands();
+    for command in commands {
+        endpoints[0]
+            .socket
+            .send_to(
+                &encode_explosion_request(endpoints[0].session_id, command),
+                endpoints[0].proxy_address,
+            )
+            .expect("send traced authoritative command");
+    }
+
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(8);
+    while Instant::now() < deadline
+        && !endpoints
+            .iter()
+            .all(|endpoint| endpoint.applied >= 2 && endpoint.inbox.expected_sequence() >= 3)
+    {
+        assert!(
+            child.0.try_wait().expect("query trace server").is_none(),
+            "trace server exited before four-client convergence"
+        );
+        let client_time = started.elapsed();
+        for endpoint in &mut endpoints {
+            endpoint.proxy.pump().expect("pump traced client");
+            receive_traced_deltas(endpoint, client_time);
+            request_traced_repair(endpoint, client_time);
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(
+        endpoints
+            .iter()
+            .all(|endpoint| endpoint.applied >= 2 && endpoint.inbox.expected_sequence() >= 3),
+        "four traced clients did not converge"
+    );
+    let mut expected = AuthoritativeServer::new(demo_world());
+    for command in commands {
+        expected
+            .execute_explosion(endpoints[0].session_id, command)
+            .expect("replay traced authoritative command");
+    }
+    assert_four_trace_results(&endpoints, expected.world().fingerprint());
+}
+
+fn assert_four_trace_results(endpoints: &[TracedEndpoint], expected_world: u128) {
+    for endpoint in endpoints {
+        assert_eq!(endpoint.replica.world().fingerprint(), expected_world);
+        assert_eq!(endpoint.repairs, 1);
+        assert_eq!(endpoint.repair_timer.sample_count(), 1);
+        assert!(endpoint.repair_timer.smoothed_rtt().is_some());
+        assert!(endpoint.repair_timer.retransmission_timeout() >= MIN_REPAIR_RTO);
+        assert!(endpoint.repair_timer.retransmission_timeout() <= MAX_REPAIR_RTO);
+        let stats = endpoint.proxy.stats();
+        let delta = stats.channels[DatagramChannel::Delta.index()];
+        assert!(delta.dropped >= 1);
+        assert!(delta.duplicated >= 1);
+        assert!(stats.reordered_deliveries >= 1);
+        assert_eq!(stats.queue_drops, 0);
+        assert!(stats.peak_pending_bytes <= MAX_PROXY_PENDING_BYTES);
+    }
+    let received_bytes = endpoints
+        .iter()
+        .map(|endpoint| {
+            endpoint.proxy.stats().channels[DatagramChannel::Delta.index()].received_bytes
+        })
+        .collect::<Vec<_>>();
+    let minimum = received_bytes.iter().copied().min().unwrap_or_default();
+    let maximum = received_bytes.iter().copied().max().unwrap_or_default();
+    assert_eq!(minimum, maximum, "server delta egress was not client-fair");
+    let delivered_bytes = endpoints
+        .iter()
+        .map(|endpoint| {
+            endpoint.proxy.stats().channels[DatagramChannel::Delta.index()].delivered_bytes
+        })
+        .collect::<Vec<_>>();
+    let delivered_minimum = delivered_bytes.iter().copied().min().unwrap_or_default();
+    let delivered_maximum = delivered_bytes.iter().copied().max().unwrap_or_default();
+    assert!(
+        delivered_maximum.saturating_sub(delivered_minimum) <= 4 * 1_200,
+        "trace delivery skew exceeded four datagrams: {delivered_bytes:?}"
+    );
+    eprintln!(
+        "four-client trace replay: received={received_bytes:?} delivered={delivered_bytes:?} rtt={:?} rto={:?}",
+        endpoints
+            .iter()
+            .map(|endpoint| endpoint.repair_timer.smoothed_rtt())
+            .collect::<Vec<_>>(),
+        endpoints
+            .iter()
+            .map(|endpoint| endpoint.repair_timer.retransmission_timeout())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn process_snapshot_converges_through_deterministic_network_impairments() {
     let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
     let server_address = reservation.local_addr().expect("reserved address");
@@ -1125,6 +1490,115 @@ fn process_snapshot_converges_through_deterministic_network_impairments() {
         impairment.peak_pending_bytes,
         impairment.max_delay_ticks
     );
+}
+
+fn four_client_trace(index: usize) -> ImpairmentTrace {
+    const PROFILES: [[TraceStep; 8]; 4] = [
+        [
+            trace_step(8, 1),
+            trace_step(0, 0),
+            trace_step(1, 1),
+            trace_step(5, 2),
+            trace_step(0, 1),
+            trace_step(3, 1),
+            trace_step(2, 1),
+            trace_step(0, 1),
+        ],
+        [
+            trace_step(6, 1),
+            trace_step(1, 1),
+            trace_step(0, 0),
+            trace_step(4, 1),
+            trace_step(0, 2),
+            trace_step(2, 1),
+            trace_step(5, 1),
+            trace_step(0, 1),
+        ],
+        [
+            trace_step(7, 2),
+            trace_step(0, 1),
+            trace_step(3, 1),
+            trace_step(0, 0),
+            trace_step(1, 1),
+            trace_step(4, 1),
+            trace_step(0, 1),
+            trace_step(2, 1),
+        ],
+        [
+            trace_step(5, 1),
+            trace_step(2, 2),
+            trace_step(0, 1),
+            trace_step(6, 1),
+            trace_step(0, 0),
+            trace_step(1, 1),
+            trace_step(3, 1),
+            trace_step(0, 1),
+        ],
+    ];
+    ImpairmentTrace::new()
+        .with_flow(
+            ProxyDirection::ServerToClient,
+            DatagramChannel::Delta,
+            &PROFILES[index],
+        )
+        .expect("bounded four-client trace")
+}
+
+fn receive_traced_deltas(endpoint: &mut TracedEndpoint, now: Duration) {
+    let mut buffer = [0_u8; 1_201];
+    loop {
+        match endpoint.socket.recv_from(&mut buffer) {
+            Ok((length, source))
+                if source == endpoint.proxy_address && is_delta_datagram(&buffer[..length]) =>
+            {
+                let packets = endpoint
+                    .inbox
+                    .push(&buffer[..length])
+                    .expect("valid traced delta");
+                endpoint
+                    .repair_timer
+                    .observe_sequence(endpoint.inbox.expected_sequence(), now);
+                if packets.is_empty() {
+                    if endpoint.inbox.buffered_complete_packets() > 0 {
+                        endpoint.gap_since.get_or_insert(now);
+                    }
+                } else {
+                    endpoint.gap_since = None;
+                }
+                for packet in packets {
+                    endpoint
+                        .replica
+                        .receive(&packet)
+                        .expect("apply traced delta");
+                    endpoint.applied = endpoint.applied.saturating_add(1);
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("traced client receive failed: {error}"),
+        }
+    }
+}
+
+fn request_traced_repair(endpoint: &mut TracedEndpoint, now: Duration) {
+    let Some(gap_since) = endpoint.gap_since else {
+        return;
+    };
+    let sequence = endpoint.inbox.expected_sequence();
+    if now.saturating_sub(gap_since) < endpoint.repair_timer.reorder_grace()
+        || !endpoint.repair_timer.send_due(sequence, now)
+    {
+        return;
+    }
+    endpoint
+        .socket
+        .send_to(
+            &encode_repair_request(endpoint.session_id, sequence),
+            endpoint.proxy_address,
+        )
+        .expect("send traced adaptive repair");
+    endpoint.repair_timer.record_send(sequence, now);
+    endpoint.repairs = endpoint.repairs.saturating_add(1);
 }
 
 fn client_socket() -> UdpSocket {

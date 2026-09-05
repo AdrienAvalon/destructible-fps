@@ -5,8 +5,8 @@
 )]
 
 use destructible_fps::{
-    BuildCommand, CHUNK_EDGE, ClientPrediction, ClientPredictionError, ClientReplica,
-    ExplosionCommand, FixedMicrometers3, IVec3, MAX_APPLICATION_DATAGRAM_BYTES,
+    AdaptiveRepairTimer, BuildCommand, CHUNK_EDGE, ClientPrediction, ClientPredictionError,
+    ClientReplica, ExplosionCommand, FixedMicrometers3, IVec3, MAX_APPLICATION_DATAGRAM_BYTES,
     MAX_BUILD_REACH_VOXELS, MAX_RECEIVED_DATAGRAMS_PER_TICK, MICROMETERS_PER_VOXEL, Material,
     OrderedDeltaInbox, PlayerInputCommand, PlayerInterpolationBuffer, PlayerInterpolationError,
     PlayerStateReceiveError, SecureClientConnection, SecureClientLaunchConfig, SecureDatagramInbox,
@@ -244,7 +244,7 @@ struct MultiplayerGame {
     replica: ClientReplica,
     delta_inbox: OrderedDeltaInbox,
     delta_gap_since: Option<Instant>,
-    last_delta_repair_at: Option<Instant>,
+    delta_repair_timer: AdaptiveRepairTimer,
     delta_repairs_sent: u64,
     delta_impairment: DeltaImpairment,
     mesh_scheduler: MeshScheduler,
@@ -315,7 +315,7 @@ impl MultiplayerGame {
             replica: ClientReplica::new(world),
             delta_inbox: OrderedDeltaInbox::default(),
             delta_gap_since: None,
-            last_delta_repair_at: None,
+            delta_repair_timer: AdaptiveRepairTimer::default(),
             delta_repairs_sent: 0,
             delta_impairment: if smoke_drop_first_delta {
                 DeltaImpairment::DropUntilFuture { sequence: 1 }
@@ -367,6 +367,84 @@ impl MultiplayerGame {
         self.snapshot_phase == SnapshotPhase::Ready
     }
 
+    fn repair_timing_ms(&self) -> (u128, u128) {
+        let rtt = self
+            .delta_repair_timer
+            .smoothed_rtt()
+            .map_or(0, |duration| duration.as_millis());
+        (
+            rtt,
+            self.delta_repair_timer.retransmission_timeout().as_millis(),
+        )
+    }
+
+    fn validate_and_report_smoke(
+        &self,
+        remote_players: usize,
+        transport_drops: u64,
+    ) -> Result<(), String> {
+        if self.session_id.is_none() || self.prediction.is_none() || !self.snapshot_ready() {
+            return Err("smoke multijoueur termine sans session jouable".to_owned());
+        }
+        if self.maximum_horizontal_displacement_um < MICROMETERS_PER_VOXEL.cast_unsigned() {
+            return Err(format!(
+                "smoke multijoueur sans mouvement autoritaire suffisant: {} um",
+                self.maximum_horizontal_displacement_um
+            ));
+        }
+        if self.applied_world_deltas == 0
+            && self.replica.world().fingerprint() == self.pristine_world_fingerprint
+        {
+            return Err(
+                "smoke multijoueur sans destruction repliquee ni snapshot modifie".to_owned(),
+            );
+        }
+        if self.smoke_actions_sent < 2 {
+            return Err("smoke termine avant les deux actions autoritaires".to_owned());
+        }
+        if self.delta_impairment != DeltaImpairment::None
+            && (!matches!(self.delta_impairment, DeltaImpairment::Completed { .. })
+                || self.delta_repairs_sent == 0)
+        {
+            return Err("smoke termine sans reparer le delta volontairement perdu".to_owned());
+        }
+        if transport_drops != 0 {
+            return Err(format!(
+                "smoke termine avec {transport_drops} datagrammes perdus dans la file locale"
+            ));
+        }
+        if self.applied_world_deltas > 0
+            && (self.completed_mesh_jobs == 0
+                || !self.pending_mesh_chunks.is_empty()
+                || !self.pending_body_ids.is_empty()
+                || self.mesh_worker_phase == MeshWorkerPhase::InFlight)
+        {
+            return Err("smoke termine avant la presentation du delta replique".to_owned());
+        }
+        let (round_trip_ms, retransmission_ms) = self.repair_timing_ms();
+        println!(
+            "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={} reparations={} rtt_ms={} rto_ms={} rtt_samples={} drops_transport={} jobs_mesh={} snapshot_pret={}",
+            self.session_id.unwrap_or_default(),
+            remote_players,
+            self.prediction
+                .as_ref()
+                .map_or(0, ClientPrediction::last_server_tick),
+            self.prediction
+                .as_ref()
+                .map_or(0, ClientPrediction::pending_inputs),
+            self.maximum_horizontal_displacement_um,
+            self.applied_world_deltas,
+            self.delta_repairs_sent,
+            round_trip_ms,
+            retransmission_ms,
+            self.delta_repair_timer.sample_count(),
+            transport_drops,
+            self.completed_mesh_jobs,
+            self.snapshot_ready()
+        );
+        Ok(())
+    }
+
     fn capture_cursor(&mut self) {
         let result = self
             .window
@@ -413,20 +491,25 @@ impl MultiplayerGame {
             return Ok(());
         };
         let now = Instant::now();
-        if now.duration_since(gap_since) < Duration::from_millis(100)
-            || self
-                .last_delta_repair_at
-                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(250))
+        let missing_sequence = self.delta_inbox.expected_sequence();
+        let client_time = self.started.elapsed();
+        if now.duration_since(gap_since) < self.delta_repair_timer.reorder_grace()
+            || !self
+                .delta_repair_timer
+                .send_due(missing_sequence, client_time)
         {
             return Ok(());
         }
-        let missing_sequence = self.delta_inbox.expected_sequence();
         self.transport
             .send(encode_repair_request(session_id, missing_sequence))
             .map_err(|error| format!("demande de reparation delta {missing_sequence}: {error}"))?;
-        self.last_delta_repair_at = Some(now);
+        self.delta_repair_timer
+            .record_send(missing_sequence, client_time);
         self.delta_repairs_sent = self.delta_repairs_sent.saturating_add(1);
-        self.last_status = format!("reparation du delta {missing_sequence} demandee");
+        self.last_status = format!(
+            "reparation du delta {missing_sequence} demandee | RTO {} ms",
+            self.delta_repair_timer.retransmission_timeout().as_millis()
+        );
         Ok(())
     }
 
@@ -510,7 +593,7 @@ impl MultiplayerGame {
             .map_err(|error| format!("installation du snapshot refusee: {error}"))?;
         self.delta_inbox = OrderedDeltaInbox::new(next_sequence);
         self.delta_gap_since = None;
-        self.last_delta_repair_at = None;
+        self.delta_repair_timer.clear_probe();
         chunk_positions.extend(self.replica.world().chunk_positions());
         let mut chunk_positions = chunk_positions.into_iter().collect::<Vec<_>>();
         chunk_positions.sort_unstable_by_key(|chunk| (chunk.x, chunk.y, chunk.z));
@@ -561,6 +644,12 @@ impl MultiplayerGame {
             .delta_inbox
             .push(payload)
             .map_err(|error| format!("delta monde invalide: {error}"))?;
+        let rtt_sample = self
+            .delta_repair_timer
+            .observe_sequence(self.delta_inbox.expected_sequence(), self.started.elapsed());
+        let rtt_suffix = rtt_sample.map_or_else(String::new, |sample| {
+            format!(" | RTT reparation {} ms", sample.as_millis())
+        });
         if packets.is_empty() {
             if self.delta_inbox.buffered_complete_packets() > 0 {
                 self.delta_gap_since.get_or_insert_with(Instant::now);
@@ -597,7 +686,7 @@ impl MultiplayerGame {
                 .update_body_transforms(self.replica.body_states());
             self.applied_world_deltas = self.applied_world_deltas.saturating_add(1);
             self.last_status = format!(
-                "delta {} applique | {} corps",
+                "delta {} applique | {} corps{rtt_suffix}",
                 packet.sequence,
                 self.replica.bodies().len()
             );
@@ -1020,61 +1109,7 @@ impl MultiplayerGame {
             self.last_status
         ));
         if exit_after.is_some_and(|duration| self.started.elapsed() >= duration) {
-            if self.session_id.is_none() || self.prediction.is_none() || !self.snapshot_ready() {
-                return Err("smoke multijoueur termine sans session jouable".to_owned());
-            }
-            if self.maximum_horizontal_displacement_um < MICROMETERS_PER_VOXEL.cast_unsigned() {
-                return Err(format!(
-                    "smoke multijoueur sans mouvement autoritaire suffisant: {} um",
-                    self.maximum_horizontal_displacement_um
-                ));
-            }
-            if self.applied_world_deltas == 0
-                && self.replica.world().fingerprint() == self.pristine_world_fingerprint
-            {
-                return Err(
-                    "smoke multijoueur sans destruction repliquee ni snapshot modifie".to_owned(),
-                );
-            }
-            if self.smoke_actions_sent < 2 {
-                return Err("smoke termine avant les deux actions autoritaires".to_owned());
-            }
-            if self.delta_impairment != DeltaImpairment::None
-                && (!matches!(self.delta_impairment, DeltaImpairment::Completed { .. })
-                    || self.delta_repairs_sent == 0)
-            {
-                return Err("smoke termine sans reparer le delta volontairement perdu".to_owned());
-            }
-            if transport_drops != 0 {
-                return Err(format!(
-                    "smoke termine avec {transport_drops} datagrammes perdus dans la file locale"
-                ));
-            }
-            if self.applied_world_deltas > 0
-                && (self.completed_mesh_jobs == 0
-                    || !self.pending_mesh_chunks.is_empty()
-                    || !self.pending_body_ids.is_empty()
-                    || self.mesh_worker_phase == MeshWorkerPhase::InFlight)
-            {
-                return Err("smoke termine avant la presentation du delta replique".to_owned());
-            }
-            println!(
-                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={} reparations={} drops_transport={} jobs_mesh={} snapshot_pret={}",
-                self.session_id.unwrap_or_default(),
-                stats.players,
-                self.prediction
-                    .as_ref()
-                    .map_or(0, ClientPrediction::last_server_tick),
-                self.prediction
-                    .as_ref()
-                    .map_or(0, ClientPrediction::pending_inputs),
-                self.maximum_horizontal_displacement_um,
-                self.applied_world_deltas,
-                self.delta_repairs_sent,
-                transport_drops,
-                self.completed_mesh_jobs,
-                self.snapshot_ready()
-            );
+            self.validate_and_report_smoke(stats.players, transport_drops)?;
             event_loop.exit();
         }
         Ok(())

@@ -23,8 +23,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   drops a complete sequence, buffers later deltas, requests repair, and proves convergence;
 - canonical four-MiB-bounded world/body snapshots, paced transfer, selective 64-bit fragment repair
   windows, atomic install acknowledgement, and retained-delta catch-up before live delivery;
-- a bounded deterministic UDP impairment proxy exercising latency, jitter, loss, duplication,
-  reordering, delta repair, fragment repair, and acknowledgement retry against the real process;
+- a bounded deterministic UDP impairment proxy with finite declarative trace replay, exercising
+  latency, jitter, loss, duplication, reordering, delta repair, fragment repair, acknowledgement
+  retry, and equal server delta egress across four simultaneous real clients;
 - a TLS 1.3 QUIC authority adapter with certificate verification, game-specific ALPN, bounded
   post-TLS credential admission, connection-bound principals, cryptographic server nonces,
   monotonic session IDs, and 1,100-byte encrypted gameplay datagrams;
@@ -76,8 +77,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
   the authenticated QUIC authority, with
   camera-relative input, prediction/reconciliation, interpolated remote avatars, reconnect attempts,
   replicated authoritative destruction/construction, rigid debris, automatic smoke trajectories,
-  exact retained-delta repair, transport-queue loss telemetry, and a real two-client process
-  regression test;
+  exact retained-delta repair, client-side bounded RTT/RTO estimation with Karn-filtered adaptive
+  retransmission, transport-queue loss telemetry, and real two- and four-client process regressions;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
@@ -106,7 +107,7 @@ This is a **first playable engineering slice**, not a photorealistic or producti
 game. Exact convex contact manifolds, gyroscopic response, deeper constraint-island convergence,
 progressive structural stress, remote-authority exposure, automated certificate issuance,
 first-person arms/weapon presentation,
-adaptive retransmission and congestion control, audio,
+transport pacing and congestion control, audio,
 asset-quality PBR, temporal anti-aliasing, and
 large-world residency streaming remain explicit later gates.
 
@@ -176,7 +177,7 @@ The graphical recovery path can be exercised by adding
 `--smoke-seconds 10 --smoke-drop-first-delta` to one client while another runs the ordinary smoke.
 That client drops the whole first mutation until it observes the second, then must repair and present
 both in order before the process can succeed. The final smoke line must also report
-`drops_transport=0`.
+`rtt_samples=1`, a bounded `rto_ms`, and `drops_transport=0`.
 
 Once a local secure authority has been provisioned as described below, the same graphical client can
 use authenticated QUIC/TLS. The credential stays in its owner-only file and is never passed through

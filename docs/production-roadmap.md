@@ -178,9 +178,11 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - server-side network explosion radius, radius-scaled energy, and 120-metre authoritative-player
   range policy (delivered); view-ray, obstruction, cadence, ammunition, and lag-history validation
   remain;
-- configurable stochastic and trace-replay impairment plus a 32-client process harness;
-- fixed-profile bounded loss/jitter/reorder/duplication proxy with delta/snapshot repair, ACK retry,
-  and per-channel byte accounting (delivered for one real client and one server process);
+- configurable stochastic impairment plus a 32-client process harness (finite bounded trace replay
+  is delivered);
+- bounded loss/jitter/reorder/duplication proxy with delta/snapshot repair, ACK retry, per-channel
+  offered/delivered byte accounting, four simultaneous traced clients, exact server-egress fairness,
+  and Karn-filtered bounded adaptive RTT/RTO estimation (delivered for real loopback processes);
 - rate limits, command validation, allocation limits, and fuzzed packet decoding.
 
 Exit gate: at least 32 headless clients sustain the traffic and tick budgets under the agreed network
@@ -267,8 +269,8 @@ The next three bounded increments are:
 2. extend the delivered oriented per-voxel dynamic contact and rotated vertical support with
    continuous multi-contact manifolds, full vertical impulse exchange, gyroscopic response, and
    deeper collision-island convergence;
-3. extend the fixed impairment profile into configurable trace replay and congestion tests for at
-   least four clients, with RTT estimation, adaptive retransmission, and bandwidth fairness.
+3. extend the delivered trace replay, four-client fairness and adaptive repair into seeded stochastic
+   profiles, pacing/congestion control, and the 32-headless-client load gate;
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

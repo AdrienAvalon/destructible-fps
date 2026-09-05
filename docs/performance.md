@@ -3,6 +3,34 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — adaptive repair and four-client trace replay
+
+Source state: parent `f5ca8ce` plus the network-timing increment documented here. The graphical
+client replaces fixed gap/retry constants with an integer Jacobson/Karels estimator. It starts with
+100 ms of reordering grace and a 250 ms RTO, accepts only clean retained-delta repair samples, applies
+Karn filtering after any retransmission, and exponentially backs off repeated requests. Reordering
+grace is clamped to 50–500 ms and RTO to 100–2,000 ms. This timer remains entirely client-side and
+does not enter the deterministic authority tick.
+
+The process proxy can now replay a separate finite declarative trace for every direction/channel.
+Each trace is capped at 256 steps, 128 pump ticks of delay and at most two deliveries per input, then
+becomes clean. Four simultaneous clients replayed distinct loss, duplication, jitter and reordering
+traces against the real 60 Hz process. Each issued exactly one repair, accepted one unambiguous RTT
+sample, converged to the identical authoritative world, and observed exactly 19,806 delta bytes from
+the server. The release run measured 16.510 ms RTT and a 100 ms RTO for each loopback client; offered
+and delivered byte totals were equal across all four. The queue never overflowed. A separate real
+Vulkan client deliberately discarded its first complete delta, repaired and presented both world
+transactions in order with one 16 ms sample, drained its mesh work, and reported zero local transport
+drops.
+
+The complete promotion passed 151 library tests, ten binary tests and 50 integration tests in debug
+and release with strict Clippy clean. Required release baselines measured destruction p99 0.402 ms,
+8,192-voxel structural analysis plus promotion p99 4.503 ms, 1,024-body stacking p99 1.186 ms, and
+snapshot total p99 10.467 ms. A real five-second RTX 4050 Vulkan smoke initialized the GPU in
+2,076.3 ms, streamed all 128 chunks in 36.8 ms, and completed with GPU-total p99 0.256 ms, maximum
+0.258 ms, and zero abandoned samples. Seeded stochastic impairment, transport pacing, congestion
+control and the 32-headless-client load gate remain later work.
+
 ## 2026-09-05 — bounded inclined dynamic support
 
 Source state: parent `2956991` plus the rotated-support increment documented here. Identity bodies

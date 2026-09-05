@@ -54,6 +54,7 @@ cargo test --test network
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
+cargo run --release --bin snapshot-benchmark -- --iterations 20
 cargo run --release --bin playable-demo -- --smoke-seconds 5
 ```
 

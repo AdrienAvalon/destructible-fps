@@ -229,6 +229,37 @@ impl World {
         positions
     }
 
+    /// Returns every occupied voxel in canonical world-coordinate order.
+    #[must_use]
+    pub fn occupied_voxels(&self) -> Vec<(IVec3, Voxel)> {
+        let mut voxels = Vec::with_capacity(self.solid_voxels);
+        for chunk_position in self.chunk_positions() {
+            let Some(chunk) = self.chunks.get(&chunk_position) else {
+                continue;
+            };
+            for local_z in 0..CHUNK_EDGE {
+                for local_y in 0..CHUNK_EDGE {
+                    for local_x in 0..CHUNK_EDGE {
+                        let local = IVec3::new(local_x, local_y, local_z);
+                        let voxel = chunk.voxels[local_index(local)];
+                        if voxel.is_solid() {
+                            voxels.push((
+                                IVec3::new(
+                                    chunk_position.x * CHUNK_EDGE + local_x,
+                                    chunk_position.y * CHUNK_EDGE + local_y,
+                                    chunk_position.z * CHUNK_EDGE + local_z,
+                                ),
+                                voxel,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        voxels.sort_unstable_by_key(|(position, _voxel)| *position);
+        voxels
+    }
+
     #[must_use]
     pub fn stats(&self) -> WorldStats {
         WorldStats {
@@ -339,5 +370,33 @@ mod tests {
         world.set_voxel(position, Voxel::AIR);
         assert_eq!(world.stats().chunks, 0);
         assert_eq!(world.fingerprint(), 0);
+    }
+
+    #[test]
+    fn occupied_voxels_are_canonical_across_chunk_boundaries() {
+        let mut world = World::default();
+        let positions = [
+            IVec3::new(16, 0, 0),
+            IVec3::new(-1, 0, 0),
+            IVec3::new(0, 1, 0),
+            IVec3::new(0, 0, 1),
+        ];
+        for position in positions {
+            world.set_voxel(position, Voxel::new(Material::Stone));
+        }
+
+        let occupied = world.occupied_voxels();
+        assert_eq!(
+            occupied
+                .iter()
+                .map(|(position, _voxel)| *position)
+                .collect::<Vec<_>>(),
+            vec![
+                IVec3::new(-1, 0, 0),
+                IVec3::new(0, 0, 1),
+                IVec3::new(0, 1, 0),
+                IVec3::new(16, 0, 0),
+            ]
+        );
     }
 }

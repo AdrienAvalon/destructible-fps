@@ -339,6 +339,11 @@ impl AuthoritativeServer {
     }
 
     #[must_use]
+    pub const fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    #[must_use]
     pub fn advance_physics(&mut self) -> (Option<DeltaPacket>, PhysicsTickReport) {
         let simulation = step_rigid_bodies(&self.world, &self.bodies, &mut self.body_states);
         let report = PhysicsTickReport {
@@ -602,6 +607,10 @@ pub enum ReplicationError {
     InvalidSnapshotHighWaterMark(BodyId),
     InvalidSnapshotSequence(u64),
     InvalidSnapshotDescriptor(BodyId),
+    SnapshotBodyOverlapsStatic {
+        body_id: BodyId,
+        position: IVec3,
+    },
     TooManyActiveBodies(usize),
     TooManyActiveBodyVoxels(usize),
     Body(BodyError),
@@ -668,6 +677,10 @@ impl fmt::Display for ReplicationError {
             Self::InvalidSnapshotDescriptor(id) => {
                 write!(formatter, "snapshot body descriptor {id} is not canonical")
             }
+            Self::SnapshotBodyOverlapsStatic { body_id, position } => write!(
+                formatter,
+                "snapshot body {body_id} overlaps static voxel at {position:?}"
+            ),
             Self::TooManyActiveBodies(count) => {
                 write!(
                     formatter,
@@ -917,6 +930,16 @@ fn validate_snapshot(
         )?;
         if rebuilt != *body {
             return Err(ReplicationError::InvalidSnapshotDescriptor(id));
+        }
+        if let Some(overlap) = body
+            .voxels
+            .iter()
+            .find(|body_voxel| world.voxel(body_voxel.position).is_solid())
+        {
+            return Err(ReplicationError::SnapshotBodyOverlapsStatic {
+                body_id: id,
+                position: overlap.position,
+            });
         }
         let state = body_states
             .get(&id)
@@ -1541,6 +1564,17 @@ mod tests {
         );
         assert!(client.bodies().is_empty());
         assert_eq!(client.next_body_id(), 1);
+
+        let mut overlapping_world = snapshot_world.clone();
+        overlapping_world.set_voxel(position, Voxel::new(Material::Wood));
+        assert_eq!(
+            client.install_snapshot(overlapping_world, bodies.clone(), &states, 2, 7),
+            Err(ReplicationError::SnapshotBodyOverlapsStatic {
+                body_id: 1,
+                position,
+            })
+        );
+        assert!(client.bodies().is_empty());
 
         let mut forged = body;
         forged.geometry_fingerprint ^= 1;

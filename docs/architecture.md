@@ -27,10 +27,11 @@ Delta protocol v4 uses monotonically increasing sequences, independent 128-bit p
 fingerprints for the static world and active body set, bounded fragments, and before-state
 validation. Detached body membership and integer dynamic state travel in separate canonical frames;
 both are reconstructed and validated before any static-world write. Missing data stops application;
-the UDP client can request an exact retained transaction before falling back to a future snapshot
-path. Snapshot installation itself rejects a mismatched body/state set, invalid high-water mark,
-non-canonical descriptor or inconsistent world fingerprint before replacing any replica state.
-Corrupt or stale data cannot partially mutate a replica.
+the UDP client first requests an exact retained transaction and receives a canonical snapshot when
+that sequence has expired. Snapshot installation itself rejects a mismatched body/state set, invalid
+high-water mark, non-canonical descriptor, static/body voxel overlap, or inconsistent world
+fingerprint before replacing any replica state. Corrupt or stale data cannot partially mutate a
+replica.
 
 Runtime bodies use compact non-zero 64-bit IDs reserved monotonically by the server only when the
 whole detachment transaction commits. Their canonical geometry retains a separate 128-bit
@@ -45,11 +46,20 @@ queued work, simulation, and egress. Complete deltas are released to clients onl
 sequence order, including when UDP delivers later packets first. A process-level integration test
 drives two independent sockets and proves identical world/body state and fingerprints. A second
 test drops a whole sequence for one client, keeps later complete packets buffered, and recovers by
-requesting the exact server-retained frames. The retention history, repair queue, repairs per tick,
-and shared send-attempt budget are all fixed. An expired-history miss is observable and remains
-fail-closed until the snapshot fallback is delivered. These sessions are deliberately loopback-only
-and unauthenticated; they provide no confidentiality, identity, or packet authenticity and must not
-be exposed beyond the developer machine.
+requesting the exact server-retained frames. Snapshot requests use a distinct control message; a
+repair request for a future sequence cannot force snapshot work. The retention history, recovery
+queue, repairs per tick, and shared send-attempt budget are all fixed. An expired-history miss is
+observable and remains fail-closed while a canonical snapshot is framed below the MTU, hashed
+against mixed/corrupt fragments, and paced at 16 frames per peer per tick. The client retains only
+one four-MiB-bounded
+snapshot; a newer retry supersedes an incomplete one. Live deltas are withheld from that peer and
+their shared encoded buffers enter a per-transfer queue capped at 256 packets and 8 MiB. After the
+snapshot is emitted, that queue is replayed in order before live delivery resumes. A missing or
+overflowed catch-up delta stalls rather than silently skipping state. Process tests cover a
+lost snapshot fragment with whole-snapshot retry and a moving body with post-snapshot catch-up.
+These sessions are deliberately loopback-only and unauthenticated; the snapshot hash is an integrity
+check, not a MAC, and the transport provides no confidentiality, identity, packet authenticity, or
+congestion control. It must not be exposed beyond the developer machine.
 
 ## Planned engine layers
 
@@ -119,6 +129,9 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
   process test (delivered for unauthenticated loopback only);
 - exact short-gap repair from a count-and-byte-bounded delta history, prioritized before new
   simulation, with deliberate whole-sequence loss and convergence coverage (delivered);
+- canonical bounded snapshots, corruption rejection, paced transfer, retry after a deliberately
+  lost fragment, atomic install, and retained-delta catch-up during active body motion (delivered
+  for loopback; selective fragment ACKs remain);
 - encrypted client authentication and session negotiation;
 - unreliable sequenced deltas plus reliable snapshot/control channels;
 - loss, duplication, reordering, latency, and bandwidth simulation;

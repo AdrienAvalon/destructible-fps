@@ -1,7 +1,8 @@
 use destructible_fps::{
     AuthoritativeServer, ClientReplica, ExplosionCommand, IVec3, OrderedDeltaInbox,
-    ServerControlMessage, decode_frame, decode_server_control, demo_world, encode_client_hello,
-    encode_explosion_request, encode_repair_request, is_delta_datagram,
+    ServerControlMessage, SnapshotAssembler, World, decode_frame, decode_server_control,
+    demo_world, encode_client_hello, encode_explosion_request, encode_repair_request,
+    encode_snapshot_request, is_delta_datagram, is_snapshot_datagram,
 };
 use std::{
     io,
@@ -212,12 +213,272 @@ fn retained_delta_repairs_a_deliberate_process_client_gap() {
     );
 }
 
+#[test]
+fn missing_retained_delta_falls_back_to_a_process_snapshot() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
+    let server_address = reservation.local_addr().expect("reserved address");
+    drop(reservation);
+    let mut child = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
+            .args([
+                "--bind",
+                &server_address.to_string(),
+                "--max-ticks",
+                "300",
+                "--exit-after-snapshots",
+                "2",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start snapshot server process"),
+    );
+    let socket = client_socket();
+    let session = handshake(&socket, server_address, 0x5555, &mut child);
+    socket
+        .set_nonblocking(true)
+        .expect("nonblocking snapshot client");
+    socket
+        .send_to(&encode_snapshot_request(session), server_address)
+        .expect("request snapshot fallback");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut assembler = SnapshotAssembler::default();
+    let mut snapshot = None;
+    let mut received_snapshot_frames = 0_usize;
+    let mut dropped_snapshot_frame = false;
+    let mut retried_snapshot = false;
+    let retry_at = Instant::now() + Duration::from_millis(1_200);
+    let mut buffer = [0_u8; 1_201];
+    while Instant::now() < deadline && snapshot.is_none() {
+        loop {
+            match socket.recv_from(&mut buffer) {
+                Ok((length, source))
+                    if source == server_address && is_snapshot_datagram(&buffer[..length]) =>
+                {
+                    received_snapshot_frames += 1;
+                    if !dropped_snapshot_frame {
+                        dropped_snapshot_frame = true;
+                        continue;
+                    }
+                    snapshot = assembler
+                        .push(&buffer[..length])
+                        .expect("valid process snapshot")
+                        .or(snapshot);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("snapshot receive failed: {error}"),
+            }
+        }
+        if !retried_snapshot && Instant::now() >= retry_at {
+            socket
+                .send_to(&encode_snapshot_request(session), server_address)
+                .expect("retry incomplete snapshot fallback");
+            retried_snapshot = true;
+        }
+        if snapshot.is_none() {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let snapshot = snapshot.unwrap_or_else(|| {
+        panic!(
+            "complete snapshot fallback: received {received_snapshot_frames} frames retaining {} bytes",
+            assembler.retained_payload_bytes()
+        )
+    });
+    assert!(dropped_snapshot_frame);
+    assert!(retried_snapshot);
+    let mut replica = ClientReplica::new(World::default());
+    snapshot
+        .install_into(&mut replica)
+        .expect("atomic process snapshot install");
+    assert_eq!(replica.world().fingerprint(), demo_world().fingerprint());
+    assert_eq!(replica.next_body_id(), 1);
+
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(2));
+    assert!(status.success());
+}
+
+#[test]
+fn process_snapshot_catches_up_motion_before_returning_to_live_deltas() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
+    let server_address = reservation.local_addr().expect("reserved address");
+    drop(reservation);
+    let mut child = spawn_test_server(server_address, 600, "--exit-after-catchups");
+    let good_socket = client_socket();
+    let joining_socket = client_socket();
+    let good_session = handshake(&good_socket, server_address, 0x6666, &mut child);
+    let joining_session = handshake(&joining_socket, server_address, 0x7777, &mut child);
+    good_socket
+        .set_nonblocking(true)
+        .expect("nonblocking good client");
+    joining_socket
+        .set_nonblocking(true)
+        .expect("nonblocking joining client");
+    let initial = demo_world();
+    let mut good = Endpoint {
+        socket: good_socket,
+        inbox: OrderedDeltaInbox::default(),
+        replica: ClientReplica::new(initial),
+        applied: 0,
+        drop_sequence: None,
+        dropped_frames: 0,
+    };
+    good.socket
+        .send_to(
+            &encode_explosion_request(
+                good_session,
+                ExplosionCommand {
+                    command_id: 1,
+                    center: IVec3::new(-20, 6, 0),
+                    radius_voxels: 8,
+                    peak_energy: 30_000,
+                },
+            ),
+            server_address,
+        )
+        .expect("create moving body");
+
+    let command_deadline = Instant::now() + Duration::from_secs(3);
+    while good.applied == 0 && Instant::now() < command_deadline {
+        receive_available(&mut good, server_address);
+        discard_available(&joining_socket);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(good.applied > 0);
+    discard_available(&joining_socket);
+    joining_socket
+        .send_to(&encode_snapshot_request(joining_session), server_address)
+        .expect("request moving-world snapshot");
+
+    let mut snapshot_assembler = SnapshotAssembler::default();
+    let mut joining_replica = ClientReplica::new(World::default());
+    let mut joining_inbox = None;
+    let mut joining_applied = 0_usize;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut exit_status = None;
+    while Instant::now() < deadline {
+        receive_available(&mut good, server_address);
+        receive_joining_stream(
+            &joining_socket,
+            server_address,
+            &mut snapshot_assembler,
+            &mut joining_replica,
+            &mut joining_inbox,
+            &mut joining_applied,
+        );
+        if let Some(status) = child.0.try_wait().expect("query catch-up server") {
+            exit_status = Some(status);
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let status = exit_status.expect("snapshot catch-up did not complete");
+    assert!(status.success());
+    let drain_deadline = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < drain_deadline {
+        receive_available(&mut good, server_address);
+        receive_joining_stream(
+            &joining_socket,
+            server_address,
+            &mut snapshot_assembler,
+            &mut joining_replica,
+            &mut joining_inbox,
+            &mut joining_applied,
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let joining_inbox = joining_inbox.expect("joining client installed a snapshot");
+    assert!(joining_applied > 0);
+    assert_eq!(
+        good.replica.world().fingerprint(),
+        joining_replica.world().fingerprint()
+    );
+    assert_eq!(good.replica.bodies(), joining_replica.bodies());
+    assert_eq!(good.replica.body_states(), joining_replica.body_states());
+    assert_eq!(
+        good.inbox.expected_sequence(),
+        joining_inbox.expected_sequence()
+    );
+}
+
 fn client_socket() -> UdpSocket {
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind loopback client");
     socket
         .set_read_timeout(Some(Duration::from_millis(40)))
         .expect("client read timeout");
     socket
+}
+
+fn spawn_test_server(address: SocketAddr, max_ticks: u64, exit_flag: &str) -> ChildGuard {
+    ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
+            .arg("--bind")
+            .arg(address.to_string())
+            .arg("--max-ticks")
+            .arg(max_ticks.to_string())
+            .arg(exit_flag)
+            .arg("1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start dedicated test server process"),
+    )
+}
+
+fn discard_available(socket: &UdpSocket) {
+    let mut buffer = [0_u8; 1_201];
+    loop {
+        match socket.recv_from(&mut buffer) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("discard receive failed: {error}"),
+        }
+    }
+}
+
+fn receive_joining_stream(
+    socket: &UdpSocket,
+    server: SocketAddr,
+    snapshot_assembler: &mut SnapshotAssembler,
+    replica: &mut ClientReplica,
+    inbox: &mut Option<OrderedDeltaInbox>,
+    applied: &mut usize,
+) {
+    let mut buffer = [0_u8; 1_201];
+    loop {
+        match socket.recv_from(&mut buffer) {
+            Ok((length, source)) if source == server => {
+                let datagram = &buffer[..length];
+                if is_snapshot_datagram(datagram) {
+                    if let Some(snapshot) = snapshot_assembler
+                        .push(datagram)
+                        .expect("valid moving-world snapshot")
+                    {
+                        let next_sequence = snapshot.next_sequence();
+                        snapshot
+                            .install_into(replica)
+                            .expect("install moving-world snapshot");
+                        *inbox = Some(OrderedDeltaInbox::new(next_sequence));
+                    }
+                } else if is_delta_datagram(datagram)
+                    && let Some(inbox) = inbox
+                {
+                    for packet in inbox.push(datagram).expect("valid catch-up delta") {
+                        replica
+                            .receive(&packet)
+                            .expect("apply contiguous catch-up delta");
+                        *applied += 1;
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("joining client receive failed: {error}"),
+        }
+    }
 }
 
 fn handshake(socket: &UdpSocket, server: SocketAddr, nonce: u64, child: &mut ChildGuard) -> u64 {
@@ -316,6 +577,17 @@ fn drive_until_exit(
         thread::sleep(Duration::from_millis(1));
     }
     status
+}
+
+fn wait_for_child_exit(child: &mut ChildGuard, timeout: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(status) = child.0.try_wait().expect("query dedicated server") {
+            return status;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    panic!("dedicated server did not exit before timeout")
 }
 
 fn receive_available(endpoint: &mut Endpoint, server: SocketAddr) {

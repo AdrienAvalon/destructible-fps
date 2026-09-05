@@ -9,10 +9,12 @@ const HELLO_KIND: u8 = 1;
 const WELCOME_KIND: u8 = 2;
 const EXPLOSION_KIND: u8 = 3;
 const REPAIR_REQUEST_KIND: u8 = 4;
+const SNAPSHOT_REQUEST_KIND: u8 = 5;
 const HELLO_BYTES: usize = 14;
 const WELCOME_BYTES: usize = 22;
 const EXPLOSION_BYTES: usize = 40;
 const REPAIR_REQUEST_BYTES: usize = 22;
+const SNAPSHOT_REQUEST_BYTES: usize = 14;
 pub const MAX_UDP_DATAGRAM_BYTES: usize = 1_200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +29,9 @@ pub enum ClientControlMessage {
     RepairRequest {
         session_id: u64,
         missing_sequence: u64,
+    },
+    SnapshotRequest {
+        session_id: u64,
     },
 }
 
@@ -92,6 +97,13 @@ pub fn encode_repair_request(session_id: u64, missing_sequence: u64) -> Vec<u8> 
 }
 
 #[must_use]
+pub fn encode_snapshot_request(session_id: u64) -> Vec<u8> {
+    let mut bytes = control_prefix(SNAPSHOT_REQUEST_KIND, SNAPSHOT_REQUEST_BYTES);
+    push_u64(&mut bytes, session_id);
+    bytes
+}
+
+#[must_use]
 pub fn encode_server_welcome(nonce: u64, session_id: u64) -> Vec<u8> {
     let mut bytes = control_prefix(WELCOME_KIND, WELCOME_BYTES);
     push_u64(&mut bytes, nonce);
@@ -130,6 +142,12 @@ pub fn decode_client_control(bytes: &[u8]) -> Result<ClientControlMessage, Contr
             Ok(ClientControlMessage::RepairRequest {
                 session_id: cursor.take_u64(),
                 missing_sequence: cursor.take_u64(),
+            })
+        }
+        SNAPSHOT_REQUEST_KIND => {
+            require_length(bytes, SNAPSHOT_REQUEST_BYTES)?;
+            Ok(ClientControlMessage::SnapshotRequest {
+                session_id: cursor.take_u64(),
             })
         }
         kind => Err(ControlCodecError::InvalidKind(kind)),
@@ -297,6 +315,13 @@ mod tests {
                 session_id: 9,
                 missing_sequence: 11,
             })
+        );
+
+        let snapshot = encode_snapshot_request(9);
+        assert_eq!(snapshot.len(), SNAPSHOT_REQUEST_BYTES);
+        assert_eq!(
+            decode_client_control(&snapshot),
+            Ok(ClientControlMessage::SnapshotRequest { session_id: 9 })
         );
     }
 

@@ -87,9 +87,10 @@ streaming, with no synchronous world meshing on the presentation thread.
   sweeps, collision-generated torque, material ground friction and normal restitution, vertical
   body-column collision, stable stacking, wake propagation, deterministic sleeping, bounded
   sweep-and-prune with fail-closed overflow, protocol-v6/snapshot-v2 state updates, and mass-centred
-  GPU transforms with conservative rotated render bounds (delivered; continuous angular sweep and
-  oriented dynamic-body narrow phase remain, and rotated bodies fail closed out of the legacy
-  vertical-column solver);
+  GPU transforms with conservative rotated render bounds (delivered; static angular motion uses a
+  radius-derived 0.25 m sample bound, at most eight substeps and 262,144 tested cells per body tick;
+  over-budget or intersecting rotation stops, rotated bodies fail closed out of the legacy
+  vertical-column solver, and oriented dynamic-body narrow phase remains);
 - four-pass coarse swept X/Z body contacts with rational time-of-impact overlap validation,
   inverse-mass separation, material restitution, momentum-preserving tangential friction, sleep
   wake-up, and deterministic short-chain propagation (delivered);
@@ -97,7 +98,7 @@ streaming, with no synchronous world meshing on the presentation thread.
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
 - unsupported component extraction with mass, centre of mass, and inertia from voxel geometry;
-- continuous angular collision sweep, oriented dynamic-body voxel contact, gyroscopic response,
+- oriented dynamic-body voxel contact, collision-preserving angular response, gyroscopic response,
   deeper collision-island convergence, and continuous multi-contact resolution between fast moving
   bodies;
 - debris relevance tiers: authoritative hazards, replicated coarse bodies, deterministic cosmetic
@@ -255,8 +256,8 @@ The next three bounded increments are:
 
 1. add trusted OIDC discovery/JWKS refresh, certificate-expiry/lifecycle validation, Windows service
    DACL checks, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
-2. extend the delivered rotated static proxy and contact torque with conservative continuous angular
-   sweep plus bounded oriented dynamic-body contact;
+2. extend the delivered rotated static and sampled-angular collision path with bounded oriented
+   dynamic-body contact and collision-preserving angular response;
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at
    least four clients, with RTT estimation, adaptive retransmission, and bandwidth fairness.
 

@@ -116,9 +116,10 @@ contact chain. A nearest-voxel blast application point additionally generates de
 velocity through the diagonal inertia tensor; protocol-v6 deltas and snapshot-v2 transfers replicate
 the canonical quaternion, and the GPU rotates the mesh around its mass centre. Rotated static sweeps
 use a deterministic conservative AABB for each material voxel and derive their contact lever from the
-actual overlapped cell. Rotated bodies fail closed out of the legacy axis-aligned vertical-support
-solver. Continuous angular sweep, oriented dynamic-body narrow phase and full constraint-island
-convergence are not claimed yet.
+  actual overlapped cell. Rotated bodies fail closed out of the legacy axis-aligned vertical-support
+  solver. Angular motion against static geometry is sampled from a radius-derived travel bound; it
+  stops before overlap or before exceeding its fixed substep/cell budgets. Oriented dynamic-body
+  narrow phase and full constraint-island convergence are not claimed yet.
 
 ## Screenshots
 
@@ -142,6 +143,7 @@ cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario lateral-sweep
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario rotated-lateral-sweep
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario angular-sweep
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 1000 --scenario dynamic-head-on
 cargo run --release --bin snapshot-benchmark -- --iterations 20
 cargo run --release --bin playable-demo

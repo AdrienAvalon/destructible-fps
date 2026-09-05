@@ -3,6 +3,28 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — bounded angular collision sweep
+
+Source state: parent `c11e972` plus the sampled-angular increment documented here. Each fixed tick
+first consumes the canonical angular remainder, derives a conservative L1 arc bound from the body's
+mass-centred corner radius, and divides the rotation into samples whose maximum travel is 0.25 m.
+At most eight substeps and 262,144 static-cell tests are allowed per body tick. Every candidate
+orientation checks the union of its previous and candidate per-voxel proxy bounds before commit;
+intersection, coordinate overflow or budget exhaustion stops angular motion without partially
+applying the unsafe sample. Resting contact correction remains below the impact-torque threshold and
+cannot re-inject angular energy.
+
+The dedicated `angular-sweep` release scenario resets 1,024 two-voxel bars at maximum angular speed
+for 300 ticks, requires an identical accepted rotation from every body, and performs the complete
+empty-world collision query. It measured tick p50 3.001 ms, p95 3.055 ms, p99 3.103 ms and maximum
+3.542 ms on this machine. Focused tests prove exact deterministic subdivision, obstacle rejection
+before overlap, fail-closed rejection when the radius would require more than eight substeps, and
+continued completion of snapshot catch-up after moving debris settles. The complete promotion passed
+130 library tests, ten binary tests and 43 integration tests in debug and release with strict Clippy
+clean. The required 1,024-body stacking baseline measured p99 1.209 ms and maximum 1.226 ms. A real
+five-second Vulkan smoke on the RTX 4050 reported GPU-total p99 0.801 ms, maximum 0.802 ms and zero
+abandoned samples.
+
 ## 2026-09-05 — rotation-aware static collision proxy
 
 Source state: parent `5eec27a` plus the physics increment documented here. Non-identity rigid bodies

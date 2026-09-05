@@ -16,6 +16,9 @@ pub const FIXED_QUATERNION_SCALE: i32 = 1_000_000;
 const GRAVITY_UM_PER_SECOND_SQUARED: i64 = -9_810_000;
 const MAX_LINEAR_SPEED_UM_PER_SECOND: i64 = 250_000_000;
 pub const MAX_ANGULAR_SPEED_MRAD_PER_SECOND: i64 = 12_000;
+const MAX_ANGULAR_COLLISION_SUBSTEPS: usize = 8;
+const MAX_ANGULAR_SAMPLE_TRAVEL_UM: u128 = 250_000;
+const MAX_ROTATION_STATIC_CELL_TESTS: usize = 262_144;
 const MAX_WORLD_TRANSLATION_UM: i64 = 3_000_000_000_000_000;
 const RESPONSE_SCALE: i64 = 1_000;
 const QUATERNION_NORMALIZATION_TOLERANCE: u128 = 8_000_000;
@@ -601,7 +604,13 @@ const fn conjugate(orientation: FixedQuaternion) -> FixedQuaternion {
     }
 }
 
+#[cfg(test)]
 fn integrate_orientation(state: &mut RigidBodyState) {
+    let delta_mrad = consume_angular_delta(state);
+    apply_orientation_delta(state, delta_mrad);
+}
+
+fn consume_angular_delta(state: &mut RigidBodyState) -> [i64; 3] {
     let mut delta_mrad = [0_i64; 3];
     for (index, velocity) in [
         state.angular_velocity_mrad_per_second.x,
@@ -616,6 +625,10 @@ fn integrate_orientation(state: &mut RigidBodyState) {
         delta_mrad[index] = delta;
         state.angular_integration_remainder[index] = remainder;
     }
+    delta_mrad
+}
+
+fn apply_orientation_delta(state: &mut RigidBodyState, delta_mrad: [i64; 3]) {
     if delta_mrad == [0; 3] {
         return;
     }
@@ -633,6 +646,142 @@ fn integrate_orientation(state: &mut RigidBodyState) {
         i128::from(state.orientation.w),
     ];
     state.orientation = normalize_quaternion(quaternion_product(delta, orientation));
+}
+
+fn integrate_orientation_with_static_collision(
+    world: &World,
+    body: &RigidBodyDescriptor,
+    state: &mut RigidBodyState,
+) -> bool {
+    let delta_mrad = consume_angular_delta(state);
+    if delta_mrad == [0; 3] {
+        return false;
+    }
+    let Some(substeps) = angular_collision_substeps(body, delta_mrad) else {
+        stop_angular_motion(state);
+        return true;
+    };
+    let mut tested_cells = 0_usize;
+    for substep in 0..substeps {
+        let mut candidate = *state;
+        let delta = delta_mrad.map(|component| split_delta(component, substeps, substep));
+        apply_orientation_delta(&mut candidate, delta);
+        if rotated_body_sweep_overlaps_static(world, body, *state, candidate, &mut tested_cells) {
+            stop_angular_motion(state);
+            return true;
+        }
+        state.orientation = candidate.orientation;
+    }
+    false
+}
+
+fn angular_collision_substeps(body: &RigidBodyDescriptor, delta_mrad: [i64; 3]) -> Option<usize> {
+    let angular_distance_mrad = delta_mrad.iter().fold(0_u128, |sum, component| {
+        sum.saturating_add(u128::from(component.unsigned_abs()))
+    });
+    let travel_bound_um = maximum_corner_radius_l1_um(body)
+        .saturating_mul(angular_distance_mrad)
+        .div_ceil(1_000);
+    let required = travel_bound_um
+        .div_ceil(MAX_ANGULAR_SAMPLE_TRAVEL_UM)
+        .max(1);
+    let required = usize::try_from(required).ok()?;
+    (required <= MAX_ANGULAR_COLLISION_SUBSTEPS).then_some(required)
+}
+
+fn maximum_corner_radius_l1_um(body: &RigidBodyDescriptor) -> u128 {
+    let pivot = local_center_of_mass_um(body);
+    let extent = [
+        body.maximum.x.saturating_sub(body.minimum.x),
+        body.maximum.y.saturating_sub(body.minimum.y),
+        body.maximum.z.saturating_sub(body.minimum.z),
+    ]
+    .map(|extent| {
+        i128::from(extent.saturating_add(1)).saturating_mul(i128::from(MICROMETERS_PER_VOXEL))
+    });
+    let mut maximum = 0_u128;
+    for corner in [
+        [0, 0, 0],
+        [extent[0], 0, 0],
+        [0, extent[1], 0],
+        [0, 0, extent[2]],
+        [extent[0], extent[1], 0],
+        [extent[0], 0, extent[2]],
+        [0, extent[1], extent[2]],
+        extent,
+    ] {
+        let radius = (0..3).fold(0_u128, |sum, axis| {
+            sum.saturating_add(corner[axis].abs_diff(pivot[axis]))
+        });
+        maximum = maximum.max(radius);
+    }
+    maximum
+}
+
+fn split_delta(delta: i64, pieces: usize, index: usize) -> i64 {
+    let pieces = i64::try_from(pieces).expect("bounded angular substeps fit i64");
+    let quotient = delta.div_euclid(pieces);
+    let remainder = usize::try_from(delta.rem_euclid(pieces)).unwrap_or_default();
+    quotient + i64::from(index < remainder)
+}
+
+fn rotated_body_sweep_overlaps_static(
+    world: &World,
+    body: &RigidBodyDescriptor,
+    before: RigidBodyState,
+    after: RigidBodyState,
+    tested_cells: &mut usize,
+) -> bool {
+    let before_shape = RotatedVoxelShape::new(body, before.orientation);
+    let after_shape = RotatedVoxelShape::new(body, after.orientation);
+    for body_voxel in &body.voxels {
+        let before_bounds = before_shape.voxel_bounds(body, body_voxel.position);
+        let after_bounds = after_shape.voxel_bounds(body, body_voxel.position);
+        let minimum = FixedMicrometers3 {
+            x: before_bounds.0.x.min(after_bounds.0.x),
+            y: before_bounds.0.y.min(after_bounds.0.y),
+            z: before_bounds.0.z.min(after_bounds.0.z),
+        };
+        let maximum = FixedMicrometers3 {
+            x: before_bounds.1.x.max(after_bounds.1.x),
+            y: before_bounds.1.y.max(after_bounds.1.y),
+            z: before_bounds.1.z.max(after_bounds.1.z),
+        };
+        let x = translated_cell_interval(before.translation_um.x, minimum.x, maximum.x);
+        let y = translated_cell_interval(before.translation_um.y, minimum.y, maximum.y);
+        let z = translated_cell_interval(before.translation_um.z, minimum.z, maximum.z);
+        for x in x.0..=x.1 {
+            for y in y.0..=y.1 {
+                for z in z.0..=z.1 {
+                    *tested_cells = tested_cells.saturating_add(1);
+                    if *tested_cells > MAX_ROTATION_STATIC_CELL_TESTS {
+                        return true;
+                    }
+                    let (Ok(x), Ok(y), Ok(z)) =
+                        (i32::try_from(x), i32::try_from(y), i32::try_from(z))
+                    else {
+                        return true;
+                    };
+                    if world.voxel(IVec3::new(x, y, z)).is_solid() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+const fn translated_cell_interval(translation: i64, minimum: i64, maximum: i64) -> (i64, i64) {
+    overlapped_interval_cells(
+        translation.saturating_add(minimum),
+        translation.saturating_add(maximum),
+    )
+}
+
+fn stop_angular_motion(state: &mut RigidBodyState) {
+    state.angular_velocity_mrad_per_second = FixedMilliradians3::default();
+    state.angular_integration_remainder = [0; 3];
 }
 
 const fn quaternion_product(first: [i128; 4], second: [i128; 4]) -> [i128; 4] {
@@ -798,8 +947,7 @@ pub fn step_rigid_body(
         MAX_LINEAR_SPEED_UM_PER_SECOND,
     );
     clamp_angular_velocity(state);
-    integrate_orientation(state);
-    let mut collided_with_static = false;
+    let mut collided_with_static = integrate_orientation_with_static_collision(world, body, state);
     for axis in [Axis::X, Axis::Z, Axis::Y] {
         let velocity = axis.component(state.linear_velocity_um_per_second);
         let remainder_index = axis.index();
@@ -3538,6 +3686,115 @@ mod tests {
             },
         );
 
+        assert_eq!(
+            state.angular_velocity_mrad_per_second,
+            FixedMilliradians3::default()
+        );
+    }
+
+    #[test]
+    fn free_angular_motion_uses_bounded_deterministic_substeps() {
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![
+                BodyVoxel {
+                    position: IVec3::new(0, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                BodyVoxel {
+                    position: IVec3::new(1, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )
+        .expect("freely rotating bar");
+        let delta = [0, 0, MAX_ANGULAR_SPEED_MRAD_PER_SECOND / SERVER_PHYSICS_HZ];
+        assert_eq!(angular_collision_substeps(&body, delta), Some(2));
+        let mut first = RigidBodyState {
+            angular_velocity_mrad_per_second: FixedMilliradians3 {
+                z: MAX_ANGULAR_SPEED_MRAD_PER_SECOND,
+                ..FixedMilliradians3::default()
+            },
+            ..RigidBodyState::at_spawn(&body)
+        };
+        let mut second = first;
+        let world = World::default();
+
+        let first_result = step_rigid_body(&world, &body, &mut first);
+        let second_result = step_rigid_body(&world, &body, &mut second);
+
+        assert_eq!(first, second);
+        assert_eq!(first_result, second_result);
+        assert_ne!(first.orientation, FixedQuaternion::IDENTITY);
+        assert_eq!(
+            first.angular_velocity_mrad_per_second.z,
+            MAX_ANGULAR_SPEED_MRAD_PER_SECOND
+        );
+    }
+
+    #[test]
+    fn sampled_angular_sweep_stops_before_entering_static_voxels() {
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![
+                BodyVoxel {
+                    position: IVec3::new(0, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                BodyVoxel {
+                    position: IVec3::new(1, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )
+        .expect("rotation-constrained bar");
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 4, 0), Voxel::new(Material::Stone));
+        let mut state = RigidBodyState {
+            angular_velocity_mrad_per_second: FixedMilliradians3 {
+                z: MAX_ANGULAR_SPEED_MRAD_PER_SECOND,
+                ..FixedMilliradians3::default()
+            },
+            ..RigidBodyState::at_spawn(&body)
+        };
+
+        let result = step_rigid_body(&world, &body, &mut state);
+
+        assert!(result.collided_with_static);
+        assert_eq!(state.orientation, FixedQuaternion::IDENTITY);
+        assert_eq!(
+            state.angular_velocity_mrad_per_second,
+            FixedMilliradians3::default()
+        );
+        assert_eq!(state.angular_integration_remainder, [0; 3]);
+    }
+
+    #[test]
+    fn oversized_angular_sweep_fails_closed_before_unbounded_work() {
+        let voxels = (0..100)
+            .map(|x| BodyVoxel {
+                position: IVec3::new(x, 5, 0),
+                voxel: Voxel::new(Material::Wood),
+            })
+            .collect();
+        let body = RigidBodyDescriptor::from_replicated_voxels(1, voxels, BodyLimits::default())
+            .expect("long rotating beam");
+        let delta = [0, 0, MAX_ANGULAR_SPEED_MRAD_PER_SECOND / SERVER_PHYSICS_HZ];
+        assert_eq!(angular_collision_substeps(&body, delta), None);
+        let mut state = RigidBodyState {
+            angular_velocity_mrad_per_second: FixedMilliradians3 {
+                z: MAX_ANGULAR_SPEED_MRAD_PER_SECOND,
+                ..FixedMilliradians3::default()
+            },
+            ..RigidBodyState::at_spawn(&body)
+        };
+
+        let result = step_rigid_body(&World::default(), &body, &mut state);
+
+        assert!(result.collided_with_static);
+        assert_eq!(state.orientation, FixedQuaternion::IDENTITY);
         assert_eq!(
             state.angular_velocity_mrad_per_second,
             FixedMilliradians3::default()

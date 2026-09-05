@@ -296,9 +296,10 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
   conservative static sweeps, collision-generated torque, material ground friction and normal
   restitution, exact vertical body columns, stable stacking, wake propagation, sleeping, bounded
   sweep-and-prune with atomic overload rollback, protocol-v6/snapshot-v2 state replication, and
-  mass-centred GPU rotation with conservative rotated render bounds (delivered; continuous angular
-  sweep and oriented dynamic-body narrow phase remain, and rotated bodies fail closed out of the
-  legacy vertical-column solver);
+  mass-centred GPU rotation with conservative rotated render bounds (delivered; static angular motion
+  is sampled at a radius-derived maximum travel of 0.25 m with at most eight substeps and 262,144
+  tested cells per body tick; over-budget or intersecting rotation stops, rotated bodies fail closed
+  out of the legacy vertical-column solver, and oriented dynamic-body narrow phase remains);
 - four-pass X/Z dynamic contact from swept coarse body bounds, rational orthogonal-overlap validation
   at time of impact, inverse-mass separation, material restitution, momentum-preserving tangential
   friction, impact wake-up, and deterministic short-chain propagation (delivered);
@@ -315,7 +316,7 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - local stress propagation after damage;
 - unsupported island extraction (delivered for topology-changing voxel edits);
 - rigid-body mass, centre of mass, and inertia derived from geometry (delivered);
-- continuous angular collision sweep, oriented dynamic-body voxel contact, gyroscopic response,
+- oriented dynamic-body voxel contact, collision-preserving angular response, gyroscopic response,
   deeper constraint-island convergence, clustering, and distance-based solver budgets.
 - player-state replication, client prediction and reconciliation, authoritative view/weapon state,
   persistent inventories, recipes, removal tools, material selection UI, dynamic-body character

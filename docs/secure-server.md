@@ -102,7 +102,9 @@ deliberately unsuitable for LAN or Internet exposure.
 
 Readiness emits only the selected socket, non-secret exposure class, and whether OIDC refresh and TLS
 reload are active. The final line contains bounded gameplay and lifecycle counters, never
-credentials, remote endpoints, or principal identifiers. `Ctrl-C`, certificate/JWKS safety
+credentials, remote endpoints, or principal identifiers. It explicitly reports refused connections,
+handshake/admission failures, gameplay-queue drops, protocol rejections, and rate-limited sessions.
+`Ctrl-C`, certificate/JWKS safety
 deadlines, `max_ticks`, and `stop_after_commands` all converge through endpoint shutdown.
 
 Do not expose this milestone to a LAN or the Internet. Remote enablement still requires production

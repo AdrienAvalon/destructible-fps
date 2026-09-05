@@ -31,7 +31,11 @@ struct Totals {
     outbound: usize,
     admitted: usize,
     disconnected: usize,
+    refused: usize,
+    handshake_failures: usize,
     admission_failures: usize,
+    gameplay_queue_drops: usize,
+    protocol_rejections: usize,
     rate_limited: usize,
 }
 
@@ -129,13 +133,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let active = server.active_sessions();
     refresh_tasks.stop().await;
     server.shutdown().await;
+    print_stop(&totals, active, &oidc_counters, &tls_counters);
+    terminal_error.map_or(Ok(()), Err)
+}
+
+fn print_stop(
+    totals: &Totals,
+    active: usize,
+    oidc_counters: &RefreshCounters,
+    tls_counters: &RefreshCounters,
+) {
     println!(
-        "STOP ticks={} commands={} admitted={} disconnected={} admission_failures={} rate_limited={} active={} inbound={} outbound={} oidc_refresh_attempts={} oidc_refresh_successes={} oidc_refresh_failures={} tls_reload_attempts={} tls_reload_successes={} tls_reload_failures={} tls_reload_installed={} tls_reload_unchanged={}",
+        "STOP ticks={} commands={} admitted={} disconnected={} refused={} handshake_failures={} admission_failures={} gameplay_queue_drops={} protocol_rejections={} rate_limited={} active={} inbound={} outbound={} oidc_refresh_attempts={} oidc_refresh_successes={} oidc_refresh_failures={} tls_reload_attempts={} tls_reload_successes={} tls_reload_failures={} tls_reload_installed={} tls_reload_unchanged={}",
         totals.ticks,
         totals.commands,
         totals.admitted,
         totals.disconnected,
+        totals.refused,
+        totals.handshake_failures,
         totals.admission_failures,
+        totals.gameplay_queue_drops,
+        totals.protocol_rejections,
         totals.rate_limited,
         active,
         totals.inbound,
@@ -149,7 +167,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tls_counters.installed.load(Ordering::Relaxed),
         tls_counters.unchanged.load(Ordering::Relaxed),
     );
-    terminal_error.map_or(Ok(()), Err)
 }
 
 fn print_ready(
@@ -305,9 +322,19 @@ impl Totals {
         self.disconnected = self
             .disconnected
             .saturating_add(report.disconnected_sessions);
+        self.refused = self.refused.saturating_add(report.refused_connections);
+        self.handshake_failures = self
+            .handshake_failures
+            .saturating_add(report.handshake_failures);
         self.admission_failures = self
             .admission_failures
             .saturating_add(report.admission_failures);
+        self.gameplay_queue_drops = self
+            .gameplay_queue_drops
+            .saturating_add(report.gameplay_queue_drops);
+        self.protocol_rejections = self
+            .protocol_rejections
+            .saturating_add(report.protocol_rejections);
         self.rate_limited = self
             .rate_limited
             .saturating_add(report.rate_limited_sessions);

@@ -6,8 +6,8 @@ use aws_lc_rs::{
 };
 use base64::Engine as _;
 use destructible_fps::{
-    ExplosionCommand, IVec3, encode_explosion_request, establish_session, secure_client_config,
-    send_gameplay_datagram,
+    ExplosionCommand, IVec3, MAX_PENDING_QUIC_HANDSHAKES, MAX_QUIC_DATAGRAM_PAYLOAD_BYTES,
+    encode_explosion_request, establish_session, secure_client_config, send_gameplay_datagram,
 };
 use jsonwebtoken::{
     Algorithm, DecodingKey, Header,
@@ -384,6 +384,83 @@ async fn standalone_process_stops_at_the_static_oidc_trust_safety_deadline() {
     assert_eq!(stop_counter(&output.stdout, "oidc_refresh_attempts"), 0);
     assert_eq!(stop_counter(&output.stdout, "oidc_refresh_successes"), 0);
     assert_eq!(stop_counter(&output.stdout, "oidc_refresh_failures"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn standalone_process_refuses_excess_stalled_admission_without_simulation_work() {
+    let fixture = Fixture::new(240, None);
+    let mut process = RunningServer::spawn(&fixture.config);
+    let client = trusted_client(fixture.certificate.clone());
+
+    let mut handshakes = tokio::task::JoinSet::new();
+    for _ in 0..MAX_PENDING_QUIC_HANDSHAKES {
+        let connecting = client
+            .connect(process.address, "localhost")
+            .expect("start external stalled-admission connection");
+        handshakes.spawn(async move {
+            timeout(Duration::from_secs(2), connecting)
+                .await
+                .expect("external stalled-admission TLS deadline")
+                .expect("trusted external stalled-admission connection")
+        });
+    }
+    let mut stalled_connections = Vec::with_capacity(MAX_PENDING_QUIC_HANDSHAKES);
+    while let Some(result) = handshakes.join_next().await {
+        stalled_connections.push(result.expect("external stalled-admission handshake task"));
+    }
+    assert_eq!(stalled_connections.len(), MAX_PENDING_QUIC_HANDSHAKES);
+
+    let excess = timeout(
+        Duration::from_secs(2),
+        client
+            .connect(process.address, "localhost")
+            .expect("start external excess connection"),
+    )
+    .await
+    .expect("external excess refusal deadline");
+    assert!(excess.is_err(), "external excess admission connected");
+    for connection in stalled_connections {
+        connection.close(0_u32.into(), b"external hostile-load test complete");
+    }
+
+    let output = process.finish_within(Duration::from_secs(8)).await;
+    assert!(output.status.success(), "process stderr: {}", output.stderr);
+    assert_eq!(stop_counter(&output.stdout, "ticks"), 240);
+    assert_eq!(stop_counter(&output.stdout, "refused"), 1);
+    assert_eq!(stop_counter(&output.stdout, "handshake_failures"), 0);
+    assert_eq!(stop_counter(&output.stdout, "admitted"), 0);
+    assert_eq!(stop_counter(&output.stdout, "commands"), 0);
+    assert_eq!(stop_counter(&output.stdout, "inbound"), 0);
+    assert_eq!(stop_counter(&output.stdout, "outbound"), 0);
+    client.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_process_closes_an_external_oversized_datagram_before_simulation_work() {
+    let fixture = Fixture::new(180, None);
+    let token = fixture.signed_token("external-oversized-datagram-jti");
+    let mut process = RunningServer::spawn(&fixture.config);
+    let client = trusted_client(fixture.certificate.clone());
+    let connection = connect(&client, process.address).await;
+    establish_session(&connection, 419, token.as_bytes())
+        .await
+        .expect("external oversized-datagram session");
+    connection
+        .send_datagram(vec![0_u8; MAX_QUIC_DATAGRAM_PAYLOAD_BYTES + 1].into())
+        .expect("send external oversized datagram inside QUIC path MTU");
+    timeout(Duration::from_secs(2), connection.closed())
+        .await
+        .expect("external oversized-datagram rejection deadline");
+
+    let output = process.finish_within(Duration::from_secs(6)).await;
+    assert!(output.status.success(), "process stderr: {}", output.stderr);
+    assert_eq!(stop_counter(&output.stdout, "protocol_rejections"), 1);
+    assert_eq!(stop_counter(&output.stdout, "admitted"), 1);
+    assert_eq!(stop_counter(&output.stdout, "commands"), 0);
+    assert_eq!(stop_counter(&output.stdout, "inbound"), 0);
+    assert!(!output.stdout.contains(&token));
+    assert!(!output.stderr.contains(&token));
+    client.wait_idle().await;
 }
 
 #[test]

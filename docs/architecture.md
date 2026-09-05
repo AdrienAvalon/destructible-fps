@@ -299,6 +299,12 @@ server reserves the final minute, performs no unconfigured refresh, and exits un
 resulting monotonic safety deadline. Live discovery-outage expiry against a disposable production-
 shaped realm remains a separate deployment proof.
 
+A twelfth external-process case completes 32 concurrent TLS handshakes without sending application
+hellos, observes refusal of the 33rd connection, and still completes all 240 server ticks with no
+admitted session or simulation traffic. A thirteenth admits one OIDC client, injects a 1,101-byte
+datagram through raw QUIC, and proves connection closure plus a protocol-rejection counter before
+the payload reaches the authority core.
+
 ## Planned engine layers
 
 ### First playable slice — delivered

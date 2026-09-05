@@ -1300,3 +1300,35 @@ The five-second Vulkan smoke was GPU-clean but its presentation/CPU redraw p99 w
 was only 0.247 ms, so this is recorded as a presentation-cadence observation rather than attributed
 to the trust-deadline change. Graphify reported 1,993 nodes, 5,638 post-build edges, zero unverified
 code nodes, and a fully fresh index.
+
+## 2026-09-05 — external-process admission and datagram abuse
+
+Source state: parent `0bc1490` plus two hostile-client process cases and expanded terminal counters.
+The standalone server now carries refused connections, TLS handshake failures, gameplay-queue drops,
+and protocol rejections from each bounded network tick into saturating process totals. The final
+`STOP` line exposes those non-secret totals without endpoints, principals, or credentials.
+
+The first case launches the real server process, completes 32 concurrent TLS connections while
+withholding every application hello, and confirms that the 33rd connection is refused. The process
+still completes exactly 240 fixed ticks with one refusal, zero handshake failures, zero admitted
+sessions, and no inbound, outbound, or command work. The second case authenticates a real OIDC
+session and injects a 1,101-byte raw QUIC datagram. It observes connection closure, exactly one
+protocol rejection, and zero payloads or commands delivered to the authority. Each exact case passed
+three consecutive debug and three consecutive release executions.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 157 passed debug; 157 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 56 passed debug; 56 passed release |
+| Destruction p99, 500 events | 0.358 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.461 ms |
+| Physics p99, 1,024 bodies | 1.177 ms |
+| Snapshot encode + decode + install p99 | 9.358 ms |
+| CPU frame-work p99, RTX 4050 smoke | 13.995 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.234 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+Graphify reported 2,000 nodes, 5,656 post-build edges, zero unverified code nodes, and a fully fresh
+index. External reconnect cycling and multi-session queue pressure remain before the hostile-load row
+can be closed.

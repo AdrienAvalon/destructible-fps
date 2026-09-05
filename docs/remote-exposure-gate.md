@@ -16,7 +16,7 @@ non-loopback variant. Configuration fields or operator assertions alone do not c
 | Application admission | Invalid credential, stalled hello, or nonce mismatch | Secure transport and standalone process negative tests | Pass |
 | OIDC provenance | Discovery issuer mismatch, unsafe endpoint, malformed or stale key set, and replay | OIDC discovery/verifier tests and standalone discovery refusal | Pass |
 | Gameplay authorization | Invalid session and malformed or replayed command | Network, transport, and secure authority tests | Pass |
-| Resource abuse | Per-session datagram burst, queue pressure, pending handshake cap, and authority capacity | `pending_admission_saturation_refuses_excess_without_simulation_work`, the secure-authority rate-limit test, and bounded queue/capacity unit tests | Partial: stalled real-QUIC admission saturation passes; add external reconnect, malformed-input, and queue-pressure storms |
+| Resource abuse | Per-session datagram burst, queue pressure, pending handshake cap, and authority capacity | In-process and external-process 32-plus-one saturation, external oversized-datagram closure, secure-authority rate limiting, and bounded queue/capacity unit tests | Partial: add reconnect and multi-session queue-pressure storms |
 | Loss and reordering | Distinct delay, duplication, and loss traces with bounded repair | Four-client real-process trace replay | Pass for deterministic loopback; add WAN profiles |
 | Trust outage | Discovery, static trust, or renewal reaches its monotonic deadline | Real-process TLS outage and static OIDC expiry tests pass; discovery retains failed-refresh controller tests | Pass for local mechanisms; repeat live discovery outage against the disposable realm |
 | Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix non-root service identity plus file/parent owner, mode, type, and no-follow tests | Partial: Windows service DACL validation missing |
@@ -54,6 +54,12 @@ The static OIDC rehearsal gives the bootstrap JWKS 66 seconds of declared validi
 the real process reserves the final minute, emits no fictitious refresh activity, and exits at the
 resulting monotonic trust deadline. A live failed-discovery expiry still belongs to the disposable
 production-shaped realm campaign rather than this static-file proof.
+
+The hostile-load test now crosses a real process boundary: 32 external clients hold completed TLS
+handshakes without application hellos, the 33rd is refused, and the process completes 240 ticks with
+zero admissions or simulation traffic. A separate authenticated client sends a 1,101-byte QUIC
+datagram; the server closes it, reports exactly one protocol rejection, and forwards nothing to the
+authority. Reconnect and multi-session queue-pressure storms remain.
 
 Only after all five proofs are reproducible may the internal validated binder gain a private-network
 capability. Internet publication remains a separate later gate with capacity protection and incident

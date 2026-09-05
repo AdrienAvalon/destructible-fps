@@ -241,6 +241,71 @@ async fn standalone_process_refuses_mismatched_discovery_before_ready() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_process_reloads_tls_files_without_dropping_the_active_session() {
+    let fixture = Fixture::new(900, Some(1));
+    fixture.configure_tls_reload(5);
+    let mut process = RunningServer::spawn(&fixture.config);
+    let old_client = trusted_client(fixture.certificate.clone());
+    let old_connection = connect(&old_client, process.address).await;
+    establish_session(
+        &old_connection,
+        409,
+        fixture.signed_token("process-pre-rotation-jti").as_bytes(),
+    )
+    .await
+    .expect("pre-rotation process session");
+
+    let new_certificate = fixture.replace_tls_identity();
+    sleep(Duration::from_secs(6)).await;
+    assert!(old_connection.close_reason().is_none());
+
+    let new_client = trusted_client(new_certificate);
+    let new_connection = connect(&new_client, process.address).await;
+    let welcome = establish_session(
+        &new_connection,
+        411,
+        fixture.signed_token("process-post-rotation-jti").as_bytes(),
+    )
+    .await
+    .expect("post-rotation process session");
+    send_gameplay_datagram(
+        &new_connection,
+        encode_explosion_request(
+            welcome.session_id,
+            ExplosionCommand {
+                command_id: 1,
+                center: IVec3::new(0, 1, 0),
+                radius_voxels: 4,
+                peak_energy: 10_000,
+            },
+        ),
+    )
+    .expect("post-rotation encrypted command");
+
+    let output = process.finish().await;
+    assert!(output.status.success(), "process stderr: {}", output.stderr);
+    assert!(output.stdout.contains("commands=1"), "{}", output.stdout);
+    assert!(output.stdout.contains("admitted=2"), "{}", output.stdout);
+    assert!(
+        output.stdout.contains("tls_reload_attempts=1"),
+        "{}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("tls_reload_successes=1"),
+        "{}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("tls_reload_failures=0"),
+        "{}",
+        output.stdout
+    );
+    old_client.wait_idle().await;
+    new_client.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn standalone_process_rejects_an_invalid_oidc_credential_without_simulation_work() {
     let fixture = Fixture::new(60, None);
     let rejected = "this-is-not-a-signed-access-token";
@@ -507,6 +572,23 @@ impl Fixture {
             "root_certificate_file": path_string(root),
         });
         self.write_config(&document);
+    }
+
+    fn configure_tls_reload(&self, interval_seconds: u64) {
+        let mut document = self.read_config();
+        document["tls_reload"] = json!({"interval_seconds": interval_seconds});
+        self.write_config(&document);
+    }
+
+    fn replace_tls_identity(&self) -> CertificateDer<'static> {
+        let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .expect("replacement process TLS identity");
+        fs::write(&self.certificate_path, identity.cert.pem())
+            .expect("replacement process certificate");
+        fs::write(&self.key, identity.signing_key.serialize_pem())
+            .expect("replacement process private key");
+        secure_private_key(&self.key);
+        identity.cert.der().clone()
     }
 
     fn signed_token(&self, jti: &str) -> String {

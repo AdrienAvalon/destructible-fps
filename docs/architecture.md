@@ -245,6 +245,15 @@ not be group/world writable; the private key may have no group/world access. Cre
 never accepted through argv or printed. Windows remains loopback-only while installer-owned DACL
 validation is designed.
 
+Optional TLS reload retains only the fixed certificate/key paths, a bounded interval, and a shared
+monotonic deadline. Its worker performs the complete startup validation again before giving a narrow
+endpoint capability a new bounded server configuration. Quinn applies that identity only to future
+handshakes, so active authenticated sessions continue normally. Mismatched or partially replaced
+files never reach the endpoint, and failure leaves the prior deadline unchanged; external issuance
+cannot silently turn into indefinite stale-certificate service. Certificate validation uses the
+greater of observed wall time and startup wall time plus monotonic elapsed time, preventing a clock
+rollback followed by reload from extending an old identity.
+
 Real loopback QUIC tests cover a valid encrypted datagram exchange, an untrusted certificate, an
 invalid application credential, a stalled admission deadline, a mismatched nonce echo, oversized
 payloads in both directions, and 20 independent sequential sessions. A second real-QUIC integration
@@ -256,9 +265,14 @@ mutation, remote-bind rejection, expired-certificate rejection, and private-key 
 before readiness. Two additional process cases prove that trusted HTTPS discovery replaces an
 intentionally wrong bootstrap key before accepting a real OIDC command, while mismatched metadata
 exits before readiness without disclosing the endpoint. Production issuer/root provisioning,
-automated certificate renewal, reliable snapshot/control streams, OS-specific secret ACL validation,
+automated certificate issuance, reliable snapshot/control streams, OS-specific secret ACL validation,
 and a non-loopback attack matrix remain required before remote exposure. Both
 the direct runtime API and the validated file policy remain fail-closed to loopback.
+
+An eighth standalone process case replaces the certificate and key files while one authenticated
+session is active, waits for the bounded worker, then connects and applies a command through the new
+certificate. The pre-rotation connection remains established and the final lifecycle counters prove
+one attempted and successful reload with no failure.
 
 ## Planned engine layers
 

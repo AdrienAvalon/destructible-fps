@@ -165,8 +165,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   bounded correction smoothing are delivered for loopback;
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
   Unix permission checks, complete-chain X.509 lifetime preflight, monotonic TLS/static-JWKS expiry,
-  signal-aware shutdown, and a seven-case external-process matrix including trusted discovery and
-  hostile issuer mismatch (delivered for loopback; automated renewal, platform ACLs, production
+  signal-aware shutdown, and an eight-case external-process matrix including trusted discovery and
+  hostile issuer mismatch; bounded certificate/key hot reload changes future handshakes without
+  disrupting current sessions (delivered for loopback; automated issuance, platform ACLs, production
   issuer/root provisioning, and remote policy remain);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - broader entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
@@ -259,7 +260,7 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add automated certificate renewal, Windows service DACL checks, production OIDC issuer/root
+1. add automated certificate issuance, Windows service DACL checks, production OIDC issuer/root
    provisioning, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
 2. extend the delivered oriented per-voxel dynamic contact with rotated vertical support, continuous
    multi-contact manifolds, gyroscopic response, and deeper collision-island convergence;

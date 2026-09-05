@@ -53,6 +53,91 @@ async fn secure_authority_rejects_non_loopback_without_production_policy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_rotation_changes_future_handshakes_without_disrupting_an_active_session() {
+    let (old_certificate, old_private_key) = test_identity();
+    let old_server_config =
+        secure_server_config(vec![old_certificate.clone()], old_private_key).expect("old config");
+    let mut server = SecureDedicatedServer::bind(
+        LOOPBACK_EPHEMERAL,
+        old_server_config,
+        Arc::new(TestVerifier),
+        demo_world(),
+    )
+    .expect("rotatable secure authority");
+    let address = server.local_addr().expect("rotatable server address");
+    let old_client = trusted_client(old_certificate);
+    let old_connection = connect(&old_client, address).await;
+    let old_welcome = establish_session(&old_connection, 601, &TEST_CREDENTIAL)
+        .await
+        .expect("old-identity session");
+    for _ in 0..100 {
+        server.tick().expect("old admission tick");
+        if server.active_sessions() == 1 {
+            break;
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(server.active_sessions(), 1);
+
+    let (new_certificate, new_private_key) = test_identity();
+    let new_server_config =
+        secure_server_config(vec![new_certificate.clone()], new_private_key).expect("new config");
+    server
+        .tls_config_updater()
+        .replace_for_new_connections(new_server_config);
+
+    let rejected = timeout(
+        Duration::from_secs(2),
+        old_client
+            .connect(address, "localhost")
+            .expect("start old-root connection after rotation"),
+    )
+    .await
+    .expect("old-root rejection deadline");
+    assert!(rejected.is_err());
+
+    send_gameplay_datagram(
+        &old_connection,
+        encode_snapshot_request(old_welcome.session_id),
+    )
+    .expect("active pre-rotation session remains writable");
+    let mut received = 0_usize;
+    for _ in 0..100 {
+        received += server
+            .tick()
+            .expect("post-rotation existing-session tick")
+            .authority
+            .received_datagrams;
+        if received > 0 {
+            break;
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(received, 1);
+    assert!(old_connection.close_reason().is_none());
+
+    let new_client = trusted_client(new_certificate);
+    let new_connection = connect(&new_client, address).await;
+    establish_session(&new_connection, 603, &TEST_CREDENTIAL)
+        .await
+        .expect("new-identity session");
+    for _ in 0..100 {
+        server.tick().expect("new admission tick");
+        if server.active_sessions() == 2 {
+            break;
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(server.active_sessions(), 2);
+
+    old_connection.close(VarInt::from_u32(0), b"old session complete");
+    new_connection.close(VarInt::from_u32(0), b"new session complete");
+    server.shutdown().await;
+    old_client.wait_idle().await;
+    new_client.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_authenticated_quic_clients_receive_one_authoritative_transaction() {
     let (certificate, private_key) = test_identity();
     let server_config =

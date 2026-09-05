@@ -94,7 +94,7 @@ pub use secure_client::{
 pub use secure_server::{
     MAX_CONSECUTIVE_GAMEPLAY_QUEUE_DROPS, MAX_SECURE_CONTROL_EVENTS, MAX_SECURE_GAMEPLAY_BYTES,
     MAX_SECURE_GAMEPLAY_EVENTS, MAX_SESSION_DATAGRAMS_PER_SECOND, SecureDedicatedServer,
-    SecureNetworkTickReport,
+    SecureNetworkTickReport, SecureTlsConfigUpdater,
 };
 pub use secure_transport::{
     ALPN_PROTOCOL, AuthenticatedPrincipal, AuthenticatedSession, MAX_PENDING_QUIC_HANDSHAKES,
@@ -107,9 +107,10 @@ pub use secure_transport::{
 };
 pub use server_config::{
     MAX_CERTIFICATE_CHAIN_BYTES, MAX_CERTIFICATE_CHAIN_ENTRIES, MAX_SECURE_CONFIG_BYTES,
-    MAX_STATIC_JWKS_VALIDITY_SECONDS, MAX_TLS_PRIVATE_KEY_BYTES, MIN_STATIC_JWKS_VALIDITY_SECONDS,
-    MIN_TLS_CERTIFICATE_REMAINING_SECONDS, OidcRefreshController, SecureAuthorityLaunchConfig,
-    SecureAuthorityLaunchError, SecureNetworkExposure,
+    MAX_STATIC_JWKS_VALIDITY_SECONDS, MAX_TLS_PRIVATE_KEY_BYTES, MAX_TLS_RELOAD_INTERVAL_SECONDS,
+    MIN_STATIC_JWKS_VALIDITY_SECONDS, MIN_TLS_CERTIFICATE_REMAINING_SECONDS,
+    MIN_TLS_RELOAD_INTERVAL_SECONDS, OidcRefreshController, SecureAuthorityLaunchConfig,
+    SecureAuthorityLaunchError, SecureNetworkExposure, TlsIdentityRefreshController,
 };
 pub use session::{BuildResult, DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
 pub use snapshot::{

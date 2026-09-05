@@ -24,6 +24,8 @@ fields.
 | `oidc_discovery` | Optional object enabling mandatory startup discovery and periodic refresh. |
 | `oidc_discovery.refresh_interval_seconds` | Whole seconds from 60 through 3,600. Refreshed keys remain usable for at most three configured intervals without another successful refresh. |
 | `oidc_discovery.root_certificate_file` | Optional absolute, regular, non-link PEM trust bundle; at most 256 KiB and 16 certificates. Platform roots remain available. |
+| `tls_reload` | Optional object enabling periodic reload of the configured certificate/key paths for future handshakes. |
+| `tls_reload.interval_seconds` | Whole seconds from 5 through 3,600. The installed chain must remain valid for at least this interval plus the 60-second safety margin. |
 | `max_ticks` | Optional positive fixed-tick limit; intended for bounded validation runs. |
 | `stop_after_commands` | Optional positive applied-command limit; intended for bounded validation runs. |
 
@@ -48,7 +50,17 @@ swap advances a monotonic deadline by three intervals; any failed fetch keeps th
 deadline, emits only a non-secret failure counter, and ultimately stops the authority rather than
 serving indefinitely stale identity data. HTTPS requires TLS 1.2 or later, exact issuer equality,
 same-origin JWKS, no redirects, no ambient proxy, three-second connect and five-second total
-deadlines, and 16 KiB/64 KiB response limits. Certificate renewal remains a separate gate.
+deadlines, and 16 KiB/64 KiB response limits.
+
+When `tls_reload` is configured, an off-tick worker rereads the same fixed certificate and private-key
+paths. It repeats type, permission, size, chain-lifetime, cardinality, and key-pair validation before
+installing the complete replacement for future QUIC handshakes. A partial or incoherent external
+file update leaves the previous endpoint configuration and monotonic deadline in force. Existing
+connections retain their negotiated identity and are not interrupted. The worker records non-secret
+attempt/success/failure counters; repeated failure cannot extend the old certificate deadline. Its
+wall-clock input is floored by elapsed monotonic time from startup, so rereading an unchanged file
+after a system-clock rollback cannot manufacture extra validity. An external ACME or internal-PKI
+provisioner must still renew and atomically replace the files.
 
 ## Local launch
 
@@ -82,11 +94,11 @@ prints the generated key or either distinct player credential. Start the server 
 clients with the paths it reports, then delete the complete directory. This convenience authority is
 deliberately unsuitable for LAN or Internet exposure.
 
-Readiness emits only the selected socket, non-secret exposure class, and whether refresh is active.
-The final line contains bounded gameplay and refresh counters, never credentials, endpoints, or
-principal identifiers. `Ctrl-C`, `max_ticks`, JWKS expiry, and `stop_after_commands` all converge
-through endpoint shutdown.
+Readiness emits only the selected socket, non-secret exposure class, and whether OIDC refresh and TLS
+reload are active. The final line contains bounded gameplay and lifecycle counters, never
+credentials, remote endpoints, or principal identifiers. `Ctrl-C`, certificate/JWKS expiry,
+`max_ticks`, and `stop_after_commands` all converge through endpoint shutdown.
 
 Do not expose this milestone to a LAN or the Internet. Remote enablement still requires production
-issuer/root provisioning, automated certificate renewal, platform secret-ACL checks, external
+issuer/root provisioning, automated certificate issuance, platform secret-ACL checks, external
 loss/abuse tests, and an explicit reviewed exposure policy.

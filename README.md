@@ -36,7 +36,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
   optional bounded private roots, chunk-accounted JSON response ceilings, mandatory refresh before
   readiness, asynchronous rotation, and monotonic stale-key shutdown;
 - a standalone secure authority process with bounded JSON/PEM/JWKS loading, strict Unix key-file
-  permissions, complete-chain X.509 lifetime preflight, monotonic TLS/JWKS expiry shutdown, graceful
+  permissions, complete-chain X.509 lifetime preflight, bounded certificate/key hot reload for future
+  handshakes without disconnecting active players, monotonic TLS/JWKS expiry shutdown, graceful
   interruption, and no credential-valued arguments;
 - a reusable secure client bootstrap with bounded PEM/token files, strict Unix token permissions,
   cryptographic client nonces, verified TLS/ALPN, post-TLS credential admission, encrypted bounded
@@ -102,7 +103,7 @@ The Linux demo now combines the authoritative core with a real-time first-person
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
 game. Exact convex contact manifolds, gyroscopic response, deeper constraint-island convergence,
-progressive structural stress, remote-authority exposure, automated certificate renewal,
+progressive structural stress, remote-authority exposure, automated certificate issuance,
 first-person arms/weapon presentation,
 adaptive retransmission and congestion control, audio,
 asset-quality PBR, temporal anti-aliasing, and
@@ -212,17 +213,20 @@ runtime now connects QUIC admissions and encrypted datagrams to the same authori
 `cargo test --test secure_authority` proves a two-client destructive transaction. The
 `secure-dedicated-server` process loads certificate paths and a time-bounded OIDC JWKS from a
 fail-closed file configuration. It still rejects non-loopback binds pending trusted online key
-provisioning, automated certificate renewal, platform ACL checks, and the remote-exposure test gate.
+provisioning, automated certificate issuance, platform ACL checks, and the remote-exposure test gate.
 Startup parses every certificate in the bounded chain, requires its current validity and at least 60
-seconds remaining, then maps the earliest expiry to a monotonic shutdown deadline. The secure
+seconds remaining, then maps the earliest expiry to a monotonic shutdown deadline. An optional
+bounded file watcher atomically validates replacement certificate/key pairs and changes only future
+QUIC handshakes; existing sessions are not disrupted. The secure
 boundary tests
 cover TLS certificate rejection, application-credential rejection, admission timeout, nonce
 mismatch, datagram bounds, invalid credentials, and per-session rate limiting. A separate offline
-OIDC verifier validates pre-provisioned JWKS. Seven external-process tests additionally prove valid
+OIDC verifier validates pre-provisioned JWKS. Eight external-process tests additionally prove valid
 OIDC command admission, mandatory trusted discovery before readiness, atomic replacement of a wrong
 bootstrap key, issuer-mismatch refusal, invalid-token rejection without simulation work, remote-bind
-refusal, expired-certificate refusal, and Unix private-key permission refusal. Automated certificate
-provisioning, reliable control/snapshot streams, and remote deployment policy are still required.
+refusal, expired-certificate refusal, Unix private-key permission refusal, and live certificate-file
+rotation without dropping an established session. Automated certificate issuance, reliable
+control/snapshot streams, and remote deployment policy are still required.
 For local protocol development the legacy authority can be started directly:
 
 ```bash

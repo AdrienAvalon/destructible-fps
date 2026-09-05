@@ -101,6 +101,22 @@ pub struct SecureDedicatedServer {
     runtime: Handle,
 }
 
+/// Narrow cloneable capability that replaces TLS configuration for future handshakes only.
+///
+/// Existing QUIC connections retain the identity negotiated by their completed handshake. This is
+/// intentionally less capable than exposing the underlying endpoint to lifecycle workers.
+#[derive(Clone)]
+pub struct SecureTlsConfigUpdater {
+    endpoint: Endpoint,
+}
+
+impl SecureTlsConfigUpdater {
+    /// Installs an already validated bounded configuration for future handshakes.
+    pub fn replace_for_new_connections(&self, server_config: ServerConfig) {
+        self.endpoint.set_server_config(Some(server_config));
+    }
+}
+
 impl SecureDedicatedServer {
     /// Binds a QUIC endpoint and starts a bounded admission supervisor on the current Tokio runtime.
     ///
@@ -346,6 +362,14 @@ impl SecureDedicatedServer {
     /// Returns the endpoint socket address query error.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.endpoint.local_addr()
+    }
+
+    /// Returns a narrow capability for verified TLS identity rotation.
+    #[must_use]
+    pub fn tls_config_updater(&self) -> SecureTlsConfigUpdater {
+        SecureTlsConfigUpdater {
+            endpoint: self.endpoint.clone(),
+        }
     }
 
     /// Closes the endpoint and all active connections, then bounds shutdown-task waiting.

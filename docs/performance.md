@@ -3,6 +3,32 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — bounded live TLS identity reload
+
+Source state: parent `ddc682b` plus the TLS-lifecycle increment documented here. Optional reload
+intervals are limited to 5–3,600 seconds, run outside the fixed simulation tick, and require every
+candidate chain to remain valid for at least one complete interval plus the 60-second expiry margin.
+Each attempt rereads the fixed certificate and owner-only key paths through the existing type,
+permission, size, PEM-cardinality, X.509 lifetime, and key-pair checks. The narrow endpoint capability
+changes only future QUIC handshakes. A partial or invalid pair leaves both the active configuration
+and monotonic shutdown deadline unchanged, while successful shorter-lived certificates correctly
+shorten rather than silently extend that deadline. The validation clock is floored by startup wall
+time plus monotonic elapsed time, so a later wall-clock rollback cannot grant extra validity.
+
+A real-QUIC integration case proves that the old root is rejected for a new handshake after rotation,
+the new root succeeds, and a session established under the old certificate remains usable. An
+external-process case then replaces both files during a live run, observes exactly one successful
+background reload, admits a second session under the new root, and applies its authoritative command
+without dropping the first session. Focused tests cover interval bounds, the interval-plus-margin
+boundary, wall-clock rollback, invalid pair rollback, and valid deadline replacement. The complete
+promotion passed 146 library tests, ten binary tests and 48 integration tests in debug and release
+with strict Clippy
+clean. Release baselines measured destruction p99 0.359 ms, 8,192-voxel structural analysis plus
+promotion p99 4.642 ms, 1,024-body stacking p99 1.151 ms, and snapshot total p99 9.890 ms. A cold
+five-second RTX 4050 Vulkan smoke initialized the GPU in 2,085.1 ms, streamed all 128 chunks in
+33.7 ms, and completed with GPU-total p99 0.241 ms, maximum 0.242 ms, and zero abandoned samples.
+Automated certificate issuance and remote exposure remain separate gated work.
+
 ## 2026-09-05 — fail-closed OIDC authority refresh lifecycle
 
 Source state: parent `fdf0b62` plus the authority-refresh increment documented here. The standalone

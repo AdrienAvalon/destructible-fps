@@ -6,5 +6,8 @@
   "oidc_jwks_file": "/var/lib/destructible-fps/oidc-jwks.json",
   "oidc_issuer": "https://identity.example.test/realms/game",
   "oidc_audience": "destructible-fps",
-  "jwks_valid_until_unix_seconds": 0
+  "jwks_valid_until_unix_seconds": 0,
+  "tls_reload": {
+    "interval_seconds": 60
+  }
 }

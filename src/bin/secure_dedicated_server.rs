@@ -1,6 +1,7 @@
 use destructible_fps::{
     OidcRefreshController, SERVER_PHYSICS_HZ, SecureAuthorityLaunchConfig,
-    SecureAuthorityLaunchError, SecureNetworkTickReport, demo_world,
+    SecureAuthorityLaunchError, SecureDedicatedServer, SecureNetworkExposure,
+    SecureNetworkTickReport, SecureTlsConfigUpdater, TlsIdentityRefreshController, demo_world,
 };
 use std::{
     error::Error,
@@ -40,13 +41,20 @@ struct RefreshCounters {
     failures: AtomicU64,
 }
 
+struct RefreshTasks {
+    oidc: Option<JoinHandle<()>>,
+    tls: Option<JoinHandle<()>>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
     let launch = SecureAuthorityLaunchConfig::load(options.config)?;
-    let refresh_controller = launch.oidc_refresh_controller();
-    let refresh_counters = Arc::new(RefreshCounters::default());
-    refresh_before_ready(refresh_controller.as_ref(), &refresh_counters).await?;
+    let oidc_refresh = launch.oidc_refresh_controller();
+    let tls_refresh = launch.tls_refresh_controller();
+    let oidc_counters = Arc::new(RefreshCounters::default());
+    let tls_counters = Arc::new(RefreshCounters::default());
+    refresh_before_ready(oidc_refresh.as_ref(), &oidc_counters).await?;
     let max_ticks = launch.max_ticks().map(std::num::NonZeroU64::get);
     let stop_after_commands = launch
         .stop_after_commands()
@@ -54,23 +62,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let initial_jwks_expiration_deadline = launch
         .jwks_expiration_deadline()
         .ok_or("OIDC expiration state unavailable")?;
-    let certificate_expiration_deadline =
-        tokio::time::Instant::from_std(launch.certificate_expiration_deadline());
+    let initial_certificate_expiration_deadline = launch
+        .certificate_expiration_deadline()
+        .ok_or("TLS expiration state unavailable")?;
     let exposure = launch.exposure();
     let mut server = launch.start(demo_world())?;
-    let refresh_task = refresh_controller
-        .as_ref()
-        .map(|controller| spawn_oidc_refresh(controller.clone(), Arc::clone(&refresh_counters)));
-    println!(
-        "READY {} exposure={exposure:?} oidc_refresh={}",
-        server.local_addr()?,
-        if refresh_controller.is_some() {
-            "active"
-        } else {
-            "static"
-        }
+    let refresh_tasks = spawn_refresh_tasks(
+        &server,
+        oidc_refresh.as_ref(),
+        tls_refresh.as_ref(),
+        &oidc_counters,
+        &tls_counters,
     );
-    io::stdout().flush()?;
+    print_ready(
+        &server,
+        exposure,
+        oidc_refresh.is_some(),
+        tls_refresh.is_some(),
+    )?;
 
     let tick_duration = Duration::from_nanos(
         1_000_000_000_u64 / u64::try_from(SERVER_PHYSICS_HZ).expect("positive fixed rate"),
@@ -82,20 +91,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if tokio::time::Instant::now() >= certificate_expiration_deadline {
-                    terminal_error = Some("TLS certificate validity expired".into());
-                    break;
-                }
-                let jwks_expiration_deadline = refresh_controller.as_ref().map_or(
-                    Some(initial_jwks_expiration_deadline),
-                    OidcRefreshController::expiration_deadline,
-                );
-                let Some(jwks_expiration_deadline) = jwks_expiration_deadline else {
-                    terminal_error = Some("OIDC expiration state unavailable".into());
-                    break;
-                };
-                if std::time::Instant::now() >= jwks_expiration_deadline {
-                    terminal_error = Some("OIDC JWKS validity expired".into());
+                if let Some(error) = trust_deadline_error(
+                    oidc_refresh.as_ref(),
+                    tls_refresh.as_ref(),
+                    initial_jwks_expiration_deadline,
+                    initial_certificate_expiration_deadline,
+                ) {
+                    terminal_error = Some(error.into());
                     break;
                 }
                 let report = match server.tick() {
@@ -122,13 +124,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     let active = server.active_sessions();
+    refresh_tasks.stop().await;
     server.shutdown().await;
-    if let Some(task) = refresh_task {
-        task.abort();
-        let _ = task.await;
-    }
     println!(
-        "STOP ticks={} commands={} admitted={} disconnected={} admission_failures={} rate_limited={} active={} inbound={} outbound={} oidc_refresh_attempts={} oidc_refresh_successes={} oidc_refresh_failures={}",
+        "STOP ticks={} commands={} admitted={} disconnected={} admission_failures={} rate_limited={} active={} inbound={} outbound={} oidc_refresh_attempts={} oidc_refresh_successes={} oidc_refresh_failures={} tls_reload_attempts={} tls_reload_successes={} tls_reload_failures={}",
         totals.ticks,
         totals.commands,
         totals.admitted,
@@ -138,11 +137,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
         active,
         totals.inbound,
         totals.outbound,
-        refresh_counters.attempts.load(Ordering::Relaxed),
-        refresh_counters.successes.load(Ordering::Relaxed),
-        refresh_counters.failures.load(Ordering::Relaxed),
+        oidc_counters.attempts.load(Ordering::Relaxed),
+        oidc_counters.successes.load(Ordering::Relaxed),
+        oidc_counters.failures.load(Ordering::Relaxed),
+        tls_counters.attempts.load(Ordering::Relaxed),
+        tls_counters.successes.load(Ordering::Relaxed),
+        tls_counters.failures.load(Ordering::Relaxed),
     );
     terminal_error.map_or(Ok(()), Err)
+}
+
+fn print_ready(
+    server: &SecureDedicatedServer,
+    exposure: SecureNetworkExposure,
+    oidc_refresh: bool,
+    tls_reload: bool,
+) -> io::Result<()> {
+    println!(
+        "READY {} exposure={exposure:?} oidc_refresh={} tls_reload={}",
+        server.local_addr()?,
+        if oidc_refresh { "active" } else { "static" },
+        if tls_reload { "active" } else { "static" },
+    );
+    io::stdout().flush()
+}
+
+fn spawn_refresh_tasks(
+    server: &SecureDedicatedServer,
+    oidc: Option<&OidcRefreshController>,
+    tls: Option<&TlsIdentityRefreshController>,
+    oidc_counters: &Arc<RefreshCounters>,
+    tls_counters: &Arc<RefreshCounters>,
+) -> RefreshTasks {
+    RefreshTasks {
+        oidc: oidc
+            .map(|controller| spawn_oidc_refresh(controller.clone(), Arc::clone(oidc_counters))),
+        tls: tls.map(|controller| {
+            spawn_tls_refresh(
+                controller.clone(),
+                server.tls_config_updater(),
+                Arc::clone(tls_counters),
+            )
+        }),
+    }
 }
 
 async fn refresh_before_ready(
@@ -176,6 +213,64 @@ fn spawn_oidc_refresh(
             }
         }
     })
+}
+
+fn spawn_tls_refresh(
+    controller: TlsIdentityRefreshController,
+    updater: SecureTlsConfigUpdater,
+    counters: Arc<RefreshCounters>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = interval(controller.refresh_interval());
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            counters.attempts.fetch_add(1, Ordering::Relaxed);
+            if controller.refresh_once(&updater).is_ok() {
+                counters.successes.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let failures = counters.failures.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("TLS_RELOAD_FAILED failures={failures}");
+            }
+        }
+    })
+}
+
+fn trust_deadline_error(
+    oidc_refresh: Option<&OidcRefreshController>,
+    tls_refresh: Option<&TlsIdentityRefreshController>,
+    initial_jwks_deadline: std::time::Instant,
+    initial_certificate_deadline: std::time::Instant,
+) -> Option<&'static str> {
+    let now = std::time::Instant::now();
+    let certificate_deadline = tls_refresh.map_or(
+        Some(initial_certificate_deadline),
+        TlsIdentityRefreshController::expiration_deadline,
+    );
+    let Some(certificate_deadline) = certificate_deadline else {
+        return Some("TLS expiration state unavailable");
+    };
+    if now >= certificate_deadline {
+        return Some("TLS certificate validity expired");
+    }
+    let jwks_deadline = oidc_refresh.map_or(
+        Some(initial_jwks_deadline),
+        OidcRefreshController::expiration_deadline,
+    );
+    let Some(jwks_deadline) = jwks_deadline else {
+        return Some("OIDC expiration state unavailable");
+    };
+    (now >= jwks_deadline).then_some("OIDC JWKS validity expired")
+}
+
+impl RefreshTasks {
+    async fn stop(self) {
+        for task in [self.oidc, self.tls].into_iter().flatten() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 impl Totals {

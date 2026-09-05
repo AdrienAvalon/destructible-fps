@@ -3,7 +3,7 @@
 use crate::{
     MAX_OIDC_DISCOVERY_ROOT_BYTES, MAX_OIDC_JWKS_BYTES, OidcDiscoveryClient, OidcDiscoveryError,
     OidcSessionVerifier, OidcVerificationError, SecureConfigError, SecureDedicatedServer,
-    SessionCredentialVerifier, World, secure_server_config,
+    SecureTlsConfigUpdater, SessionCredentialVerifier, World, secure_server_config,
 };
 use core::fmt;
 use quinn::{
@@ -28,6 +28,8 @@ pub const MAX_CERTIFICATE_CHAIN_BYTES: usize = 256 * 1_024;
 pub const MAX_CERTIFICATE_CHAIN_ENTRIES: usize = 8;
 pub const MAX_TLS_PRIVATE_KEY_BYTES: usize = 64 * 1_024;
 pub const MIN_TLS_CERTIFICATE_REMAINING_SECONDS: u64 = 60;
+pub const MIN_TLS_RELOAD_INTERVAL_SECONDS: u64 = 5;
+pub const MAX_TLS_RELOAD_INTERVAL_SECONDS: u64 = 60 * 60;
 pub const MIN_STATIC_JWKS_VALIDITY_SECONDS: u64 = 60;
 pub const MAX_STATIC_JWKS_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
 const OIDC_REFRESH_GRACE_INTERVALS: u32 = 3;
@@ -52,6 +54,8 @@ struct RawSecureAuthorityConfig {
     #[serde(default)]
     oidc_discovery: Option<RawOidcDiscoveryConfig>,
     #[serde(default)]
+    tls_reload: Option<RawTlsReloadConfig>,
+    #[serde(default)]
     max_ticks: Option<NonZeroU64>,
     #[serde(default)]
     stop_after_commands: Option<std::num::NonZeroUsize>,
@@ -65,6 +69,12 @@ struct RawOidcDiscoveryConfig {
     root_certificate_file: Option<PathBuf>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTlsReloadConfig {
+    interval_seconds: NonZeroU64,
+}
+
 /// Validated, fully materialized inputs required to start one secure authority process.
 ///
 /// The private key and bootstrap OIDC data are loaded from bounded regular files. Optional trusted
@@ -76,7 +86,8 @@ pub struct SecureAuthorityLaunchConfig {
     server_config: ServerConfig,
     verifier: Arc<ExpiringOidcVerifier>,
     oidc_refresh: Option<OidcRefreshController>,
-    certificate_expiration_deadline: Instant,
+    tls_refresh: Option<TlsIdentityRefreshController>,
+    certificate_expiration_deadline: Arc<RwLock<Instant>>,
     max_ticks: Option<NonZeroU64>,
     stop_after_commands: Option<std::num::NonZeroUsize>,
 }
@@ -97,6 +108,8 @@ pub enum SecureAuthorityLaunchError {
     InvalidConfiguration,
     InvalidCertificateChain,
     InvalidCertificateLifetime,
+    InvalidTlsReloadInterval,
+    TlsRefreshStateUnavailable,
     InvalidPrivateKey,
     InvalidJwksLifetime,
     Oidc(OidcVerificationError),
@@ -128,6 +141,10 @@ impl fmt::Display for SecureAuthorityLaunchError {
             Self::InvalidCertificateChain => write!(formatter, "invalid TLS certificate chain"),
             Self::InvalidCertificateLifetime => {
                 write!(formatter, "invalid TLS certificate validity window")
+            }
+            Self::InvalidTlsReloadInterval => write!(formatter, "invalid TLS reload interval"),
+            Self::TlsRefreshStateUnavailable => {
+                write!(formatter, "TLS refresh state unavailable")
             }
             Self::InvalidPrivateKey => write!(formatter, "invalid TLS private key"),
             Self::InvalidJwksLifetime => write!(formatter, "invalid static JWKS validity window"),
@@ -178,18 +195,24 @@ impl SecureAuthorityLaunchConfig {
             .checked_add(std::time::Duration::from_secs(jwks_remaining_validity))
             .ok_or(SecureAuthorityLaunchError::InvalidJwksLifetime)?;
 
-        let certificate_bytes = read_bounded_file(
+        let tls_reload_interval = raw
+            .tls_reload
+            .as_ref()
+            .map(|config| validate_tls_reload_interval(config.interval_seconds.get()))
+            .transpose()?;
+        let minimum_certificate_remaining =
+            tls_reload_interval.map_or(MIN_TLS_CERTIFICATE_REMAINING_SECONDS, |interval| {
+                interval
+                    .as_secs()
+                    .saturating_add(MIN_TLS_CERTIFICATE_REMAINING_SECONDS)
+            });
+        let (server_config, certificate_expiration_deadline) = load_tls_identity(
             &raw.certificate_chain_file,
-            "TLS certificate chain",
-            MAX_CERTIFICATE_CHAIN_BYTES,
-            FilePermissionPolicy::Integrity,
-        )?;
-        let private_key_bytes = Zeroizing::new(read_bounded_file(
             &raw.private_key_file,
-            "TLS private key",
-            MAX_TLS_PRIVATE_KEY_BYTES,
-            FilePermissionPolicy::Private,
-        )?);
+            now,
+            monotonic_now,
+            minimum_certificate_remaining,
+        )?;
         let jwks = read_bounded_file(
             &raw.oidc_jwks_file,
             "OIDC JWKS",
@@ -197,16 +220,16 @@ impl SecureAuthorityLaunchConfig {
             FilePermissionPolicy::Integrity,
         )?;
 
-        let certificates = parse_certificates(&certificate_bytes)?;
-        let certificate_remaining_validity = validate_certificate_lifetimes(&certificates, now)?;
-        let certificate_expiration_deadline = monotonic_now
-            .checked_add(std::time::Duration::from_secs(
-                certificate_remaining_validity,
-            ))
-            .ok_or(SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
-        let private_key = parse_private_key(&private_key_bytes)?;
-        let server_config = secure_server_config(certificates, private_key)
-            .map_err(SecureAuthorityLaunchError::Transport)?;
+        let certificate_expiration_deadline =
+            Arc::new(RwLock::new(certificate_expiration_deadline));
+        let tls_refresh = tls_reload_interval.map(|interval| TlsIdentityRefreshController {
+            certificate_chain_file: raw.certificate_chain_file.clone(),
+            private_key_file: raw.private_key_file.clone(),
+            interval,
+            expiration_deadline: Arc::clone(&certificate_expiration_deadline),
+            wall_clock_anchor: now,
+            monotonic_clock_anchor: monotonic_now,
+        });
         let oidc = OidcSessionVerifier::new(&raw.oidc_issuer, raw.oidc_audience, &jwks)
             .map_err(SecureAuthorityLaunchError::Oidc)?;
         let verifier = Arc::new(ExpiringOidcVerifier {
@@ -247,6 +270,7 @@ impl SecureAuthorityLaunchConfig {
             server_config,
             verifier,
             oidc_refresh,
+            tls_refresh,
             certificate_expiration_deadline,
             max_ticks: raw.max_ticks,
             stop_after_commands: raw.stop_after_commands,
@@ -290,8 +314,16 @@ impl SecureAuthorityLaunchConfig {
     }
 
     #[must_use]
-    pub const fn certificate_expiration_deadline(&self) -> Instant {
+    pub fn tls_refresh_controller(&self) -> Option<TlsIdentityRefreshController> {
+        self.tls_refresh.clone()
+    }
+
+    #[must_use]
+    pub fn certificate_expiration_deadline(&self) -> Option<Instant> {
         self.certificate_expiration_deadline
+            .read()
+            .ok()
+            .map(|deadline| *deadline)
     }
 
     #[must_use]
@@ -387,6 +419,71 @@ impl OidcRefreshController {
             .checked_mul(OIDC_REFRESH_GRACE_INTERVALS)
             .ok_or(SecureAuthorityLaunchError::InvalidJwksLifetime)?;
         self.verifier.replace_jwks(&jwks, validity)
+    }
+}
+
+#[derive(Clone)]
+pub struct TlsIdentityRefreshController {
+    certificate_chain_file: PathBuf,
+    private_key_file: PathBuf,
+    interval: Duration,
+    expiration_deadline: Arc<RwLock<Instant>>,
+    wall_clock_anchor: u64,
+    monotonic_clock_anchor: Instant,
+}
+
+impl TlsIdentityRefreshController {
+    #[must_use]
+    pub const fn refresh_interval(&self) -> Duration {
+        self.interval
+    }
+
+    #[must_use]
+    pub fn expiration_deadline(&self) -> Option<Instant> {
+        self.expiration_deadline
+            .read()
+            .ok()
+            .map(|deadline| *deadline)
+    }
+
+    /// Validates the complete current file pair and installs it for future QUIC handshakes.
+    ///
+    /// # Errors
+    ///
+    /// File, permission, lifetime, key-pair, and synchronization failures retain the previous
+    /// endpoint configuration and deadline.
+    pub fn refresh_once(
+        &self,
+        updater: &SecureTlsConfigUpdater,
+    ) -> Result<(), SecureAuthorityLaunchError> {
+        let observed_now =
+            unix_seconds().map_err(|_| SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
+        let monotonic_now = Instant::now();
+        let now = monotonic_unix_seconds(
+            self.wall_clock_anchor,
+            self.monotonic_clock_anchor,
+            observed_now,
+            monotonic_now,
+        )?;
+        let minimum_remaining = self
+            .interval
+            .as_secs()
+            .saturating_add(MIN_TLS_CERTIFICATE_REMAINING_SECONDS);
+        let (server_config, expiration_deadline) = load_tls_identity(
+            &self.certificate_chain_file,
+            &self.private_key_file,
+            now,
+            monotonic_now,
+            minimum_remaining,
+        )?;
+        let mut current = self
+            .expiration_deadline
+            .write()
+            .map_err(|_| SecureAuthorityLaunchError::TlsRefreshStateUnavailable)?;
+        updater.replace_for_new_connections(server_config);
+        *current = expiration_deadline;
+        drop(current);
+        Ok(())
     }
 }
 
@@ -496,9 +593,63 @@ fn validate_raw_config(
     Ok(remaining)
 }
 
+fn validate_tls_reload_interval(seconds: u64) -> Result<Duration, SecureAuthorityLaunchError> {
+    if !(MIN_TLS_RELOAD_INTERVAL_SECONDS..=MAX_TLS_RELOAD_INTERVAL_SECONDS).contains(&seconds) {
+        return Err(SecureAuthorityLaunchError::InvalidTlsReloadInterval);
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn monotonic_unix_seconds(
+    wall_clock_anchor: u64,
+    monotonic_clock_anchor: Instant,
+    observed_wall_clock: u64,
+    monotonic_now: Instant,
+) -> Result<u64, SecureAuthorityLaunchError> {
+    let elapsed = monotonic_now
+        .checked_duration_since(monotonic_clock_anchor)
+        .ok_or(SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
+    let monotonic_floor = wall_clock_anchor
+        .checked_add(elapsed.as_secs())
+        .ok_or(SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
+    Ok(observed_wall_clock.max(monotonic_floor))
+}
+
+fn load_tls_identity(
+    certificate_chain_file: &Path,
+    private_key_file: &Path,
+    now: u64,
+    monotonic_now: Instant,
+    minimum_remaining: u64,
+) -> Result<(ServerConfig, Instant), SecureAuthorityLaunchError> {
+    let certificate_bytes = read_bounded_file(
+        certificate_chain_file,
+        "TLS certificate chain",
+        MAX_CERTIFICATE_CHAIN_BYTES,
+        FilePermissionPolicy::Integrity,
+    )?;
+    let private_key_bytes = Zeroizing::new(read_bounded_file(
+        private_key_file,
+        "TLS private key",
+        MAX_TLS_PRIVATE_KEY_BYTES,
+        FilePermissionPolicy::Private,
+    )?);
+    let certificates = parse_certificates(&certificate_bytes)?;
+    let certificate_remaining_validity =
+        validate_certificate_lifetimes(&certificates, now, minimum_remaining)?;
+    let expiration_deadline = monotonic_now
+        .checked_add(Duration::from_secs(certificate_remaining_validity))
+        .ok_or(SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
+    let private_key = parse_private_key(&private_key_bytes)?;
+    let server_config = secure_server_config(certificates, private_key)
+        .map_err(SecureAuthorityLaunchError::Transport)?;
+    Ok((server_config, expiration_deadline))
+}
+
 fn validate_certificate_lifetimes(
     certificates: &[CertificateDer<'static>],
     now: u64,
+    required_remaining: u64,
 ) -> Result<u64, SecureAuthorityLaunchError> {
     let now =
         i64::try_from(now).map_err(|_| SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
@@ -515,7 +666,7 @@ fn validate_certificate_lifetimes(
         }
         let remaining = u64::try_from(validity.not_after.timestamp().saturating_sub(now))
             .map_err(|_| SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
-        if remaining < MIN_TLS_CERTIFICATE_REMAINING_SECONDS {
+        if remaining < required_remaining {
             return Err(SecureAuthorityLaunchError::InvalidCertificateLifetime);
         }
         minimum_remaining = minimum_remaining.min(remaining);
@@ -612,6 +763,89 @@ mod tests {
             .expect("configured refresh controller");
         assert_eq!(refresh.refresh_interval(), Duration::from_mins(1));
         assert!(refresh.expiration_deadline().is_some());
+    }
+
+    #[test]
+    fn bounded_tls_reload_configuration_materializes_a_refresh_controller() {
+        let fixture = Fixture::new();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture.config).expect("read TLS reload fixture"))
+                .expect("parse TLS reload fixture");
+        document["tls_reload"] = serde_json::json!({"interval_seconds": 5});
+        fs::write(
+            &fixture.config,
+            serde_json::to_vec(&document).expect("TLS reload config JSON"),
+        )
+        .expect("TLS reload config");
+
+        let config = SecureAuthorityLaunchConfig::load(&fixture.config)
+            .expect("valid TLS reload launch config");
+        let refresh = config
+            .tls_refresh_controller()
+            .expect("configured TLS refresh controller");
+        assert_eq!(refresh.refresh_interval(), Duration::from_secs(5));
+        assert!(refresh.expiration_deadline().is_some());
+    }
+
+    #[test]
+    fn unsafe_tls_reload_interval_fails_closed() {
+        let fixture = Fixture::new();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture.config).expect("read TLS reload fixture"))
+                .expect("parse TLS reload fixture");
+        document["tls_reload"] = serde_json::json!({"interval_seconds": 4});
+        fs::write(
+            &fixture.config,
+            serde_json::to_vec(&document).expect("short TLS reload config JSON"),
+        )
+        .expect("short TLS reload config");
+        assert!(matches!(
+            SecureAuthorityLaunchConfig::load(&fixture.config),
+            Err(SecureAuthorityLaunchError::InvalidTlsReloadInterval)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tls_reload_keeps_the_previous_deadline_until_a_valid_pair_is_installed() {
+        let fixture = Fixture::new();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture.config).expect("read TLS reload fixture"))
+                .expect("parse TLS reload fixture");
+        document["tls_reload"] = serde_json::json!({"interval_seconds": 5});
+        fs::write(
+            &fixture.config,
+            serde_json::to_vec(&document).expect("TLS reload config JSON"),
+        )
+        .expect("TLS reload config");
+        let launch =
+            SecureAuthorityLaunchConfig::load(&fixture.config).expect("TLS reload launch config");
+        let controller = launch
+            .tls_refresh_controller()
+            .expect("TLS refresh controller");
+        let initial_deadline = controller
+            .expiration_deadline()
+            .expect("initial certificate deadline");
+        let server = launch.start(World::default()).expect("TLS reload server");
+        let updater = server.tls_config_updater();
+
+        let replacement_key = rcgen::KeyPair::generate().expect("replacement TLS key");
+        fs::write(&fixture.key, replacement_key.serialize_pem()).expect("mismatched TLS key");
+        secure_private_key(&fixture.key);
+        assert!(controller.refresh_once(&updater).is_err());
+        assert_eq!(controller.expiration_deadline(), Some(initial_deadline));
+
+        let mut parameters = rcgen::CertificateParams::new(vec!["localhost".into()])
+            .expect("replacement TLS parameters");
+        parameters.not_after = rcgen::date_time_ymd(4090, 1, 1);
+        let replacement = parameters
+            .self_signed(&replacement_key)
+            .expect("replacement TLS certificate");
+        fs::write(&fixture.certificate, replacement.pem()).expect("replacement TLS certificate");
+        controller
+            .refresh_once(&updater)
+            .expect("valid TLS identity reload");
+        assert_ne!(controller.expiration_deadline(), Some(initial_deadline));
+        server.shutdown().await;
     }
 
     #[test]
@@ -774,6 +1008,55 @@ mod tests {
                 Err(SecureAuthorityLaunchError::InvalidCertificateLifetime)
             ));
         }
+    }
+
+    #[test]
+    fn tls_reload_requires_one_interval_plus_the_expiry_margin() {
+        let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .expect("reload margin identity");
+        let certificate = identity.cert.der().clone();
+        let (_, parsed) =
+            parse_x509_certificate(certificate.as_ref()).expect("reload margin certificate parse");
+        let not_after = u64::try_from(parsed.validity().not_after.timestamp())
+            .expect("positive reload margin expiry");
+        let required = MAX_TLS_RELOAD_INTERVAL_SECONDS + MIN_TLS_CERTIFICATE_REMAINING_SECONDS;
+        let exact_now = not_after
+            .checked_sub(required)
+            .expect("reload margin test clock");
+
+        assert_eq!(
+            validate_certificate_lifetimes(std::slice::from_ref(&certificate), exact_now, required)
+                .expect("exact reload margin"),
+            required
+        );
+        assert!(matches!(
+            validate_certificate_lifetimes(
+                std::slice::from_ref(&certificate),
+                exact_now + 1,
+                required,
+            ),
+            Err(SecureAuthorityLaunchError::InvalidCertificateLifetime)
+        ));
+    }
+
+    #[test]
+    fn tls_reload_clock_cannot_move_behind_its_monotonic_anchor() {
+        let monotonic_anchor = Instant::now();
+        let wall_anchor = 2_000_000_000_u64;
+        let later = monotonic_anchor
+            .checked_add(Duration::from_mins(2))
+            .expect("later monotonic instant");
+
+        assert_eq!(
+            monotonic_unix_seconds(wall_anchor, monotonic_anchor, wall_anchor - 3_600, later)
+                .expect("monotonic wall-clock floor"),
+            wall_anchor + 120
+        );
+        assert_eq!(
+            monotonic_unix_seconds(wall_anchor, monotonic_anchor, wall_anchor + 300, later)
+                .expect("forward wall clock"),
+            wall_anchor + 300
+        );
     }
 
     struct Fixture {

@@ -81,8 +81,9 @@ pub use replication::{
     MAX_BUILD_REACH_VOXELS, PhysicsTickReport, ReplicationError, decode_frame, encode_frames,
 };
 pub use secure_client::{
-    MAX_CLIENT_ROOT_CERTIFICATE_BYTES, MAX_CLIENT_ROOT_CERTIFICATES, SecureClientConnection,
-    SecureClientError, SecureClientLaunchConfig,
+    MAX_CLIENT_ROOT_CERTIFICATE_BYTES, MAX_CLIENT_ROOT_CERTIFICATES,
+    SECURE_CLIENT_RECEIVE_QUEUE_DATAGRAMS, SecureClientConnection, SecureClientError,
+    SecureClientLaunchConfig, SecureDatagramInbox,
 };
 pub use secure_server::{
     MAX_CONSECUTIVE_GAMEPLAY_QUEUE_DROPS, MAX_SECURE_CONTROL_EVENTS, MAX_SECURE_GAMEPLAY_BYTES,

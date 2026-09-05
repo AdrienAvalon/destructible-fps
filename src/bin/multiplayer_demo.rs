@@ -9,11 +9,12 @@ use destructible_fps::{
     ExplosionCommand, FixedMicrometers3, IVec3, MAX_APPLICATION_DATAGRAM_BYTES,
     MAX_BUILD_REACH_VOXELS, MAX_RECEIVED_DATAGRAMS_PER_TICK, MICROMETERS_PER_VOXEL, Material,
     OrderedDeltaInbox, PlayerInputCommand, PlayerInterpolationBuffer, PlayerInterpolationError,
-    PlayerStateReceiveError, ServerControlMessage, SnapshotAssembler, decode_frame,
-    decode_player_state_packet, decode_server_control, demo_world, dirty_chunks,
-    encode_build_request, encode_client_hello, encode_explosion_request, encode_player_input,
-    encode_repair_request, encode_snapshot_ack, encode_snapshot_fragments_request,
-    encode_snapshot_request, is_delta_datagram, is_player_state_datagram, is_snapshot_datagram,
+    PlayerStateReceiveError, SecureClientConnection, SecureClientLaunchConfig, SecureDatagramInbox,
+    ServerControlMessage, SnapshotAssembler, decode_frame, decode_player_state_packet,
+    decode_server_control, demo_world, dirty_chunks, encode_build_request, encode_client_hello,
+    encode_explosion_request, encode_player_input, encode_repair_request, encode_snapshot_ack,
+    encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
+    is_player_state_datagram, is_snapshot_datagram,
     mesh::{mesh_body, mesh_chunk},
     mesh_scheduler::{
         CompletedMeshJob, MAX_BODIES_PER_MESH_JOB, MAX_BODY_VOXELS_PER_MESH_JOB,
@@ -28,6 +29,7 @@ use std::{
     error::Error,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -66,6 +68,176 @@ enum DeltaImpairment {
     Completed { sequence: u64 },
 }
 
+#[derive(Clone, Debug)]
+enum TransportOptions {
+    Loopback(SocketAddr),
+    Secure(SecureClientLaunchConfig),
+}
+
+enum GameTransport {
+    Loopback {
+        socket: UdpSocket,
+        server: SocketAddr,
+        nonce: u64,
+        last_hello_at: Instant,
+    },
+    Secure {
+        _runtime: tokio::runtime::Runtime,
+        client: SecureClientConnection,
+        inbox: SecureDatagramInbox,
+    },
+}
+
+impl GameTransport {
+    fn connect(options: &TransportOptions) -> Result<Self, String> {
+        match options {
+            TransportOptions::Loopback(server) => {
+                let bind = match server.ip() {
+                    IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
+                };
+                let socket = UdpSocket::bind(bind)
+                    .map_err(|error| format!("socket client loopback: {error}"))?;
+                socket
+                    .set_nonblocking(true)
+                    .map_err(|error| format!("socket non bloquante: {error}"))?;
+                let local_port = u64::from(
+                    socket
+                        .local_addr()
+                        .map_err(|error| format!("adresse client: {error}"))?
+                        .port(),
+                );
+                let nonce = (u64::from(std::process::id()) << 16 | local_port).max(1);
+                socket
+                    .send_to(&encode_client_hello(nonce), server)
+                    .map_err(|error| format!("handshake initial: {error}"))?;
+                Ok(Self::Loopback {
+                    socket,
+                    server: *server,
+                    nonce,
+                    last_hello_at: Instant::now(),
+                })
+            }
+            TransportOptions::Secure(config) => {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .thread_name("secure-game-client")
+                    .build()
+                    .map_err(|error| format!("runtime client QUIC: {error}"))?;
+                let client = runtime
+                    .block_on(SecureClientConnection::connect(config))
+                    .map_err(|error| format!("connexion multijoueur securisee: {error}"))?;
+                let inbox = client.spawn_datagram_inbox(runtime.handle());
+                Ok(Self::Secure {
+                    _runtime: runtime,
+                    client,
+                    inbox,
+                })
+            }
+        }
+    }
+
+    const fn session_id(&self) -> Option<u64> {
+        match self {
+            Self::Loopback { .. } => None,
+            Self::Secure { client, .. } => Some(client.session_id()),
+        }
+    }
+
+    fn description(&self) -> Result<String, String> {
+        match self {
+            Self::Loopback { socket, server, .. } => Ok(format!(
+                "loopback {} -> {server}",
+                socket
+                    .local_addr()
+                    .map_err(|error| format!("adresse client: {error}"))?
+            )),
+            Self::Secure { client, .. } => Ok(format!(
+                "QUIC/TLS session {} nonce serveur {}",
+                client.session_id(),
+                client.server_nonce()
+            )),
+        }
+    }
+
+    fn drain(&self) -> Result<Vec<Vec<u8>>, String> {
+        let mut datagrams = Vec::new();
+        match self {
+            Self::Loopback { socket, server, .. } => {
+                let mut bytes = [0_u8; MAX_APPLICATION_DATAGRAM_BYTES + 1];
+                for _ in 0..MAX_RECEIVED_DATAGRAMS_PER_TICK {
+                    let (length, source) = match socket.recv_from(&mut bytes) {
+                        Ok(received) => received,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(error) => return Err(format!("reception multijoueur: {error}")),
+                    };
+                    if source == *server {
+                        datagrams.push(bytes[..length].to_vec());
+                    }
+                }
+            }
+            Self::Secure { inbox, .. } => {
+                for _ in 0..MAX_RECEIVED_DATAGRAMS_PER_TICK {
+                    let Some(payload) = inbox
+                        .try_receive()
+                        .map_err(|error| format!("reception QUIC: {error}"))?
+                    else {
+                        break;
+                    };
+                    datagrams.push(payload);
+                }
+            }
+        }
+        Ok(datagrams)
+    }
+
+    fn send(&self, payload: Vec<u8>) -> Result<(), String> {
+        match self {
+            Self::Loopback { socket, server, .. } => socket
+                .send_to(&payload, server)
+                .map(|_bytes| ())
+                .map_err(|error| format!("envoi UDP: {error}")),
+            Self::Secure { client, .. } => client
+                .send(payload)
+                .map_err(|error| format!("envoi QUIC: {error}")),
+        }
+    }
+
+    fn retry_legacy_handshake(&mut self, session_missing: bool) -> Result<(), String> {
+        let Self::Loopback {
+            socket,
+            server,
+            nonce,
+            last_hello_at,
+        } = self
+        else {
+            return Ok(());
+        };
+        if session_missing && last_hello_at.elapsed() >= Duration::from_secs(1) {
+            socket
+                .send_to(&encode_client_hello(*nonce), *server)
+                .map_err(|error| format!("nouvelle tentative de handshake: {error}"))?;
+            *last_hello_at = Instant::now();
+        }
+        Ok(())
+    }
+
+    const fn expected_legacy_nonce(&self) -> Option<u64> {
+        match self {
+            Self::Loopback { nonce, .. } => Some(*nonce),
+            Self::Secure { .. } => None,
+        }
+    }
+
+    fn dropped_datagrams(&self) -> u64 {
+        match self {
+            Self::Loopback { .. } => 0,
+            Self::Secure { inbox, .. } => inbox.dropped_datagrams(),
+        }
+    }
+}
+
 struct MultiplayerGame {
     window: Arc<Window>,
     renderer: Renderer,
@@ -87,9 +259,7 @@ struct MultiplayerGame {
     last_snapshot_progress_at: Option<Instant>,
     last_snapshot_repair_at: Option<Instant>,
     pristine_world_fingerprint: u128,
-    socket: UdpSocket,
-    server: SocketAddr,
-    nonce: u64,
+    transport: GameTransport,
     session_id: Option<u64>,
     prediction: Option<ClientPrediction>,
     interpolation: PlayerInterpolationBuffer,
@@ -103,7 +273,6 @@ struct MultiplayerGame {
     previous_frame: Instant,
     started: Instant,
     accumulator: f32,
-    last_hello_at: Instant,
     last_status: String,
     smoke_motion: bool,
     initial_position_um: Option<FixedMicrometers3>,
@@ -115,29 +284,13 @@ struct MultiplayerGame {
 impl MultiplayerGame {
     fn new(
         window: Arc<Window>,
-        server: SocketAddr,
+        transport_options: &TransportOptions,
         smoke_motion: bool,
         smoke_drop_first_delta: bool,
     ) -> Result<Self, String> {
-        let bind = match server.ip() {
-            IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
-        };
-        let socket = UdpSocket::bind(bind).map_err(|error| format!("socket client: {error}"))?;
-        socket
-            .set_nonblocking(true)
-            .map_err(|error| format!("socket non bloquante: {error}"))?;
-        let local_port = u64::from(
-            socket
-                .local_addr()
-                .map_err(|error| format!("adresse client: {error}"))?
-                .port(),
-        );
-        let nonce = (u64::from(std::process::id()) << 16 | local_port).max(1);
-        socket
-            .send_to(&encode_client_hello(nonce), server)
-            .map_err(|error| format!("handshake initial: {error}"))?;
-
+        let transport = GameTransport::connect(transport_options)?;
+        let session_id = transport.session_id();
+        let transport_description = transport.description()?;
         let world = demo_world();
         let meshes = world
             .chunk_positions()
@@ -148,16 +301,13 @@ impl MultiplayerGame {
         renderer.upload_chunk_meshes(meshes);
         let now = Instant::now();
         println!(
-            "Client multijoueur loopback {} -> {server}; {} chunks charges",
-            socket
-                .local_addr()
-                .map_err(|error| format!("adresse client: {error}"))?,
+            "Client multijoueur {transport_description}; {} chunks charges",
             renderer.stats().chunks
         );
         println!(
             "Commandes: clic pour capturer | ZQSD/WASD | Maj sprint | Espace saut | clic gauche/droit destruction | molette construction | Echap"
         );
-        Ok(Self {
+        let mut game = Self {
             window,
             renderer,
             pristine_world_fingerprint: world.fingerprint(),
@@ -182,10 +332,8 @@ impl MultiplayerGame {
             last_snapshot_request_at: None,
             last_snapshot_progress_at: None,
             last_snapshot_repair_at: None,
-            socket,
-            server,
-            nonce,
-            session_id: None,
+            transport,
+            session_id,
             prediction: None,
             interpolation: PlayerInterpolationBuffer::default(),
             latest_state_received_at: None,
@@ -198,14 +346,21 @@ impl MultiplayerGame {
             previous_frame: now,
             started: now,
             accumulator: 0.0,
-            last_hello_at: now,
-            last_status: "connexion au serveur".to_owned(),
+            last_status: if session_id.is_some() {
+                "session securisee etablie".to_owned()
+            } else {
+                "connexion au serveur".to_owned()
+            },
             smoke_motion,
             initial_position_um: None,
             maximum_horizontal_displacement_um: 0,
             applied_world_deltas: 0,
             smoke_actions_sent: 0,
-        })
+        };
+        if let Some(session_id) = session_id {
+            game.request_snapshot(session_id)?;
+        }
+        Ok(game)
     }
 
     fn snapshot_ready(&self) -> bool {
@@ -231,33 +386,20 @@ impl MultiplayerGame {
     }
 
     fn pump_network(&mut self) -> Result<(), String> {
-        let mut bytes = [0_u8; MAX_APPLICATION_DATAGRAM_BYTES + 1];
-        for _ in 0..MAX_RECEIVED_DATAGRAMS_PER_TICK {
-            let (length, source) = match self.socket.recv_from(&mut bytes) {
-                Ok(received) => received,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) => return Err(format!("reception multijoueur: {error}")),
-            };
-            if source != self.server {
-                continue;
-            }
-            let payload = &bytes[..length];
-            if is_player_state_datagram(payload) {
-                self.receive_player_state(payload)?;
-            } else if is_snapshot_datagram(payload) {
-                self.receive_snapshot(payload)?;
-            } else if is_delta_datagram(payload) {
-                self.receive_world_delta(payload)?;
+        let datagrams = self.transport.drain()?;
+        for payload in datagrams {
+            if is_player_state_datagram(&payload) {
+                self.receive_player_state(&payload)?;
+            } else if is_snapshot_datagram(&payload) {
+                self.receive_snapshot(&payload)?;
+            } else if is_delta_datagram(&payload) {
+                self.receive_world_delta(&payload)?;
             } else if payload.starts_with(b"DFCT") {
-                self.receive_control(payload)?;
+                self.receive_control(&payload)?;
             }
         }
-        if self.session_id.is_none() && self.last_hello_at.elapsed() >= Duration::from_secs(1) {
-            self.socket
-                .send_to(&encode_client_hello(self.nonce), self.server)
-                .map_err(|error| format!("nouvelle tentative de handshake: {error}"))?;
-            self.last_hello_at = Instant::now();
-        }
+        self.transport
+            .retry_legacy_handshake(self.session_id.is_none())?;
         self.repair_delta_if_needed()?;
         self.repair_snapshot_if_needed()?;
         Ok(())
@@ -279,11 +421,8 @@ impl MultiplayerGame {
             return Ok(());
         }
         let missing_sequence = self.delta_inbox.expected_sequence();
-        self.socket
-            .send_to(
-                &encode_repair_request(session_id, missing_sequence),
-                self.server,
-            )
+        self.transport
+            .send(encode_repair_request(session_id, missing_sequence))
             .map_err(|error| format!("demande de reparation delta {missing_sequence}: {error}"))?;
         self.last_delta_repair_at = Some(now);
         self.delta_repairs_sent = self.delta_repairs_sent.saturating_add(1);
@@ -292,8 +431,8 @@ impl MultiplayerGame {
     }
 
     fn request_snapshot(&mut self, session_id: u64) -> Result<(), String> {
-        self.socket
-            .send_to(&encode_snapshot_request(session_id), self.server)
+        self.transport
+            .send(encode_snapshot_request(session_id))
             .map_err(|error| format!("demande de snapshot: {error}"))?;
         self.last_snapshot_request_at = Some(Instant::now());
         "synchronisation initiale du monde".clone_into(&mut self.last_status);
@@ -329,16 +468,13 @@ impl MultiplayerGame {
             };
             for (base_fragment, missing_mask) in self.snapshot_assembler.missing_fragment_windows()
             {
-                self.socket
-                    .send_to(
-                        &encode_snapshot_fragments_request(
-                            session_id,
-                            snapshot_id,
-                            base_fragment,
-                            missing_mask,
-                        ),
-                        self.server,
-                    )
+                self.transport
+                    .send(encode_snapshot_fragments_request(
+                        session_id,
+                        snapshot_id,
+                        base_fragment,
+                        missing_mask,
+                    ))
                     .map_err(|error| format!("reparation de snapshot: {error}"))?;
             }
             self.last_snapshot_repair_at = Some(now);
@@ -391,8 +527,8 @@ impl MultiplayerGame {
         self.mesh_snapshot = Arc::new(self.replica.world().clone());
         self.pending_mesh_chunks.clear();
         self.pending_body_ids.clear();
-        self.socket
-            .send_to(&encode_snapshot_ack(session_id, snapshot_id), self.server)
+        self.transport
+            .send(encode_snapshot_ack(session_id, snapshot_id))
             .map_err(|error| format!("acquittement du snapshot: {error}"))?;
         self.snapshot_phase = SnapshotPhase::Ready;
         self.last_status = format!(
@@ -572,10 +708,14 @@ impl MultiplayerGame {
     }
 
     fn receive_control(&mut self, payload: &[u8]) -> Result<(), String> {
+        let expected_nonce = self
+            .transport
+            .expected_legacy_nonce()
+            .ok_or_else(|| "message de controle UDP recu sur transport QUIC".to_owned())?;
         let message = decode_server_control(payload)
             .map_err(|error| format!("reponse de handshake invalide: {error}"))?;
         match message {
-            ServerControlMessage::Welcome { nonce, session_id } if nonce == self.nonce => {
+            ServerControlMessage::Welcome { nonce, session_id } if nonce == expected_nonce => {
                 if self.session_id.is_some_and(|current| current != session_id) {
                     return Err("le serveur a remplace une session active".to_owned());
                 }
@@ -681,8 +821,8 @@ impl MultiplayerGame {
         prediction
             .predict(input, self.replica.world())
             .map_err(|error| format!("prediction locale refusee: {error}"))?;
-        self.socket
-            .send_to(&encode_player_input(session_id, input), self.server)
+        self.transport
+            .send(encode_player_input(session_id, input))
             .map_err(|error| format!("envoi input: {error}"))?;
         self.next_input_sequence = self
             .next_input_sequence
@@ -716,8 +856,8 @@ impl MultiplayerGame {
             radius_voxels,
             peak_energy,
         };
-        self.socket
-            .send_to(&encode_explosion_request(session_id, command), self.server)
+        self.transport
+            .send(encode_explosion_request(session_id, command))
             .map_err(|error| format!("envoi destruction: {error}"))?;
         self.last_status = format!("destruction {command_id} envoyee en {:?}", hit.voxel);
         Ok(())
@@ -747,8 +887,8 @@ impl MultiplayerGame {
             position,
             material,
         };
-        self.socket
-            .send_to(&encode_build_request(session_id, command), self.server)
+        self.transport
+            .send(encode_build_request(session_id, command))
             .map_err(|error| format!("envoi construction: {error}"))?;
         self.last_status = format!("construction {command_id} envoyee en {position:?}");
         Ok(())
@@ -784,8 +924,8 @@ impl MultiplayerGame {
                 radius_voxels: 2,
                 peak_energy: 7_500,
             };
-            self.socket
-                .send_to(&encode_explosion_request(session_id, command), self.server)
+            self.transport
+                .send(encode_explosion_request(session_id, command))
                 .map_err(|error| format!("envoi destruction smoke: {error}"))?;
         }
         self.smoke_actions_sent = self.smoke_actions_sent.saturating_add(1);
@@ -868,13 +1008,15 @@ impl MultiplayerGame {
             RenderOutcome::RecreateSurface => self.renderer.recreate_surface()?,
         }
         let stats = self.renderer.stats();
+        let transport_drops = self.transport.dropped_datagrams();
         self.window.set_title(&format!(
-            "Destructible FPS multijoueur | session {} | {} joueurs | {}",
+            "Destructible FPS multijoueur | session {} | {} joueurs | drops {} | {}",
             self.session_id
                 .map_or_else(|| "...".to_owned(), |id| id.to_string()),
             stats
                 .players
                 .saturating_add(usize::from(self.session_id.is_some())),
+            transport_drops,
             self.last_status
         ));
         if exit_after.is_some_and(|duration| self.started.elapsed() >= duration) {
@@ -903,6 +1045,11 @@ impl MultiplayerGame {
             {
                 return Err("smoke termine sans reparer le delta volontairement perdu".to_owned());
             }
+            if transport_drops != 0 {
+                return Err(format!(
+                    "smoke termine avec {transport_drops} datagrammes perdus dans la file locale"
+                ));
+            }
             if self.applied_world_deltas > 0
                 && (self.completed_mesh_jobs == 0
                     || !self.pending_mesh_chunks.is_empty()
@@ -912,7 +1059,7 @@ impl MultiplayerGame {
                 return Err("smoke termine avant la presentation du delta replique".to_owned());
             }
             println!(
-                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={} reparations={} jobs_mesh={} snapshot_pret={}",
+                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={} reparations={} drops_transport={} jobs_mesh={} snapshot_pret={}",
                 self.session_id.unwrap_or_default(),
                 stats.players,
                 self.prediction
@@ -924,6 +1071,7 @@ impl MultiplayerGame {
                 self.maximum_horizontal_displacement_um,
                 self.applied_world_deltas,
                 self.delta_repairs_sent,
+                transport_drops,
                 self.completed_mesh_jobs,
                 self.snapshot_ready()
             );
@@ -1007,7 +1155,7 @@ fn movement_command(
 
 struct App {
     game: Option<MultiplayerGame>,
-    server: SocketAddr,
+    transport: TransportOptions,
     exit_after: Option<Duration>,
     smoke_drop_first_delta: bool,
     failure: Option<String>,
@@ -1029,7 +1177,7 @@ impl ApplicationHandler for App {
         };
         match MultiplayerGame::new(
             Arc::new(window),
-            self.server,
+            &self.transport,
             self.exit_after.is_some(),
             self.smoke_drop_first_delta,
         ) {
@@ -1128,23 +1276,61 @@ impl ApplicationHandler for App {
 }
 
 struct Options {
-    server: SocketAddr,
+    transport: TransportOptions,
     exit_after: Option<Duration>,
     smoke_drop_first_delta: bool,
 }
 
 fn options() -> Result<Options, Box<dyn Error>> {
+    options_from(std::env::args().skip(1))
+}
+
+fn options_from<I, S>(arguments: I) -> Result<Options, Box<dyn Error>>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
     let mut server: SocketAddr = DEFAULT_SERVER.parse()?;
+    let mut legacy_server_selected = false;
+    let mut secure_server = None;
+    let mut secure_server_name = None;
+    let mut secure_root_certificate = None;
+    let mut secure_credential = None;
     let mut exit_after = None;
     let mut smoke_drop_first_delta = false;
-    let mut arguments = std::env::args().skip(1);
+    let mut arguments = arguments.into_iter().map(Into::into);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--server" => {
+                legacy_server_selected = true;
                 server = arguments
                     .next()
                     .ok_or("--server exige une adresse")?
                     .parse()?;
+            }
+            "--secure-server" => {
+                secure_server = Some(
+                    arguments
+                        .next()
+                        .ok_or("--secure-server exige une adresse")?
+                        .parse()?,
+                );
+            }
+            "--server-name" => {
+                secure_server_name =
+                    Some(arguments.next().ok_or("--server-name exige un nom TLS")?);
+            }
+            "--ca-cert" => {
+                secure_root_certificate = Some(PathBuf::from(
+                    arguments.next().ok_or("--ca-cert exige un chemin")?,
+                ));
+            }
+            "--credential-file" => {
+                secure_credential = Some(PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or("--credential-file exige un chemin")?,
+                ));
             }
             "--smoke-seconds" => {
                 let seconds: f64 = arguments
@@ -1160,16 +1346,35 @@ fn options() -> Result<Options, Box<dyn Error>> {
             _ => return Err(format!("argument inconnu: {argument}").into()),
         }
     }
-    if !server.ip().is_loopback() {
+    let secure_option_count = usize::from(secure_server.is_some())
+        + usize::from(secure_server_name.is_some())
+        + usize::from(secure_root_certificate.is_some())
+        + usize::from(secure_credential.is_some());
+    let transport = if secure_option_count == 0 {
+        if !server.ip().is_loopback() {
+            return Err(
+                "le transport UDP de developpement accepte uniquement une adresse loopback".into(),
+            );
+        }
+        TransportOptions::Loopback(server)
+    } else if secure_option_count == 4 && !legacy_server_selected {
+        TransportOptions::Secure(SecureClientLaunchConfig {
+            server_address: secure_server.ok_or("adresse QUIC absente")?,
+            server_name: secure_server_name.ok_or("nom TLS absent")?,
+            root_certificate_file: secure_root_certificate.ok_or("certificat racine absent")?,
+            credential_file: secure_credential.ok_or("fichier de jeton absent")?,
+        })
+    } else {
         return Err(
-            "multiplayer-demo utilise uniquement le serveur UDP loopback de developpement".into(),
+            "le mode securise exige ensemble --secure-server, --server-name, --ca-cert et --credential-file, sans --server"
+                .into(),
         );
-    }
+    };
     if smoke_drop_first_delta && exit_after.is_none() {
         return Err("--smoke-drop-first-delta exige --smoke-seconds".into());
     }
     Ok(Options {
-        server,
+        transport,
         exit_after,
         smoke_drop_first_delta,
     })
@@ -1181,7 +1386,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
         game: None,
-        server: options.server,
+        transport: options.transport,
         exit_after: options.exit_after,
         smoke_drop_first_delta: options.smoke_drop_first_delta,
         failure: None,
@@ -1243,5 +1448,49 @@ mod tests {
             decay_correction(Vec3::splat(f32::NAN), 0.016, 0.08),
             Vec3::ZERO
         );
+    }
+
+    #[test]
+    fn secure_cli_requires_the_complete_file_backed_contract() {
+        assert!(options_from(["--secure-server", "127.0.0.1:40001"]).is_err());
+        assert!(
+            options_from([
+                "--server",
+                "127.0.0.1:40000",
+                "--secure-server",
+                "127.0.0.1:40001",
+                "--server-name",
+                "game.local",
+                "--ca-cert",
+                "/tmp/ca.pem",
+                "--credential-file",
+                "/tmp/token",
+            ])
+            .is_err()
+        );
+
+        let options = options_from([
+            "--secure-server",
+            "127.0.0.1:40001",
+            "--server-name",
+            "game.local",
+            "--ca-cert",
+            "/tmp/ca.pem",
+            "--credential-file",
+            "/tmp/token",
+        ])
+        .expect("complete secure launch contract");
+        assert!(matches!(options.transport, TransportOptions::Secure(_)));
+    }
+
+    #[test]
+    fn legacy_cli_remains_strictly_loopback() {
+        assert!(options_from(["--server", "192.0.2.10:40000"]).is_err());
+        let options =
+            options_from(["--server", "127.0.0.1:40000"]).expect("loopback development transport");
+        assert!(matches!(
+            options.transport,
+            TransportOptions::Loopback(address) if address.ip().is_loopback()
+        ));
     }
 }

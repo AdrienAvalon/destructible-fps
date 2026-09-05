@@ -69,29 +69,29 @@ async fn file_backed_secure_client_establishes_and_receives_bounded_gameplay() {
     assert!(client.session_id() > 0);
     assert!(client.server_nonce() > 0);
     assert_eq!(server.active_sessions(), 1);
+    let inbox = client.spawn_datagram_inbox(&tokio::runtime::Handle::current());
 
     client
         .send(encode_snapshot_request(client.session_id()))
         .expect("encrypted snapshot request");
-    for _ in 0..200 {
-        let report = server.tick().expect("snapshot tick");
-        if report.authority.snapshot_fallbacks_served > 0 {
-            break;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut received_snapshot = false;
+    while tokio::time::Instant::now() < deadline && !received_snapshot {
+        server.tick().expect("snapshot tick");
+        for _ in 0..64 {
+            match inbox.try_receive().expect("bounded encrypted gameplay") {
+                Some(payload) if is_snapshot_datagram(&payload) => {
+                    received_snapshot = true;
+                    break;
+                }
+                Some(_) => {}
+                None => break,
+            }
         }
         sleep(Duration::from_millis(1)).await;
     }
-    let mut received_snapshot = false;
-    for _ in 0..256 {
-        let payload = timeout(Duration::from_secs(2), client.receive())
-            .await
-            .expect("gameplay receive deadline")
-            .expect("bounded encrypted gameplay");
-        if is_snapshot_datagram(&payload) {
-            received_snapshot = true;
-            break;
-        }
-    }
     assert!(received_snapshot);
+    assert_eq!(inbox.dropped_datagrams(), 0);
     client.close();
     for _ in 0..100 {
         server.tick().expect("disconnect tick");

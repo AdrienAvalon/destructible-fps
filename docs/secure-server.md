@@ -48,6 +48,27 @@ cargo run --release --bin secure-dedicated-server -- \
   --config /absolute/path/to/secure-server.json
 ```
 
+Connect the graphical client with the certificate name, trusted root, and an owner-only credential
+file provisioned for that authority:
+
+```bash
+cargo run --release --bin multiplayer-demo -- \
+  --secure-server 127.0.0.1:40001 \
+  --server-name game.local \
+  --ca-cert /absolute/path/to/ca.pem \
+  --credential-file /absolute/path/to/access-token-player-1
+```
+
+The client refuses partial secure configuration and refuses mixing this mode with the legacy
+`--server` option. Its bounded asynchronous receive queue keeps QUIC work off the window thread and
+reports local overflow explicitly.
+
+For local reproduction only, `cargo run --example secure_local_fixture -- <new-absolute-directory>`
+generates an owner-only, short-lived fixture for `127.0.0.1:40001` and TLS name `localhost`. It never
+prints the generated key or either distinct player credential. Start the server plus one or two
+clients with the paths it reports, then delete the complete directory. This convenience authority is
+deliberately unsuitable for LAN or Internet exposure.
+
 Readiness emits only the selected socket and the non-secret exposure class. The final line contains
 bounded counters, never credentials or principal identifiers. `Ctrl-C`, `max_ticks`, JWKS expiry,
 and `stop_after_commands` all converge through endpoint shutdown.

@@ -13,12 +13,18 @@ use std::{
     fmt, fs, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+    },
     time::Duration,
 };
 use zeroize::Zeroizing;
 
 pub const MAX_CLIENT_ROOT_CERTIFICATE_BYTES: usize = 256 * 1_024;
 pub const MAX_CLIENT_ROOT_CERTIFICATES: usize = 16;
+pub const SECURE_CLIENT_RECEIVE_QUEUE_DATAGRAMS: usize = 512;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,6 +64,8 @@ pub enum SecureClientError {
     Admission(SessionAdmissionError),
     Send(SecureDatagramError),
     Receive(SecureDatagramReceiveError),
+    ReceiveWorkerStopped,
+    ReceiveWorkerClosed(String),
 }
 
 impl fmt::Display for SecureClientError {
@@ -102,6 +110,10 @@ impl fmt::Display for SecureClientError {
             Self::Admission(error) => error.fmt(formatter),
             Self::Send(error) => error.fmt(formatter),
             Self::Receive(error) => error.fmt(formatter),
+            Self::ReceiveWorkerStopped => write!(formatter, "secure receive worker stopped"),
+            Self::ReceiveWorkerClosed(error) => {
+                write!(formatter, "secure receive worker closed: {error}")
+            }
         }
     }
 }
@@ -113,6 +125,32 @@ pub struct SecureClientConnection {
     connection: Connection,
     session_id: u64,
     server_nonce: u64,
+}
+
+pub struct SecureDatagramInbox {
+    receiver: Receiver<Result<Vec<u8>, String>>,
+    dropped_datagrams: Arc<AtomicU64>,
+}
+
+impl SecureDatagramInbox {
+    /// Returns immediately with the next datagram, no datagram, or a terminal worker error.
+    ///
+    /// # Errors
+    ///
+    /// Reports authenticated connection closure or an unexpectedly stopped worker.
+    pub fn try_receive(&self) -> Result<Option<Vec<u8>>, SecureClientError> {
+        match self.receiver.try_recv() {
+            Ok(Ok(payload)) => Ok(Some(payload)),
+            Ok(Err(error)) => Err(SecureClientError::ReceiveWorkerClosed(error)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(SecureClientError::ReceiveWorkerStopped),
+        }
+    }
+
+    #[must_use]
+    pub fn dropped_datagrams(&self) -> u64 {
+        self.dropped_datagrams.load(Ordering::Relaxed)
+    }
 }
 
 impl SecureClientConnection {
@@ -194,11 +232,49 @@ impl SecureClientConnection {
             .map_err(SecureClientError::Receive)
     }
 
+    /// Starts one asynchronous bounded receive pump owned by the supplied Tokio runtime.
+    #[must_use]
+    pub fn spawn_datagram_inbox(&self, runtime: &tokio::runtime::Handle) -> SecureDatagramInbox {
+        let (sender, receiver) = mpsc::sync_channel(SECURE_CLIENT_RECEIVE_QUEUE_DATAGRAMS);
+        let dropped_datagrams = Arc::new(AtomicU64::new(0));
+        let worker_drops = Arc::clone(&dropped_datagrams);
+        let connection = self.connection.clone();
+        runtime.spawn(async move {
+            receive_worker(connection, &sender, &worker_drops).await;
+        });
+        SecureDatagramInbox {
+            receiver,
+            dropped_datagrams,
+        }
+    }
+
     pub fn close(&self) {
         self.connection
             .close(quinn::VarInt::from_u32(0), b"client shutdown");
         self.endpoint
             .close(quinn::VarInt::from_u32(0), b"client shutdown");
+    }
+}
+
+async fn receive_worker(
+    connection: Connection,
+    sender: &SyncSender<Result<Vec<u8>, String>>,
+    dropped_datagrams: &AtomicU64,
+) {
+    loop {
+        match receive_gameplay_datagram(&connection).await {
+            Ok(payload) => match sender.try_send(Ok(payload.to_vec())) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(TrySendError::Disconnected(_)) => break,
+            },
+            Err(error) => {
+                let _ = sender.try_send(Err(error.to_string()));
+                break;
+            }
+        }
     }
 }
 

@@ -93,7 +93,10 @@ or 16 certificates and credentials beyond the protocol's 4 KiB limit. On Unix th
 must deny every group/other permission. Credential bytes are trimmed only at their outside ASCII
 whitespace, remain zeroizing memory, and never enter arguments or diagnostic values. A system CSPRNG
 produces the non-zero client nonce; verified TLS/ALPN completes before the bounded reliable admission
-stream, after which only size-checked encrypted datagrams are exposed to callers.
+stream, after which only size-checked encrypted datagrams are exposed to callers. The graphical
+client owns a 512-datagram asynchronous receive queue so the window thread never waits on QUIC. It
+drains at most the global per-tick receive budget and exposes every local overflow in its title and
+smoke evidence; permanent world gaps still converge through exact retained-delta repair.
 
 Authenticated character motion uses an independent player-state v2 datagram rather than entering
 the ordered permanent-world transaction stream. Every third 60 Hz authority tick, the server emits
@@ -330,8 +333,8 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
 - bounded deterministic latency/jitter/loss/duplication/reordering injection across real sockets,
   including delta recovery, selective snapshot recovery, ACK retry, and per-channel byte evidence
   (delivered for loopback tests);
-- bounded TLS 1.3 QUIC transport and post-TLS credential admission (delivered and wired to the
-  authority in a loopback-tested runtime; operational process configuration remains);
+- bounded TLS 1.3 QUIC transport and post-TLS credential admission (delivered and wired to both the
+  authority and graphical client; remote operational exposure remains gated);
 - bounded offline RS256/JWKS OIDC validation, atomic rotation, replay cache, and stable principal
   mapping (delivered as an injectable verifier; trusted refresh and process configuration remain);
 - transport-independent bounded authority core, opaque peer IDs, authenticated principal binding,

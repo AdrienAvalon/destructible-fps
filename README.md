@@ -35,7 +35,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
   permissions, forced static-JWKS expiry, graceful interruption, and no credential-valued arguments;
 - a reusable secure client bootstrap with bounded PEM/token files, strict Unix token permissions,
   cryptographic client nonces, verified TLS/ALPN, post-TLS credential admission, encrypted bounded
-  datagrams, and no credential-valued arguments;
+  datagrams, a fixed-capacity asynchronous receive queue with visible overflow accounting, and no
+  credential-valued arguments;
 - strict caps on incomplete packets, fragments, and retained bytes to prevent
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,
@@ -65,10 +66,12 @@ The Linux demo now combines the authoritative core with a real-time first-person
   bounded visual correction smoothing with immediate snapping for large discontinuities;
 - a fixed-capacity instanced remote-player GPU path: one shared avatar mesh, at most one world draw
   and one shadow draw for all remote players, with the local session excluded;
-- a two-window loopback multiplayer demo connecting to the real 60 Hz development server, with
+- a two-window multiplayer demo connecting either to the real 60 Hz loopback development server or
+  the authenticated QUIC authority, with
   camera-relative input, prediction/reconciliation, interpolated remote avatars, reconnect attempts,
   replicated authoritative destruction/construction, rigid debris, automatic smoke trajectories,
-  exact retained-delta repair, and a real two-client process regression test;
+  exact retained-delta repair, transport-queue loss telemetry, and a real two-client process
+  regression test;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
@@ -93,9 +96,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
 game. Oriented voxel collision, contact-generated torque, gyroscopic response, deeper
-constraint-island convergence, progressive structural stress, authenticated remote-authority
-exposure, trusted OIDC discovery/JWKS provisioning and certificate lifecycle, graphical remote/local
-first-person arms/weapon presentation, adaptive retransmission and congestion control, audio,
+constraint-island convergence, progressive structural stress, remote-authority exposure, trusted
+OIDC discovery/JWKS provisioning and certificate lifecycle, first-person arms/weapon presentation,
+adaptive retransmission and congestion control, audio,
 asset-quality PBR, temporal anti-aliasing, and
 large-world residency streaming remain explicit later gates.
 
@@ -151,18 +154,40 @@ cargo run --release --bin multiplayer-demo -- --server 127.0.0.1:40000
 The graphical recovery path can be exercised by adding
 `--smoke-seconds 10 --smoke-drop-first-delta` to one client while another runs the ordinary smoke.
 That client drops the whole first mutation until it observes the second, then must repair and present
-both in order before the process can succeed.
+both in order before the process can succeed. The final smoke line must also report
+`drops_transport=0`.
+
+Once a local secure authority has been provisioned as described below, the same graphical client can
+use authenticated QUIC/TLS. The credential stays in its owner-only file and is never passed through
+the process arguments:
+
+```bash
+cargo run --release --bin multiplayer-demo -- \
+  --secure-server 127.0.0.1:40001 \
+  --server-name game.local \
+  --ca-cert /absolute/path/to/ca.pem \
+  --credential-file /absolute/path/to/access-token-player-1
+```
+
+For a disposable loopback-only validation authority, the example target creates a new private
+directory containing a ten-minute certificate/JWKS fixture and two distinct player credentials. The
+directory path is the only argument; generated secrets are never printed and must be deleted after
+the run:
+
+```bash
+cargo run --example secure_local_fixture -- /tmp/destructible-fps-secure-demo
+```
 
 This first networked graphical slice synchronizes character movement, remote players, authoritative
 destruction, construction, and moving rigid debris. Once the cursor is captured, left click fires a
 rifle blast, right click an explosive blast, and middle click builds wood. Start every client before
 or after modifying the world: each admission installs an atomic snapshot, selectively requests lost
-fragments, acknowledges installation, and resumes with ordered catch-up deltas. Recovery UI,
-the production QUIC/OIDC connection, large-world residency streaming, and asset-quality presentation
-are not yet wired into `multiplayer-demo`. Live changed chunks and detached body geometry are meshed
-through the same single-worker bounded scheduler as the local demo. Both this client and the
-unauthenticated UDP server reject non-loopback addresses; they are a local development harness, not
-a LAN/Internet deployment path.
+fragments, acknowledges installation, and resumes with ordered catch-up deltas. Recovery UI, remote
+secure-server exposure, large-world residency streaming, and asset-quality presentation remain later
+gates. Live changed chunks and detached body geometry are meshed through the same single-worker
+bounded scheduler as the local demo. The unauthenticated UDP mode remains strictly loopback-only.
+The graphical QUIC client accepts a remote address, but the current secure authority deliberately
+rejects non-loopback exposure until its production security gates are met.
 
 The legacy dedicated-server process is intentionally restricted to loopback. Its socket has been
 separated from the reusable authority core and its real two-client path is exercised by

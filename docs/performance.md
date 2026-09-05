@@ -3,6 +3,35 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — graphical authenticated-QUIC integration
+
+Source state: parent `7322e85` plus the graphical secure-transport increment documented here. The
+same multiplayer presentation now selects either the strictly local legacy UDP adapter or the
+file-backed QUIC/TLS client. QUIC receive work runs on a two-thread Tokio runtime behind a bounded
+512-datagram queue; the window tick drains at most 64 payloads and exposes queue overflow in both the
+title and smoke result. Secure CLI parsing rejects incomplete configuration and any legacy/secure
+mixture. A local-only fixture generator creates short-lived owner-only material without printing its
+private key or access token.
+
+Two simultaneous ten-second release Vulkan smokes connected to the standalone
+`secure-dedicated-server` using a freshly generated self-signed TLS identity and two distinct RS256
+OIDC credentials. On the NVIDIA GeForce RTX 4050 Laptop GPU, both installed their encrypted initial
+snapshot, rendered the other authenticated player and applied two authoritative world deltas. The
+ordinary client moved 80,096,248 micrometres and completed two background mesh jobs. The impaired
+client discarded the first complete delta, requested one exact repair, converged and completed the
+combined mesh job. Both exited at authority tick 1,254 with `drops_transport=0`. The server observed
+two admitted sessions, two commands, no admission failure and no rate limiting. The generated
+credential material was removed immediately afterwards.
+
+The legacy regression then ran two simultaneous ten-second release Vulkan clients. Both rendered
+the remote player, installed their snapshots and applied two deltas. The impaired client discarded
+the first complete delta, issued exactly one repair and converged; both reported
+`drops_transport=0`. The complete debug and release promotion passed 121 library tests, ten binary
+tests and 43 integration tests with strict Clippy clean. The required release baselines remained
+bounded: destruction p99 0.352 ms, structural analysis plus promotion p99 4.527 ms, 1,024-body
+physics tick p99 1.111 ms, and snapshot total p99 9.362 ms. A five-second local Vulkan smoke reported
+GPU-total p99 0.782 ms, maximum 0.807 ms, and zero abandoned GPU samples.
+
 ## 2026-09-05 — reusable secure client boundary
 
 Source state: parent `149089f` plus the secure-client increment documented here. Client setup bounds

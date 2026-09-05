@@ -1,9 +1,10 @@
 use destructible_fps::{
     AuthoritativeServer, BodyError, BodyLimits, ClientReplica, ClientStatus, CodecError,
-    CommandError, DeltaPacket, Explosion, ExplosionCommand, FrameAssembler, IVec3, Material,
-    ReplicationError, StructuralAnchors, StructuralLimits, Voxel, VoxelChange, World, WorldError,
-    decode_frame, encode_frames,
+    CommandError, DeltaPacket, DemoSession, Explosion, ExplosionCommand, FireMode, FrameAssembler,
+    IVec3, MICROMETERS_PER_VOXEL, Material, ReplicationError, StructuralAnchors, StructuralLimits,
+    Voxel, VoxelChange, World, WorldError, decode_frame, encode_frames,
 };
+use glam::Vec3;
 use std::net::UdpSocket;
 use std::time::Duration;
 
@@ -125,7 +126,7 @@ fn structural_detachment_is_one_replicated_authoritative_transaction() {
 
     let mut assembler = FrameAssembler::default();
     let mut complete = None;
-    for bytes in encode_frames(&packet, 124)
+    for bytes in encode_frames(&packet, 126)
         .expect("minimum body-assignment MTU")
         .into_iter()
         .rev()
@@ -200,6 +201,68 @@ fn corrupted_body_assignment_is_rejected_before_client_mutation() {
 }
 
 #[test]
+fn authoritative_body_motion_replicates_until_static_sleep() {
+    let mut world = World::default();
+    world.fill_box(
+        IVec3::new(-2, 0, -2),
+        IVec3::new(2, 0, 2),
+        Voxel::new(Material::Stone),
+    );
+    world.set_voxel(IVec3::new(0, 1, 0), Voxel::new(Material::Glass));
+    world.fill_box(
+        IVec3::new(0, 2, 0),
+        IVec3::new(0, 4, 0),
+        Voxel::new(Material::Wood),
+    );
+    let mut session = DemoSession::new(world);
+    let shot = session
+        .fire(Vec3::new(0.5, 1.5, 4.0), -Vec3::Z, FireMode::Rifle)
+        .expect("authoritative shot")
+        .expect("support is visible");
+    assert_eq!(shot.spawned_body_ids.len(), 1);
+    let body_id = shot.spawned_body_ids[0];
+
+    for _ in 0..240 {
+        session.advance_physics().expect("physics tick replicates");
+    }
+    let state = session.body_states()[&body_id];
+    assert!(state.sleeping);
+    assert_eq!(state.translation_um.y, MICROMETERS_PER_VOXEL);
+    assert_eq!(state.linear_velocity_um_per_second.y, 0);
+}
+
+#[test]
+fn corrupted_body_motion_is_rejected_before_replica_state_changes() {
+    let initial = fragile_column();
+    let mut server = AuthoritativeServer::new(initial.clone());
+    let mut client = ClientReplica::new(initial);
+    let (spawn, _) = server
+        .execute_explosion(7, sever_column_command())
+        .expect("body spawn");
+    client.receive(&spawn).expect("spawn applies");
+    let before = client.body_states().clone();
+    let (packet, _) = server.advance_physics();
+    let mut packet = packet.expect("falling body changes on first physics tick");
+    let frames = encode_frames(&packet, 166).expect("one minimum-size body-state frame");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].len(), 166);
+    let mut invalid_wire_state = frames[0].clone();
+    *invalid_wire_state.last_mut().expect("sleeping flag") = 2;
+    assert_eq!(
+        decode_frame(&invalid_wire_state),
+        Err(CodecError::InvalidBodyState)
+    );
+    packet.body_updates[0].state.translation_um.y -= 1;
+
+    assert!(matches!(
+        client.receive(&packet),
+        Err(ReplicationError::BodyFingerprintMismatch { .. })
+    ));
+    assert_eq!(client.body_states(), &before);
+    assert_eq!(client.world().tick(), spawn.tick);
+}
+
+#[test]
 fn sequence_gap_is_detected_before_world_mutation() {
     let initial = World::default();
     let mut server = AuthoritativeServer::new(initial.clone());
@@ -249,6 +312,7 @@ fn codec_rejects_truncated_and_corrupted_frames() {
         final_body_fingerprint: 0,
         changes: Vec::new(),
         body_assignments: Vec::new(),
+        body_updates: Vec::new(),
     };
     let frames = encode_frames(&packet, 1_200).expect("empty delta still has one frame");
     assert!(decode_frame(&frames[0][..10]).is_err());
@@ -297,8 +361,9 @@ fn incomplete_packet_flood_is_bounded() {
             final_body_fingerprint: 0,
             changes: changes.clone(),
             body_assignments: Vec::new(),
+            body_updates: Vec::new(),
         };
-        let first = encode_frames(&packet, 110)
+        let first = encode_frames(&packet, 112)
             .expect("one change per frame")
             .remove(0);
         assert!(
@@ -317,8 +382,9 @@ fn incomplete_packet_flood_is_bounded() {
         final_body_fingerprint: 0,
         changes,
         body_assignments: Vec::new(),
+        body_updates: Vec::new(),
     };
-    let first = encode_frames(&packet, 110)
+    let first = encode_frames(&packet, 112)
         .expect("one change per frame")
         .remove(0);
     assert_eq!(
@@ -350,8 +416,9 @@ fn fragment_memory_accounting_is_stable_and_released() {
         final_body_fingerprint: 0,
         changes,
         body_assignments: Vec::new(),
+        body_updates: Vec::new(),
     };
-    let frames = encode_frames(&packet, 110).expect("one change per frame");
+    let frames = encode_frames(&packet, 112).expect("one change per frame");
     let first = decode_frame(&frames[0]).expect("valid first frame");
     let second = decode_frame(&frames[1]).expect("valid second frame");
     let mut assembler = FrameAssembler::default();

@@ -60,10 +60,10 @@ cargo run --release --bin destruction-benchmark -- --events 500
 ```
 
 The representative multi-material scene completed 500 server-authoritative destruction, structural
-analysis, body promotion, protocol-v2 fragmentation, reordering, decode, reassembly,
-client-application, and final-verification cycles at 19,293 events/s. Event latency was 0.014 ms
-p50, 0.250 ms p95, and 0.400 ms p99, or 2.4% of one 60 Hz frame budget. The run produced 847
-application datagrams (0.525 MiB), fractured 13,009 voxels, detached 1,361 voxels into 32 active
+analysis, body promotion, protocol-v3 fragmentation, reordering, decode, reassembly,
+client-application, and final-verification cycles at 21,637 events/s. Event latency was 0.012 ms
+p50, 0.217 ms p95, and 0.343 ms p99, or 2.0% of one 60 Hz frame budget. The run produced 847
+application datagrams (0.527 MiB), fractured 13,009 voxels, detached 1,361 voxels into 32 active
 bodies, and ended with identical static-world and body-set state on server and client.
 
 ## 2026-09-05 — structural island extraction
@@ -80,17 +80,17 @@ foundation path, computes mass/bounds, and reproduces the same 128-bit island fi
 
 | Measurement | Result |
 |---|---:|
-| Combined throughput | 247 analyses and promotions/s |
-| Topology analysis p50 | 2.651 ms |
-| Topology analysis p95 | 2.798 ms |
-| Topology analysis p99 | 2.917 ms |
-| Body promotion p50 | 1.347 ms |
-| Body promotion p95 | 1.424 ms |
-| Body promotion p99 | 1.510 ms |
-| Combined p50 | 4.009 ms |
-| Combined p95 | 4.209 ms |
-| Combined p99 | 4.371 ms |
-| Combined max | 4.613 ms |
+| Combined throughput | 243 analyses and promotions/s |
+| Topology analysis p50 | 2.616 ms |
+| Topology analysis p95 | 2.731 ms |
+| Topology analysis p99 | 2.771 ms |
+| Body promotion p50 | 1.458 ms |
+| Body promotion p95 | 1.529 ms |
+| Body promotion p99 | 1.549 ms |
+| Combined p50 | 4.076 ms |
+| Combined p95 | 4.262 ms |
+| Combined p99 | 4.314 ms |
+| Combined max | 4.330 ms |
 
 The promotion step revalidates the read-only island proof, canonical material voxels, six-neighbour
 connectivity and identity before computing fixed-unit centre of mass and diagonal inertia. The
@@ -110,6 +110,34 @@ The deterministic showcase first severed a fragile support to guarantee one repl
 breached the main facade. Body geometry was built by the same single-queue bounded background worker
 as chunk geometry, in local coordinates, and uploaded into a fixed 1,024-instance transform arena.
 The Vulkan run reported 1/1 body visible, 90/128 chunks visible, 91 world draws, and 129 shadow draws.
-GPU total was 0.177 ms p50, 0.207 ms p95, 0.211 ms p99, and 0.227 ms maximum across 2,161 completed
-samples, with zero dropped timestamp samples. The scene is intentionally small: this validates the
-body shader, upload, culling, and draw paths, not the final active-body budget.
+With fixed-step motion enabled, GPU total was 0.137 ms p50, 0.158 ms p95, 0.195 ms p99, and 0.198 ms
+maximum across 2,426 completed samples, with zero dropped timestamp samples. The body reached the
+static ground and the smoke gate reported 1/1 body sleeping. The scene is intentionally small: this
+validates the body shader, upload, culling, state replication, and draw paths, not the final
+active-body rendering budget.
+
+## 2026-09-05 — fixed-step body simulation
+
+Command:
+
+```bash
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
+```
+
+The fixture starts the full active-body limit in 256 vertical groups above a static voxel floor. It
+exercises integer gravity, swept floor queries, deterministic sleep, and sweep-and-prune candidate
+generation; settled bodies intentionally overlap because body-body response is the next solver gate.
+
+| Measurement | Result |
+|---|---:|
+| Tick p50 | 0.029 ms |
+| Tick p95 | 0.136 ms |
+| Tick p99 | 0.146 ms |
+| Tick max | 0.172 ms |
+| Maximum updated bodies | 1,024 |
+| Maximum broad-phase pairs | 1,536 |
+| Final sleeping bodies | 1,024/1,024 |
+
+This core-solver result is comfortably below the 12 ms server-work target but excludes body-body
+impulses, rotation, interest filtering, serialization, socket I/O, and other gameplay systems. Those
+costs require separate promotion evidence before the Stage 2 exit gate can pass.

@@ -23,6 +23,10 @@ path = "src/bin/playable_demo.rs"
 name = "structural-benchmark"
 path = "src/bin/structural_benchmark.rs"
 
+[[bin]]
+name = "physics-benchmark"
+path = "src/bin/physics_benchmark.rs"
+
 [dependencies]
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 glam = "=0.33.6"

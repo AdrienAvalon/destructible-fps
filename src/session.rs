@@ -2,8 +2,9 @@
 
 use crate::{
     AuthoritativeServer, CHUNK_EDGE, ClientReplica, CodecError, CommandError, DestructionReport,
-    ExplosionCommand, FrameAssembler, IVec3, ReplicationError, RigidBodyDescriptor, VoxelChange,
-    World, chunk_position, decode_frame, demo_world, encode_frames, player::raycast,
+    ExplosionCommand, FrameAssembler, IVec3, PhysicsTickReport, ReplicationError,
+    RigidBodyDescriptor, RigidBodyState, VoxelChange, World, chunk_position, decode_frame,
+    demo_world, encode_frames, player::raycast,
 };
 use core::fmt;
 use glam::Vec3;
@@ -108,6 +109,40 @@ impl DemoSession {
         self.client.bodies()
     }
 
+    #[must_use]
+    pub const fn body_states(&self) -> &BTreeMap<u128, RigidBodyState> {
+        self.client.body_states()
+    }
+
+    /// Advances the 60 Hz authoritative rigid-body simulation and crosses the same bounded
+    /// protocol path whenever at least one state changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns codec, reassembly, replication, or final consistency failures.
+    pub fn advance_physics(&mut self) -> Result<PhysicsTickReport, SessionError> {
+        let (packet, report) = self.server.advance_physics();
+        if let Some(packet) = packet {
+            let mut encoded = encode_frames(&packet, DATAGRAM_MTU)?;
+            encoded.reverse();
+            let mut assembled = None;
+            for bytes in encoded {
+                if let Some(packet) = self.assembler.push(decode_frame(&bytes)?)? {
+                    assembled = Some(packet);
+                }
+            }
+            let assembled = assembled.ok_or(SessionError::MissingCompletePacket)?;
+            self.client.receive(&assembled)?;
+        }
+        if self.client.world().fingerprint() != self.server.world().fingerprint()
+            || self.client.body_fingerprint() != self.server.body_fingerprint()
+            || self.client.body_states() != self.server.body_states()
+        {
+            return Err(SessionError::DivergedReplica);
+        }
+        Ok(report)
+    }
+
     /// Finds the targeted voxel, executes destruction on the authority, serializes it to bounded
     /// datagrams, and applies the reassembled delta to the rendered replica.
     ///
@@ -151,6 +186,7 @@ impl DemoSession {
         self.client.receive(&assembled)?;
         if self.client.world().fingerprint() != self.server.world().fingerprint()
             || self.client.body_fingerprint() != self.server.body_fingerprint()
+            || self.client.body_states() != self.server.body_states()
         {
             return Err(SessionError::DivergedReplica);
         }

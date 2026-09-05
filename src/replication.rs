@@ -1,6 +1,9 @@
 use crate::destruction::{DestructionReport, Explosion};
 use crate::material::{InvalidMaterial, Voxel};
-use crate::physics::{BodyError, BodyLimits, BodyVoxel, RigidBodyDescriptor};
+use crate::physics::{
+    BodyError, BodyLimits, BodyVoxel, FixedMicrometers3, RigidBodyDescriptor, RigidBodyState,
+    broad_phase_pairs, step_rigid_body, valid_rigid_body_state,
+};
 use crate::structural::{
     StructuralAnchors, StructuralError, StructuralLimits, analyze_structural_changes,
 };
@@ -9,11 +12,12 @@ use core::fmt;
 use std::collections::{BTreeMap, HashMap};
 
 const MAGIC: [u8; 4] = *b"DFPS";
-const PROTOCOL_VERSION: u8 = 2;
+const PROTOCOL_VERSION: u8 = 3;
 const DELTA_KIND: u8 = 1;
-const HEADER_BYTES: usize = 94;
+const HEADER_BYTES: usize = 96;
 const CHANGE_BYTES: usize = 16;
 const BODY_ASSIGNMENT_BYTES: usize = 30;
+const BODY_UPDATE_BYTES: usize = 70;
 const MAX_DATAGRAM_BYTES: usize = 1_200;
 const MAX_FRAGMENTS: u16 = 1_024;
 const MAX_PENDING_PACKETS: usize = 64;
@@ -37,6 +41,21 @@ pub struct BodyVoxelAssignment {
     pub voxel: Voxel,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BodyStateUpdate {
+    pub body_id: u128,
+    pub state: RigidBodyState,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PhysicsTickReport {
+    pub updated_bodies: usize,
+    pub static_collisions: usize,
+    pub bodies_put_to_sleep: usize,
+    pub broad_phase_pairs: usize,
+    pub broad_phase_saturated: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeltaPacket {
     pub sequence: u64,
@@ -47,6 +66,7 @@ pub struct DeltaPacket {
     pub final_body_fingerprint: u128,
     pub changes: Vec<VoxelChange>,
     pub body_assignments: Vec<BodyVoxelAssignment>,
+    pub body_updates: Vec<BodyStateUpdate>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,12 +81,14 @@ pub struct DeltaFrame {
     pub fragment_count: u16,
     pub changes: Vec<VoxelChange>,
     pub body_assignments: Vec<BodyVoxelAssignment>,
+    pub body_updates: Vec<BodyStateUpdate>,
 }
 
 #[derive(Clone)]
 pub struct AuthoritativeServer {
     world: World,
     bodies: BTreeMap<u128, RigidBodyDescriptor>,
+    body_states: BTreeMap<u128, RigidBodyState>,
     body_fingerprint: u128,
     active_body_voxels: usize,
     structural_anchors: StructuralAnchors,
@@ -153,6 +175,7 @@ impl AuthoritativeServer {
         Self {
             world,
             bodies: BTreeMap::new(),
+            body_states: BTreeMap::new(),
             body_fingerprint: 0,
             active_body_voxels: 0,
             structural_anchors: StructuralAnchors::foundation_plane(0),
@@ -224,7 +247,7 @@ impl AuthoritativeServer {
             return Err(CommandError::TooManyActiveBodyVoxels(active_body_voxels));
         }
         let (changes, body_assignments) = merged_detachment_changes(&self.world, &report, &bodies);
-        if !payload_fits_protocol(changes.len(), body_assignments.len(), MAX_DATAGRAM_BYTES) {
+        if !payload_fits_protocol(changes.len(), body_assignments.len(), 0, MAX_DATAGRAM_BYTES) {
             rollback_changes(&mut self.world, &report.changes);
             return Err(CommandError::TransactionTooLarge {
                 changes: changes.len(),
@@ -237,7 +260,9 @@ impl AuthoritativeServer {
         report.detached_voxels = spawned_voxels;
         report.changes = changes;
         for body in bodies {
-            self.body_fingerprint ^= body_fingerprint_token(body.id);
+            let state = RigidBodyState::at_spawn(&body);
+            self.body_fingerprint ^= body_fingerprint_token(body.id, state);
+            self.body_states.insert(body.id, state);
             self.bodies.insert(body.id, body);
         }
         self.active_body_voxels = active_body_voxels;
@@ -252,6 +277,7 @@ impl AuthoritativeServer {
             final_body_fingerprint: self.body_fingerprint,
             changes: report.changes.clone(),
             body_assignments,
+            body_updates: Vec::new(),
         };
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.last_command_id.insert(client_id, command.command_id);
@@ -271,6 +297,60 @@ impl AuthoritativeServer {
     #[must_use]
     pub const fn body_fingerprint(&self) -> u128 {
         self.body_fingerprint
+    }
+
+    #[must_use]
+    pub const fn body_states(&self) -> &BTreeMap<u128, RigidBodyState> {
+        &self.body_states
+    }
+
+    #[must_use]
+    pub fn advance_physics(&mut self) -> (Option<DeltaPacket>, PhysicsTickReport) {
+        let pairs = broad_phase_pairs(&self.bodies, &self.body_states);
+        let mut report = PhysicsTickReport {
+            broad_phase_pairs: pairs.len(),
+            broad_phase_saturated: pairs.len() == crate::physics::MAX_BROAD_PHASE_PAIRS,
+            ..PhysicsTickReport::default()
+        };
+        let base_body_fingerprint = self.body_fingerprint;
+        let mut updates = Vec::new();
+        for (&body_id, body) in &self.bodies {
+            let Some(state) = self.body_states.get_mut(&body_id) else {
+                continue;
+            };
+            let before = *state;
+            let result = step_rigid_body(&self.world, body, state);
+            if !result.moved {
+                continue;
+            }
+            self.body_fingerprint ^=
+                body_fingerprint_token(body_id, before) ^ body_fingerprint_token(body_id, *state);
+            report.updated_bodies += 1;
+            report.static_collisions += usize::from(result.collided_with_static);
+            report.bodies_put_to_sleep += usize::from(result.became_sleeping);
+            updates.push(BodyStateUpdate {
+                body_id,
+                state: *state,
+            });
+        }
+        let tick = self.world.tick().wrapping_add(1);
+        self.world.set_tick(tick);
+        if updates.is_empty() {
+            return (None, report);
+        }
+        let packet = DeltaPacket {
+            sequence: self.next_sequence,
+            tick,
+            base_fingerprint: self.world.fingerprint(),
+            final_fingerprint: self.world.fingerprint(),
+            base_body_fingerprint,
+            final_body_fingerprint: self.body_fingerprint,
+            changes: Vec::new(),
+            body_assignments: Vec::new(),
+            body_updates: updates,
+        };
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        (Some(packet), report)
     }
 
     fn prepare_detached_bodies(
@@ -351,26 +431,64 @@ fn rollback_changes(world: &mut World, changes: &[VoxelChange]) {
     }
 }
 
-const fn body_fingerprint_token(id: u128) -> u128 {
-    id.rotate_left(41) ^ 0xa076_1d64_78bd_642f_e703_7ed1_a0b4_28db_u128
+const fn body_fingerprint_token(id: u128, state: RigidBodyState) -> u128 {
+    let mut token = id.rotate_left(41) ^ 0xa076_1d64_78bd_642f_e703_7ed1_a0b4_28db_u128;
+    let values = [
+        state.translation_um.x,
+        state.translation_um.y,
+        state.translation_um.z,
+        state.linear_velocity_um_per_second.x,
+        state.linear_velocity_um_per_second.y,
+        state.linear_velocity_um_per_second.z,
+    ];
+    let mut index = 0;
+    while index < values.len() {
+        token = token
+            .rotate_left(23)
+            .wrapping_add(values[index].cast_unsigned() as u128)
+            .wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_013b_u128);
+        index += 1;
+    }
+    let remainder = (state.integration_remainder[0] as u128)
+        | ((state.integration_remainder[1] as u128) << 8)
+        | ((state.integration_remainder[2] as u128) << 16);
+    token
+        ^ remainder.rotate_left(79)
+        ^ (state.sleep_ticks as u128).rotate_left(101)
+        ^ (state.sleeping as u128).rotate_left(127)
 }
 
-fn payload_fragment_count(changes: usize, assignments: usize, mtu: usize) -> Option<usize> {
+fn payload_fragment_count(
+    changes: usize,
+    assignments: usize,
+    updates: usize,
+    mtu: usize,
+) -> Option<usize> {
     if !(HEADER_BYTES + CHANGE_BYTES..=MAX_DATAGRAM_BYTES).contains(&mtu) {
         return None;
     }
     let changes_per_frame = (mtu - HEADER_BYTES) / CHANGE_BYTES;
     let assignments_per_frame = (mtu - HEADER_BYTES) / BODY_ASSIGNMENT_BYTES;
-    if changes > 0 && changes_per_frame == 0 || assignments > 0 && assignments_per_frame == 0 {
+    let updates_per_frame = (mtu - HEADER_BYTES) / BODY_UPDATE_BYTES;
+    if changes > 0 && changes_per_frame == 0
+        || assignments > 0 && assignments_per_frame == 0
+        || updates > 0 && updates_per_frame == 0
+    {
         return None;
     }
     let change_fragments = changes.div_ceil(changes_per_frame.max(1));
     let assignment_fragments = assignments.div_ceil(assignments_per_frame.max(1));
-    Some(change_fragments.saturating_add(assignment_fragments).max(1))
+    let update_fragments = updates.div_ceil(updates_per_frame.max(1));
+    Some(
+        change_fragments
+            .saturating_add(assignment_fragments)
+            .saturating_add(update_fragments)
+            .max(1),
+    )
 }
 
-fn payload_fits_protocol(changes: usize, assignments: usize, mtu: usize) -> bool {
-    payload_fragment_count(changes, assignments, mtu)
+fn payload_fits_protocol(changes: usize, assignments: usize, updates: usize, mtu: usize) -> bool {
+    payload_fragment_count(changes, assignments, updates, mtu)
         .is_some_and(|count| count <= usize::from(MAX_FRAGMENTS))
 }
 
@@ -391,6 +509,7 @@ const fn validate_command(command: ExplosionCommand) -> Result<(), CommandError>
 pub struct ClientReplica {
     world: World,
     bodies: BTreeMap<u128, RigidBodyDescriptor>,
+    body_states: BTreeMap<u128, RigidBodyState>,
     body_fingerprint: u128,
     active_body_voxels: usize,
     expected_sequence: u64,
@@ -410,6 +529,9 @@ pub enum ReplicationError {
     NonCanonicalBodyAssignments,
     BodyAssignmentWithoutRemoval(IVec3),
     DuplicateBodyId(u128),
+    NonCanonicalBodyUpdates,
+    UnknownBody(u128),
+    InvalidBodyState(u128),
     TooManyActiveBodies(usize),
     TooManyActiveBodyVoxels(usize),
     Body(BodyError),
@@ -441,6 +563,16 @@ impl fmt::Display for ReplicationError {
                 "body assignment at {position:?} has no matching static-world removal"
             ),
             Self::DuplicateBodyId(id) => write!(formatter, "duplicate rigid-body id {id:032x}"),
+            Self::NonCanonicalBodyUpdates => {
+                write!(formatter, "body updates are not canonically ordered")
+            }
+            Self::UnknownBody(id) => write!(formatter, "body update targets unknown id {id:032x}"),
+            Self::InvalidBodyState(id) => {
+                write!(
+                    formatter,
+                    "body update contains invalid state for {id:032x}"
+                )
+            }
             Self::TooManyActiveBodies(count) => {
                 write!(
                     formatter,
@@ -477,6 +609,7 @@ impl ClientReplica {
         Self {
             world,
             bodies: BTreeMap::new(),
+            body_states: BTreeMap::new(),
             body_fingerprint: 0,
             active_body_voxels: 0,
             expected_sequence: 1,
@@ -523,9 +656,37 @@ impl ClientReplica {
                 active_body_voxels,
             ));
         }
+        let mut spawned_states = BTreeMap::new();
         let mut final_body_fingerprint = self.body_fingerprint;
         for body in &bodies {
-            final_body_fingerprint ^= body_fingerprint_token(body.id);
+            let state = RigidBodyState::at_spawn(body);
+            final_body_fingerprint ^= body_fingerprint_token(body.id, state);
+            spawned_states.insert(body.id, state);
+        }
+        for pair in packet.body_updates.windows(2) {
+            if pair[0].body_id >= pair[1].body_id {
+                return Err(ReplicationError::NonCanonicalBodyUpdates);
+            }
+        }
+        for update in &packet.body_updates {
+            if !valid_rigid_body_state(update.state) {
+                return Err(ReplicationError::InvalidBodyState(update.body_id));
+            }
+            let previous = spawned_states
+                .get(&update.body_id)
+                .or_else(|| self.body_states.get(&update.body_id))
+                .copied()
+                .ok_or(ReplicationError::UnknownBody(update.body_id))?;
+            if update.state.translation_um.x != previous.translation_um.x
+                || update.state.translation_um.z != previous.translation_um.z
+            {
+                return Err(ReplicationError::InvalidBodyState(update.body_id));
+            }
+            final_body_fingerprint ^= body_fingerprint_token(update.body_id, previous)
+                ^ body_fingerprint_token(update.body_id, update.state);
+            if let Some(state) = spawned_states.get_mut(&update.body_id) {
+                *state = update.state;
+            }
         }
         if final_body_fingerprint != packet.final_body_fingerprint {
             return Err(ReplicationError::BodyFingerprintMismatch {
@@ -537,6 +698,10 @@ impl ClientReplica {
             .apply_checked(&packet.changes, packet.final_fingerprint)?;
         for body in bodies {
             self.bodies.insert(body.id, body);
+        }
+        self.body_states.extend(spawned_states);
+        for update in &packet.body_updates {
+            self.body_states.insert(update.body_id, update.state);
         }
         self.body_fingerprint = final_body_fingerprint;
         self.active_body_voxels = active_body_voxels;
@@ -551,14 +716,27 @@ impl ClientReplica {
         &mut self,
         world: World,
         bodies: BTreeMap<u128, RigidBodyDescriptor>,
+        body_states: &BTreeMap<u128, RigidBodyState>,
         next_sequence: u64,
     ) {
         self.active_body_voxels = bodies.values().map(|body| body.voxels.len()).sum();
-        self.body_fingerprint = bodies.keys().fold(0, |fingerprint, &id| {
-            fingerprint ^ body_fingerprint_token(id)
+        let body_states = bodies
+            .iter()
+            .map(|(&id, body)| {
+                let state = body_states
+                    .get(&id)
+                    .copied()
+                    .filter(|state| valid_rigid_body_state(*state))
+                    .unwrap_or_else(|| RigidBodyState::at_spawn(body));
+                (id, state)
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.body_fingerprint = bodies.iter().fold(0, |fingerprint, (&id, _body)| {
+            fingerprint ^ body_fingerprint_token(id, body_states[&id])
         });
         self.world = world;
         self.bodies = bodies;
+        self.body_states = body_states;
         self.expected_sequence = next_sequence;
     }
 
@@ -575,6 +753,11 @@ impl ClientReplica {
     #[must_use]
     pub const fn body_fingerprint(&self) -> u128 {
         self.body_fingerprint
+    }
+
+    #[must_use]
+    pub const fn body_states(&self) -> &BTreeMap<u128, RigidBodyState> {
+        &self.body_states
     }
 }
 
@@ -651,6 +834,7 @@ pub enum CodecError {
     InvalidFragmentLayout,
     InvalidLength { expected: usize, actual: usize },
     InvalidMaterial(InvalidMaterial),
+    InvalidBodyState,
     InconsistentFragment,
     TooManyPendingPackets,
     TooManyPendingBytes,
@@ -684,7 +868,11 @@ pub fn encode_frames(packet: &DeltaPacket, mtu: usize) -> Result<Vec<Vec<u8>>, C
     }
     let changes_per_frame = (mtu - HEADER_BYTES) / CHANGE_BYTES;
     let assignments_per_frame = (mtu - HEADER_BYTES) / BODY_ASSIGNMENT_BYTES;
+    let updates_per_frame = (mtu - HEADER_BYTES) / BODY_UPDATE_BYTES;
     if !packet.body_assignments.is_empty() && assignments_per_frame == 0 {
+        return Err(CodecError::MtuTooSmall(mtu));
+    }
+    if !packet.body_updates.is_empty() && updates_per_frame == 0 {
         return Err(CodecError::MtuTooSmall(mtu));
     }
     let change_fragments = packet.changes.len().div_ceil(changes_per_frame.max(1));
@@ -692,9 +880,14 @@ pub fn encode_frames(packet: &DeltaPacket, mtu: usize) -> Result<Vec<Vec<u8>>, C
         .body_assignments
         .len()
         .div_ceil(assignments_per_frame.max(1));
-    let fragment_count =
-        payload_fragment_count(packet.changes.len(), packet.body_assignments.len(), mtu)
-            .ok_or(CodecError::MtuTooSmall(mtu))?;
+    let update_fragments = packet.body_updates.len().div_ceil(updates_per_frame.max(1));
+    let fragment_count = payload_fragment_count(
+        packet.changes.len(),
+        packet.body_assignments.len(),
+        packet.body_updates.len(),
+        mtu,
+    )
+    .ok_or(CodecError::MtuTooSmall(mtu))?;
     if fragment_count > usize::from(MAX_FRAGMENTS) || fragment_count > usize::from(u16::MAX) {
         return Err(CodecError::TooManyFragments(fragment_count));
     }
@@ -703,19 +896,30 @@ pub fn encode_frames(packet: &DeltaPacket, mtu: usize) -> Result<Vec<Vec<u8>>, C
     let mut frames = Vec::with_capacity(usize::from(fragment_count));
     for fragment_index in 0..fragment_count {
         let index = usize::from(fragment_index);
-        let (changes, assignments) = if index < change_fragments {
+        let (changes, assignments, updates) = if index < change_fragments {
             let start = index * changes_per_frame;
             let end = (start + changes_per_frame).min(packet.changes.len());
-            (&packet.changes[start..end], &[][..])
-        } else {
+            (&packet.changes[start..end], &[][..], &[][..])
+        } else if index < change_fragments + assignment_fragments {
             let assignment_index = index.saturating_sub(change_fragments);
             let start = assignment_index * assignments_per_frame.max(1);
             let end = (start + assignments_per_frame.max(1)).min(packet.body_assignments.len());
-            (&[][..], &packet.body_assignments[start..end])
+            (&[][..], &packet.body_assignments[start..end], &[][..])
+        } else {
+            let update_index = index.saturating_sub(change_fragments + assignment_fragments);
+            let start = update_index * updates_per_frame.max(1);
+            let end = (start + updates_per_frame.max(1)).min(packet.body_updates.len());
+            (&[][..], &[][..], &packet.body_updates[start..end])
         };
-        debug_assert!(index < change_fragments + assignment_fragments || fragment_count == 1);
+        debug_assert!(
+            index < change_fragments + assignment_fragments + update_fragments
+                || fragment_count == 1
+        );
         let mut bytes = Vec::with_capacity(
-            HEADER_BYTES + changes.len() * CHANGE_BYTES + assignments.len() * BODY_ASSIGNMENT_BYTES,
+            HEADER_BYTES
+                + changes.len() * CHANGE_BYTES
+                + assignments.len() * BODY_ASSIGNMENT_BYTES
+                + updates.len() * BODY_UPDATE_BYTES,
         );
         bytes.extend_from_slice(&MAGIC);
         bytes.push(PROTOCOL_VERSION);
@@ -734,27 +938,41 @@ pub fn encode_frames(packet: &DeltaPacket, mtu: usize) -> Result<Vec<Vec<u8>>, C
         let assignment_count = u16::try_from(assignments.len())
             .map_err(|_| CodecError::TooManyFragments(usize::from(fragment_count)))?;
         push_u16(&mut bytes, assignment_count);
+        let update_count = u16::try_from(updates.len())
+            .map_err(|_| CodecError::TooManyFragments(usize::from(fragment_count)))?;
+        push_u16(&mut bytes, update_count);
         for change in changes {
-            push_i32(&mut bytes, change.position.x);
-            push_i32(&mut bytes, change.position.y);
-            push_i32(&mut bytes, change.position.z);
-            bytes.push(change.before.material as u8);
-            bytes.push(change.before.integrity);
-            bytes.push(change.after.material as u8);
-            bytes.push(change.after.integrity);
+            encode_change(&mut bytes, *change);
         }
         for assignment in assignments {
-            push_u128(&mut bytes, assignment.body_id);
-            push_i32(&mut bytes, assignment.position.x);
-            push_i32(&mut bytes, assignment.position.y);
-            push_i32(&mut bytes, assignment.position.z);
-            bytes.push(assignment.voxel.material as u8);
-            bytes.push(assignment.voxel.integrity);
+            encode_body_assignment(&mut bytes, *assignment);
+        }
+        for update in updates {
+            encode_body_update(&mut bytes, *update);
         }
         debug_assert!(bytes.len() <= mtu);
         frames.push(bytes);
     }
     Ok(frames)
+}
+
+fn encode_change(bytes: &mut Vec<u8>, change: VoxelChange) {
+    push_i32(bytes, change.position.x);
+    push_i32(bytes, change.position.y);
+    push_i32(bytes, change.position.z);
+    bytes.push(change.before.material as u8);
+    bytes.push(change.before.integrity);
+    bytes.push(change.after.material as u8);
+    bytes.push(change.after.integrity);
+}
+
+fn encode_body_assignment(bytes: &mut Vec<u8>, assignment: BodyVoxelAssignment) {
+    push_u128(bytes, assignment.body_id);
+    push_i32(bytes, assignment.position.x);
+    push_i32(bytes, assignment.position.y);
+    push_i32(bytes, assignment.position.z);
+    bytes.push(assignment.voxel.material as u8);
+    bytes.push(assignment.voxel.integrity);
 }
 
 /// Validates and decodes one untrusted application frame.
@@ -791,6 +1009,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DeltaFrame, CodecError> {
     let fragment_count = cursor.take_u16()?;
     let change_count = usize::from(cursor.take_u16()?);
     let assignment_count = usize::from(cursor.take_u16()?);
+    let update_count = usize::from(cursor.take_u16()?);
     if fragment_count == 0 || fragment_count > MAX_FRAGMENTS || fragment_index >= fragment_count {
         return Err(CodecError::InvalidFragmentLayout);
     }
@@ -801,6 +1020,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DeltaFrame, CodecError> {
                 .ok_or(CodecError::Truncated)?,
         )
         .and_then(|length| length.checked_add(assignment_count.checked_mul(BODY_ASSIGNMENT_BYTES)?))
+        .and_then(|length| length.checked_add(update_count.checked_mul(BODY_UPDATE_BYTES)?))
         .ok_or(CodecError::Truncated)?;
     if bytes.len() != expected_length {
         return Err(CodecError::InvalidLength {
@@ -831,6 +1051,10 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DeltaFrame, CodecError> {
             voxel,
         });
     }
+    let mut body_updates = Vec::with_capacity(update_count);
+    for _ in 0..update_count {
+        body_updates.push(decode_body_update(&mut cursor)?);
+    }
     Ok(DeltaFrame {
         sequence,
         tick,
@@ -842,7 +1066,48 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DeltaFrame, CodecError> {
         fragment_count,
         changes,
         body_assignments,
+        body_updates,
     })
+}
+
+fn encode_body_update(bytes: &mut Vec<u8>, update: BodyStateUpdate) {
+    push_u128(bytes, update.body_id);
+    push_i64(bytes, update.state.translation_um.x);
+    push_i64(bytes, update.state.translation_um.y);
+    push_i64(bytes, update.state.translation_um.z);
+    push_i64(bytes, update.state.linear_velocity_um_per_second.x);
+    push_i64(bytes, update.state.linear_velocity_um_per_second.y);
+    push_i64(bytes, update.state.linear_velocity_um_per_second.z);
+    bytes.extend_from_slice(&update.state.integration_remainder);
+    push_u16(bytes, update.state.sleep_ticks);
+    bytes.push(u8::from(update.state.sleeping));
+}
+
+fn decode_body_update(cursor: &mut Cursor<'_>) -> Result<BodyStateUpdate, CodecError> {
+    let body_id = cursor.take_u128()?;
+    let state = RigidBodyState {
+        translation_um: FixedMicrometers3 {
+            x: cursor.take_i64()?,
+            y: cursor.take_i64()?,
+            z: cursor.take_i64()?,
+        },
+        linear_velocity_um_per_second: FixedMicrometers3 {
+            x: cursor.take_i64()?,
+            y: cursor.take_i64()?,
+            z: cursor.take_i64()?,
+        },
+        integration_remainder: cursor.take_array::<3>()?,
+        sleep_ticks: cursor.take_u16()?,
+        sleeping: match cursor.take_u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(CodecError::InvalidBodyState),
+        },
+    };
+    if !valid_rigid_body_state(state) {
+        return Err(CodecError::InvalidBodyState);
+    }
+    Ok(BodyStateUpdate { body_id, state })
 }
 
 #[derive(Default)]
@@ -865,6 +1130,7 @@ struct PendingPacket {
 struct FrameFragment {
     changes: Vec<VoxelChange>,
     body_assignments: Vec<BodyVoxelAssignment>,
+    body_updates: Vec<BodyStateUpdate>,
 }
 
 impl FrameAssembler {
@@ -905,6 +1171,7 @@ impl FrameAssembler {
         let fragment = FrameFragment {
             changes: frame.changes,
             body_assignments: frame.body_assignments,
+            body_updates: frame.body_updates,
         };
         if let Some(existing) = slot {
             if existing != &fragment {
@@ -919,6 +1186,12 @@ impl FrameAssembler {
                         .body_assignments
                         .len()
                         .saturating_mul(BODY_ASSIGNMENT_BYTES),
+                )
+                .saturating_add(
+                    fragment
+                        .body_updates
+                        .len()
+                        .saturating_mul(BODY_UPDATE_BYTES),
                 );
             if self.pending_bytes.saturating_add(retained_bytes) > MAX_PENDING_BYTES {
                 self.remove_pending(frame.sequence);
@@ -939,9 +1212,11 @@ impl FrameAssembler {
         self.pending_bytes = self.pending_bytes.saturating_sub(complete.retained_bytes);
         let mut changes = Vec::new();
         let mut body_assignments = Vec::new();
+        let mut body_updates = Vec::new();
         for fragment in complete.fragments.into_iter().flatten() {
             changes.extend(fragment.changes);
             body_assignments.extend(fragment.body_assignments);
+            body_updates.extend(fragment.body_updates);
         }
         Ok(Some(DeltaPacket {
             sequence: frame.sequence,
@@ -952,6 +1227,7 @@ impl FrameAssembler {
             final_body_fingerprint: complete.final_body_fingerprint,
             changes,
             body_assignments,
+            body_updates,
         }))
     }
 
@@ -1011,6 +1287,10 @@ impl<'a> Cursor<'a> {
     fn take_i32(&mut self) -> Result<i32, CodecError> {
         Ok(i32::from_le_bytes(self.take_array()?))
     }
+
+    fn take_i64(&mut self) -> Result<i64, CodecError> {
+        Ok(i64::from_le_bytes(self.take_array()?))
+    }
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
@@ -1026,5 +1306,9 @@ fn push_u128(bytes: &mut Vec<u8>, value: u128) {
 }
 
 fn push_i32(bytes: &mut Vec<u8>, value: i32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i64(bytes: &mut Vec<u8>, value: i64) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }

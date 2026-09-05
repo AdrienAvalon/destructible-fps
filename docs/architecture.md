@@ -23,11 +23,11 @@ The dedicated server owns commands, damage, fracture, structural separation, rig
 and persistent world state. Clients predict only reversible player and weapon motion. A client never
 announces that a wall was destroyed; it requests an action and receives the resulting transaction.
 
-Delta protocol v2 uses monotonically increasing sequences, independent 128-bit pre/post
+Delta protocol v3 uses monotonically increasing sequences, independent 128-bit pre/post
 fingerprints for the static world and active body set, bounded fragments, and before-state
-validation. Detached body membership travels in canonical assignment frames and is reconstructed
-and validated before any static-world write. Missing data stops application and requests a
-snapshot. Corrupt or stale data cannot partially mutate a replica.
+validation. Detached body membership and integer dynamic state travel in separate canonical frames;
+both are reconstructed and validated before any static-world write. Missing data stops application
+and requests a snapshot. Corrupt or stale data cannot partially mutate a replica.
 
 ## Planned engine layers
 
@@ -71,16 +71,19 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
   canonical detached-island descriptors (delivered as an isolated server-side primitive);
 - revalidated rigid-body descriptors with fixed integer centre of mass, diagonal inertia, mass,
   bounds, canonical geometry, and stable identity (delivered);
-- atomic static-world detachment and protocol-v2 body replication with independent fingerprints,
+- atomic static-world detachment and protocol-v3 body replication with independent fingerprints,
   hostile-input limits, and replica reconstruction (delivered);
 - local-space body meshes produced by the bounded background worker, fixed-capacity GPU transform
   instances, body frustum culling, and world/shadow rendering (delivered);
+- deterministic 60 Hz micrometre state, gravity, swept vertical collision against static voxels,
+  sleeping, bounded sweep-and-prune candidates, protocol state replication, and batched GPU
+  transform updates (delivered for axis-aligned bodies);
 - persistent foundation and material constraint graph integrated into authoritative transactions;
 - compression, tension, shear, and connection limits by material;
 - local stress propagation after damage;
 - unsupported island extraction (delivered for topology-changing voxel edits);
-- rigid-body mass, centre of mass, and inertia derived from geometry;
-- sleep, clustering, and distance-based solver budgets.
+- rigid-body mass, centre of mass, and inertia derived from geometry (delivered);
+- body-body contact response, rotation, clustering, and distance-based solver budgets.
 
 Gate: destroying a load-bearing member produces a repeatable progressive collapse and never stalls a
 60 Hz server tick in the agreed worst-case scene.

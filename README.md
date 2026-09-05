@@ -19,8 +19,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,
   server-owned body descriptors in the same transaction;
-- protocol-v2 body assignments with independent pre/post body fingerprints and full client-side
-  connectivity, material, mass, and identity revalidation;
+- protocol-v3 body assignments and fixed-state updates with independent pre/post body fingerprints
+  and full client-side connectivity, material, mass, identity, and state revalidation;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
@@ -28,6 +28,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
   background remeshing limited to chunks whose visible boundary changed;
 - bounded off-thread body meshing in local space, with fixed-capacity GPU instance transforms,
   independent body frustum culling, and participation in both world and shadow passes;
+- 60 Hz server-authoritative body gravity in deterministic micrometre units, swept downward static
+  collision, sleeping, bounded sweep-and-prune broad phase, and replicated GPU transforms;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map, procedural material
@@ -36,7 +38,7 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
-game. Rigid-body motion/collision, progressive structural stress, remote sessions, audio,
+game. Body-body response, angular motion, progressive structural stress, remote sessions, audio,
 asset-quality PBR, temporal anti-aliasing, and large-world residency streaming remain explicit
 later gates.
 
@@ -44,8 +46,9 @@ The first server-side structural pipeline is now integrated. A deterministic bou
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
 canonical detached-island proofs. The server revalidates each proof, derives integer-millimetre mass
 properties, removes its voxels from the static world, and replicates the new body atomically. The
-body is rendered from its preserved material voxels but remains at its spawn transform until the
-fixed-step solver is added.
+body is rendered from its preserved material voxels, falls under the 60 Hz authority, stops on
+static voxel surfaces, and sleeps after a deterministic rest interval. This first solver is
+axis-aligned; rotation and body-body contact response are not claimed yet.
 
 ## Screenshots
 
@@ -61,6 +64,7 @@ fixed-step solver is added.
 cargo test --all-targets
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
 cargo run --release --bin playable-demo
 ```
 

@@ -72,11 +72,14 @@ streaming, with no synchronous world meshing on the presentation thread.
   isolated primitive);
 - bounded promotion into revalidated authoritative body descriptors with integer-millimetre centre
   of mass and integer inertia (delivered);
-- atomic explosion/topology/body transactions and protocol-v2 body membership replication with
+- atomic explosion/topology/body transactions and protocol-v3 body membership replication with
   independent body fingerprints, bounded reassembly memory, and hostile-input rejection
   (delivered);
 - preserved-material body rendering through bounded off-thread local-space meshing and a
   fixed-capacity GPU transform arena (delivered);
+- 60 Hz micrometre gravity, swept vertical static collision, deterministic sleeping, bounded
+  sweep-and-prune candidates, protocol-v3 state updates, and batched GPU transforms (delivered for
+  axis-aligned bodies; contact response remains);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
@@ -179,8 +182,10 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add fixed-step gravity, body state replication, sleeping, and broad-phase collisions;
-2. add collision response against static voxels and deterministic settling/clustering;
+1. add deterministic body-body contact response, stacking, wake propagation, and pair-overflow
+   policy on top of the delivered broad phase;
+2. add angular state, inertia-driven impulses, conservative rotated bounds, and replicated
+   orientation;
 3. replace the spawn-position body identity with a separate monotonic entity identity before
    allowing structures to be rebuilt and detached repeatedly at the same coordinates.
 

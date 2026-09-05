@@ -21,12 +21,14 @@ pub use destruction::{DestructionReport, Explosion};
 pub use generator::demo_world;
 pub use material::{Material, MaterialProperties, Voxel};
 pub use physics::{
-    BodyError, BodyLimits, BodyVoxel, FixedMillimeters3, InertiaDiagonalKgMm2, RigidBodyDescriptor,
+    BodyError, BodyLimits, BodyStepResult, BodyVoxel, FixedMicrometers3, FixedMillimeters3,
+    InertiaDiagonalKgMm2, MAX_BROAD_PHASE_PAIRS, MICROMETERS_PER_VOXEL, RigidBodyDescriptor,
+    RigidBodyState, SERVER_PHYSICS_HZ, broad_phase_pairs, step_rigid_body, valid_rigid_body_state,
 };
 pub use replication::{
-    AuthoritativeServer, BodyVoxelAssignment, ClientReplica, ClientStatus, CodecError,
-    CommandError, DeltaFrame, DeltaPacket, ExplosionCommand, FrameAssembler, ReplicationError,
-    decode_frame, encode_frames,
+    AuthoritativeServer, BodyStateUpdate, BodyVoxelAssignment, ClientReplica, ClientStatus,
+    CodecError, CommandError, DeltaFrame, DeltaPacket, ExplosionCommand, FrameAssembler,
+    PhysicsTickReport, ReplicationError, decode_frame, encode_frames,
 };
 pub use session::{DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
 pub use structural::{

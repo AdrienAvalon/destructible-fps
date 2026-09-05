@@ -108,6 +108,7 @@ struct Game {
     stats_since: Instant,
     frames_since_stats: u32,
     accumulator: f32,
+    fixed_step_index: u64,
     last_action: String,
     showcase: bool,
     mesh_scheduler: MeshScheduler,
@@ -181,6 +182,7 @@ impl Game {
             stats_since: now,
             frames_since_stats: 0,
             accumulator: 0.0,
+            fixed_step_index: 0,
             last_action,
             showcase,
             mesh_scheduler: MeshScheduler::new(),
@@ -358,6 +360,8 @@ impl Game {
                 if let Err(error) = self.renderer.upload_body_meshes(meshes) {
                     self.last_action = format!("upload de corps refuse: {error}");
                 } else {
+                    self.renderer
+                        .update_body_transforms(self.session.body_states());
                     self.last_action =
                         format!("maillage asynchrone: {count} corps en {elapsed_ms:.2} ms");
                 }
@@ -411,15 +415,27 @@ impl Game {
             .record_ms(frame_interval.as_secs_f64() * 1_000.0);
         self.accumulator += frame_interval.as_secs_f32().min(0.1);
         self.previous_frame = now;
-        if !self.showcase {
-            let input = self.movement_input();
-            let mut steps = 0;
-            while self.accumulator >= FIXED_STEP_SECONDS && steps < 12 {
+        let input = self.movement_input();
+        let mut steps = 0;
+        while self.accumulator >= FIXED_STEP_SECONDS && steps < 12 {
+            if !self.showcase {
                 self.player
                     .step(self.session.world(), input, FIXED_STEP_SECONDS);
-                self.accumulator -= FIXED_STEP_SECONDS;
-                steps += 1;
             }
+            self.fixed_step_index = self.fixed_step_index.wrapping_add(1);
+            if self.fixed_step_index.is_multiple_of(2) {
+                match self.session.advance_physics() {
+                    Ok(report) if report.updated_bodies > 0 => self
+                        .renderer
+                        .update_body_transforms(self.session.body_states()),
+                    Ok(_report) => {}
+                    Err(error) => {
+                        self.last_action = format!("erreur physique autoritaire: {error}");
+                    }
+                }
+            }
+            self.accumulator -= FIXED_STEP_SECONDS;
+            steps += 1;
         }
         let elapsed_seconds = now.duration_since(self.started).as_secs_f32();
         let (camera_position, view_direction) = if self.showcase {
@@ -491,6 +507,16 @@ impl Game {
             render.world_draw_calls,
             render.shadow_draw_calls
         );
+        let sleeping_bodies = self
+            .session
+            .body_states()
+            .values()
+            .filter(|state| state.sleeping)
+            .count();
+        println!(
+            "Physique: {sleeping_bodies}/{} corps endormis",
+            self.session.body_states().len()
+        );
         let failure = if self.mesh_phase != MeshPhase::Live {
             Some(format!(
                 "streaming initial incomplet: {} chunks en attente, worker actif={}",
@@ -502,6 +528,11 @@ impl Game {
                 "rendu de corps incomplet: {} corps GPU pour {} corps autoritaires",
                 render.bodies,
                 self.session.bodies().len()
+            ))
+        } else if self.showcase && sleeping_bodies != self.session.body_states().len() {
+            Some(format!(
+                "simulation physique incomplete: {sleeping_bodies}/{} corps endormis",
+                self.session.body_states().len()
             ))
         } else {
             println!("smoke test graphique termine proprement");

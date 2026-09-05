@@ -5,12 +5,13 @@
 use crate::{
     CHUNK_EDGE, IVec3,
     mesh::{CpuBodyMesh, CpuMesh, Vertex},
+    physics::{MICROMETERS_PER_VOXEL, RigidBodyState},
     replication::MAX_ACTIVE_BODIES,
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, mpsc},
 };
 use wgpu::util::DeviceExt;
@@ -44,6 +45,7 @@ struct GpuMesh {
 struct GpuBody {
     mesh: GpuMesh,
     instance_slot: u32,
+    extent: Vec3,
     world_minimum: Vec3,
     world_maximum: Vec3,
 }
@@ -251,6 +253,7 @@ pub struct Renderer {
     crosshair_pipeline: wgpu::RenderPipeline,
     globals_buffer: wgpu::Buffer,
     body_instance_buffer: wgpu::Buffer,
+    body_instances: Vec<BodyInstance>,
     globals_bind_group: wgpu::BindGroup,
     shadow_sampling_bind_group: wgpu::BindGroup,
     gpu_profiler: Option<GpuProfiler>,
@@ -632,6 +635,7 @@ impl Renderer {
             crosshair_pipeline,
             globals_buffer,
             body_instance_buffer,
+            body_instances: Vec::new(),
             globals_bind_group,
             shadow_sampling_bind_group,
             gpu_profiler,
@@ -707,32 +711,77 @@ impl Renderer {
                 body.origin.y as f32,
                 body.origin.z as f32,
             );
-            let maximum = Vec3::new(
-                body.maximum.x.saturating_add(1) as f32,
-                body.maximum.y.saturating_add(1) as f32,
-                body.maximum.z.saturating_add(1) as f32,
+            let extent = Vec3::new(
+                body.maximum
+                    .x
+                    .saturating_sub(body.origin.x)
+                    .saturating_add(1) as f32,
+                body.maximum
+                    .y
+                    .saturating_sub(body.origin.y)
+                    .saturating_add(1) as f32,
+                body.maximum
+                    .z
+                    .saturating_sub(body.origin.z)
+                    .saturating_add(1) as f32,
             );
             let instance = BodyInstance {
                 model: Mat4::from_translation(origin).to_cols_array_2d(),
             };
-            let offset = u64::from(instance_slot) * BODY_INSTANCE_BYTES;
-            self.queue.write_buffer(
-                &self.body_instance_buffer,
-                offset,
-                bytemuck::bytes_of(&instance),
-            );
+            let instance_index = usize::try_from(instance_slot).unwrap_or(usize::MAX);
+            if self.body_instances.len() <= instance_index {
+                self.body_instances
+                    .resize(instance_index.saturating_add(1), instance);
+            }
+            self.body_instances[instance_index] = instance;
             self.bodies.insert(
                 body.body_id,
                 GpuBody {
                     mesh: self.create_gpu_mesh(&body.mesh, "rigid body"),
                     instance_slot,
+                    extent,
                     world_minimum: origin,
-                    world_maximum: maximum,
+                    world_maximum: origin + extent,
                 },
             );
         }
+        self.write_body_instances();
         self.refresh_stats();
         Ok(())
+    }
+
+    pub fn update_body_transforms(&mut self, states: &BTreeMap<u128, RigidBodyState>) {
+        let scale = MICROMETERS_PER_VOXEL as f32;
+        for (&body_id, state) in states {
+            let Some(body) = self.bodies.get_mut(&body_id) else {
+                continue;
+            };
+            let translation = Vec3::new(
+                state.translation_um.x as f32 / scale,
+                state.translation_um.y as f32 / scale,
+                state.translation_um.z as f32 / scale,
+            );
+            let instance = BodyInstance {
+                model: Mat4::from_translation(translation).to_cols_array_2d(),
+            };
+            let index = usize::try_from(body.instance_slot).unwrap_or(usize::MAX);
+            if let Some(slot) = self.body_instances.get_mut(index) {
+                *slot = instance;
+            }
+            body.world_minimum = translation;
+            body.world_maximum = translation + body.extent;
+        }
+        self.write_body_instances();
+    }
+
+    fn write_body_instances(&self) {
+        if !self.body_instances.is_empty() {
+            self.queue.write_buffer(
+                &self.body_instance_buffer,
+                0,
+                bytemuck::cast_slice(&self.body_instances),
+            );
+        }
     }
 
     fn create_gpu_mesh(&self, mesh: &CpuMesh, label: &str) -> GpuMesh {

@@ -7,6 +7,7 @@ pub mod character;
 pub mod deployment_policy;
 pub mod destruction;
 pub mod generator;
+pub mod host_attestation;
 pub mod material;
 pub mod mesh;
 pub mod mesh_scheduler;
@@ -42,6 +43,10 @@ pub use deployment_policy::{
 };
 pub use destruction::{DestructionReport, Explosion};
 pub use generator::demo_world;
+pub use host_attestation::{
+    LanHostAttestation, LanHostAttestationError, MAX_HOST_INTERFACE_RECORDS,
+    attest_lan_policy_on_current_host,
+};
 pub use material::{Material, MaterialProperties, Voxel};
 pub use network::{
     AuthorityCore, DedicatedServer, LEGACY_UDP_APPLICATION_DATAGRAM_BYTES,

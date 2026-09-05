@@ -332,21 +332,39 @@ fn valid_identifier(value: &str, maximum: usize, allow_owner_punctuation: bool) 
 }
 
 fn valid_interface_name(interface: &str) -> bool {
-    !matches!(interface, "any" | "all" | "default" | "*")
+    !["any", "all", "default", "*"]
+        .iter()
+        .any(|wildcard| interface.eq_ignore_ascii_case(wildcard))
         && !interface.is_empty()
         && interface.len() <= MAX_INTERFACE_NAME_BYTES
-        && interface.is_ascii()
-        && interface
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && interface
-            .as_bytes()
-            .last()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && interface
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        && interface.trim() == interface
+        && !interface.chars().any(char::is_control)
+}
+
+pub(crate) fn valid_private_interface_network(address: IpAddr, prefix: u8) -> bool {
+    match address {
+        IpAddr::V4(address) if prefix <= 32 => {
+            let raw = u32::from(address);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            is_private_ipv4(Ipv4Addr::from(raw & mask))
+                && is_private_ipv4(Ipv4Addr::from(raw | !mask))
+        }
+        IpAddr::V6(address) if prefix <= 128 && address.to_ipv4_mapped().is_none() => {
+            let raw = u128::from(address);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            is_private_ipv6(Ipv6Addr::from(raw & mask))
+                && is_private_ipv6(Ipv6Addr::from(raw | !mask))
+        }
+        _ => false,
+    }
 }
 
 fn valid_certificate_dns_name(name: &str) -> bool {
@@ -623,13 +641,18 @@ mod tests {
 
     #[test]
     fn ambiguous_identity_and_interface_values_fail_closed() {
-        for interface in ["", "any", ".eth0", "eth0.", "eth0 eth1", "eth0/../wan"] {
+        for interface in ["", "any", "ANY", " eth0", "eth0 ", "eth0\nwan"] {
             let mut document = valid_policy();
             document["interface"] = serde_json::json!(interface);
             assert!(matches!(
                 parse(&document),
                 Err(LanDeploymentPolicyError::InvalidInterface)
             ));
+        }
+        for interface in ["Ethernet 2", "Réseau privé", ".vlan.42"] {
+            let mut document = valid_policy();
+            document["interface"] = serde_json::json!(interface);
+            assert!(parse(&document).is_ok());
         }
         for name in ["game", "*.home.arpa", "Game.home.arpa", "192.168.42.20"] {
             let mut document = valid_policy();

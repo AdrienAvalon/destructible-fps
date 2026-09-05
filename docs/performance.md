@@ -1395,3 +1395,38 @@ one 60 Hz interval. The graphical CPU cadence crossed that interval while GPU wo
 0.4 ms maximum; this is recorded as presentation scheduling rather than attributed to the offline
 parser. Graphify reported 2,069 nodes, 5,818 post-build edges, zero unverified code nodes, a fully
 fresh index, and no directed path from `LanDeploymentPolicy` to `SecureDedicatedServer`.
+
+## 2026-09-05 — read-only LAN host assignment attestation
+
+Source state: parent `324fee7` plus the host-inventory increment. The optional `--verify-host` path
+uses one synchronous `if-addrs` snapshot outside every simulation, render and packet loop. It accepts
+at most 256 records and proves an exact interface name, private bind address, canonical netmask and
+prefix, operational status, non-zero platform index, and absence of the address under another name.
+It neither creates a socket nor provides a server capability. Interface names are now bounded UTF-8
+data rather than shell tokens, permitting Windows friendly names with interior spaces while still
+rejecting controls, edge whitespace and wildcard aliases.
+
+Five pure host-attestation tests cover the positive assignment plus missing, down, unindexed,
+duplicated, inconsistent-netmask, unsafe-prefix and oversized-inventory cases. Four checker process
+tests include a real read-only enumeration on this machine; the live private assignment path was
+explicitly exercised and its output contained neither interface name nor address. `if-addrs` 0.14.0
+is exactly pinned and adds only `libc` on this Linux build; native Windows and macOS jobs remain
+required before distribution promotion.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 168 passed debug; 168 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 62 passed debug; 62 passed release |
+| Destruction p99, 500 events | 0.386 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.632 ms |
+| Physics p99, 1,024 bodies | 1.207 ms |
+| Snapshot encode + decode + install p99 | 9.770 ms |
+| CPU frame-work p99, RTX 4050 smoke | 33.397 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.255 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+The graphical CPU cadence crossed two presentation intervals at p99 while GPU work remained only
+0.264 ms at maximum, so the observation is not attributed to the checker-only dependency. Graphify
+reported 2,121 nodes, 5,914 post-build edges, zero unverified code nodes, a fully fresh index, and no
+directed path from `attest_lan_policy_on_current_host` to `SecureDedicatedServer`.

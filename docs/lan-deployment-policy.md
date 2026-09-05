@@ -17,10 +17,13 @@ address.
 
 ```bash
 cargo run --release --bin lan-policy-check -- /absolute/path/to/lan-policy.json
+cargo run --release --bin lan-policy-check -- --verify-host /absolute/path/to/lan-policy.json
 ```
 
-The checker prints only the schema version, source-range count, and remaining lifetime. It does not
-echo topology, identities, or owner fields.
+The first command validates only the document. The second additionally takes one read-only host
+interface snapshot and proves the exact assignment. The checker prints only the schema version,
+source-range count, remaining lifetime, and whether host verification ran. It does not echo topology,
+identities, or owner fields.
 
 ## Fail-closed schema
 
@@ -28,7 +31,7 @@ echo topology, identities, or owner fields.
 |---|---|
 | `schema_version` | Exactly `1`; unknown fields are rejected at every object level. |
 | `deployment_id` | Non-empty bounded ASCII identifier. |
-| `interface` | One bounded explicit name; wildcard aliases and whitespace are rejected. |
+| `interface` | One bounded exact UTF-8 name; control characters, edge whitespace, and wildcard aliases are rejected. Interior spaces are permitted for Windows friendly names. |
 | `bind_address` | One RFC1918 IPv4 or IPv6 ULA address; wildcard, loopback, public, mapped and unspecified forms are rejected. |
 | `udp_port` | One non-zero port. |
 | `certificate_dns_name` | Lowercase multi-label DNS name without wildcard or IP literal. |
@@ -54,3 +57,13 @@ textual assertions:
 - telemetry and automatic shutdown/rollback remain observable for the full window.
 
 Only a separate, later reviewed capability may combine those proofs with a non-loopback binder.
+
+## Host inventory dependency
+
+Host verification uses the pinned `if-addrs` 0.14.0 crate through its safe public API. Its sole
+runtime role is a synchronous, point-in-time enumeration requested explicitly by the checker; it is
+never called from the simulation, render or packet path. The crate is about 64 KiB of source,
+MIT/BSD-3-Clause licensed, supports POSIX and Windows, and brings only the platform FFI layer
+(`libc` or `windows-sys`). This replaces shelling out to `ip`, `ifconfig` or PowerShell and removes
+command resolution, localized output and shell-injection concerns. The dependency remains exactly
+pinned and must be tested on native Windows and macOS runners before distribution promotion.

@@ -20,7 +20,7 @@ non-loopback variant. Configuration fields or operator assertions alone do not c
 | Loss and reordering | Distinct delay, duplication, and loss traces with bounded repair | Four-client real-process trace replay | Pass for deterministic loopback; add WAN profiles |
 | Trust outage | Discovery, static trust, or renewal reaches its monotonic deadline | Real-process TLS outage and static OIDC expiry tests pass; discovery retains failed-refresh controller tests | Pass for local mechanisms; repeat live discovery outage against the disposable realm |
 | Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix non-root service identity plus file/parent owner, mode, type, and no-follow tests | Partial: Windows service DACL validation missing |
-| Deployment policy | Exact interface/address/port, certificate name, issuer, source ranges, budgets, owner, and expiry | Bounded `LanDeploymentPolicy` parser, negative matrix, and `lan-policy-check` | Partial: offline contract only; instantiate, review, and verify against the live host |
+| Deployment policy | Exact interface/address/port, certificate name, issuer, source ranges, budgets, owner, and expiry | Bounded `LanDeploymentPolicy`, read-only exact host-assignment attestation, negative matrix, and `lan-policy-check` | Partial: instantiate and review; port/firewall/certificate/OIDC/ACL proofs remain |
 
 Every executable row is part of the normal test suite; no network namespace, firewall exception, or
 remote bind is needed to rehearse it. A failure in any row blocks promotion.
@@ -83,7 +83,14 @@ must be private, canonical, non-overlapping, and in the same address family as t
 The declared authority limits must exactly match the compiled player, pending-handshake, gameplay
 queue, and per-session datagram ceilings; a document cannot raise them.
 
-The checker performs no socket operation and intentionally does not inspect or mutate a network
-interface, firewall, certificate store, identity provider, or service manager. A successful
-`POLICY_OK` therefore means only that a proposal is bounded and unambiguous. It does not make the
-proposal approved, does not prove the target state, and cannot unlock the loopback-only server.
+The checker performs no socket operation and never mutates a network interface, firewall,
+certificate store, identity provider, or service manager. Offline mode does not inspect them. With
+`--verify-host`, it enumerates at most 256 interface-address records and requires exactly the named
+operational interface, address, non-zero index and fully private prefix. It rejects the same address
+under any other interface name and never echoes topology or identity values.
+
+An offline `POLICY_OK` means only that a proposal is bounded and unambiguous; a host-verified result
+adds only a point-in-time interface assignment. Neither result makes the proposal approved, proves
+the remaining target state, or unlocks the loopback-only server. A future launcher must repeat the
+host proof immediately before bind and fail closed if subsequent interface-change monitoring reports
+drift.

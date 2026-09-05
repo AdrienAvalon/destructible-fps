@@ -321,6 +321,13 @@ and the secure launch configuration neither imports nor references it. A later p
 distinct capability that proves the declared interface/address relation, certificate SAN, exact
 issuer, firewall state, ACLs and monotonic expiry before calling a non-loopback binder.
 
+The adjacent host-attestation module takes the policy in the safe direction only: it reads a single
+bounded interface snapshot and proves an exact, operational and uniquely indexed name/address/prefix
+assignment. It has no socket, endpoint, authority or configuration dependency. Duplicate address
+ownership, an absent/down interface, a missing index, an unsafe prefix or more than 256 address
+records fails closed. This point-in-time proof must be repeated immediately before any future bind
+and monitored afterward; it does not attest firewall, certificate, OIDC or service ACL state.
+
 ## Planned engine layers
 
 ### First playable slice — delivered

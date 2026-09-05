@@ -256,10 +256,13 @@ placeholder, set a fresh expiry, then lint the proposed document with:
 
 ```bash
 cargo run --release --bin lan-policy-check -- /absolute/path/to/lan-policy.json
+cargo run --release --bin lan-policy-check -- --verify-host /absolute/path/to/lan-policy.json
 ```
 
-The live interface, certificate SAN, firewall state, issuer and platform ACLs must still be checked
-independently before this contract can participate in a private-network launch.
+The optional host check enumerates interfaces without opening a socket and requires one unique,
+operational interface/address/index/prefix match. Certificate SAN, firewall state, issuer and
+platform ACLs must still be checked independently before this contract can participate in a
+private-network launch.
 
 For local protocol development the legacy authority can be started directly:
 

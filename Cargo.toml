@@ -60,6 +60,7 @@ base64 = "=0.22.1"
 bytes = "=1.12.1"
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 glam = "=0.33.6"
+if-addrs = "=0.14.0"
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws_lc_rs"] }
 pollster = "=1.0.1"
 quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }

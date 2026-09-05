@@ -2,8 +2,9 @@ use crate::destruction::{DestructionReport, Explosion};
 use crate::material::{InvalidMaterial, Voxel};
 use crate::physics::{
     BodyError, BodyId, BodyLimits, BodyVoxel, FixedImpulseMilliNewtonSeconds3, FixedMicrometers3,
-    FixedMillimeters3, FixedMilliradians3, FixedQuaternion, RigidBodyDescriptor, RigidBodyState,
-    apply_impulse_at_local_point, step_rigid_bodies, valid_rigid_body_state,
+    FixedMillimeters3, FixedMilliradians3, FixedQuaternion, MICROMETERS_PER_VOXEL,
+    RigidBodyDescriptor, RigidBodyState, apply_impulse_at_local_point, step_rigid_bodies,
+    valid_rigid_body_state,
 };
 use crate::structural::{
     StructuralAnchors, StructuralError, StructuralLimits, analyze_structural_changes,
@@ -26,6 +27,16 @@ const MAX_PENDING_BYTES: usize = 8 * 1_024 * 1_024;
 pub const MAX_ACTIVE_BODIES: usize = 1_024;
 const MAX_ACTIVE_BODY_VOXELS: usize = 262_144;
 const MAX_SPAWNED_BODY_VOXELS: usize = 16_384;
+pub const DEFAULT_CONSTRUCTION_UNITS: u32 = 512;
+pub const MAX_BUILD_COORDINATE: i32 = 1_000_000;
+const BUILD_NEIGHBORS: [IVec3; 6] = [
+    IVec3::new(-1, 0, 0),
+    IVec3::new(1, 0, 0),
+    IVec3::new(0, -1, 0),
+    IVec3::new(0, 1, 0),
+    IVec3::new(0, 0, -1),
+    IVec3::new(0, 0, 1),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExplosionCommand {
@@ -33,6 +44,21 @@ pub struct ExplosionCommand {
     pub center: IVec3,
     pub radius_voxels: u16,
     pub peak_energy: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuildCommand {
+    pub command_id: u64,
+    pub position: IVec3,
+    pub material: crate::Material,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuildReport {
+    pub position: IVec3,
+    pub material: crate::Material,
+    pub spent_units: u32,
+    pub remaining_units: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +140,7 @@ pub struct AuthoritativeServer {
     next_body_id: BodyId,
     next_sequence: u64,
     last_command_id: HashMap<u64, u64>,
+    construction_units: HashMap<u64, u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -121,6 +148,18 @@ pub enum CommandError {
     ZeroRadius,
     RadiusTooLarge(u16),
     EnergyTooLarge(u32),
+    InvalidBuildMaterial(crate::Material),
+    BuildCoordinateOutOfRange(IVec3),
+    BuildPositionOccupied(IVec3),
+    BuildPositionUnsupported(IVec3),
+    BuildOverlapsBody {
+        position: IVec3,
+        body_id: BodyId,
+    },
+    InsufficientConstructionUnits {
+        available: u32,
+        required: u32,
+    },
     ReplayedCommand {
         client_id: u64,
         command_id: u64,
@@ -147,6 +186,35 @@ impl fmt::Display for CommandError {
             Self::EnergyTooLarge(energy) => {
                 write!(formatter, "explosion energy {energy} exceeds 1,000,000")
             }
+            Self::InvalidBuildMaterial(material) => {
+                write!(formatter, "material {material:?} cannot be placed")
+            }
+            Self::BuildCoordinateOutOfRange(position) => {
+                write!(
+                    formatter,
+                    "build coordinate {position:?} exceeds the world bound"
+                )
+            }
+            Self::BuildPositionOccupied(position) => {
+                write!(formatter, "build position {position:?} is already occupied")
+            }
+            Self::BuildPositionUnsupported(position) => {
+                write!(
+                    formatter,
+                    "build position {position:?} has no static face support"
+                )
+            }
+            Self::BuildOverlapsBody { position, body_id } => write!(
+                formatter,
+                "build position {position:?} overlaps rigid body {body_id}"
+            ),
+            Self::InsufficientConstructionUnits {
+                available,
+                required,
+            } => write!(
+                formatter,
+                "construction requires {required} units but only {available} remain"
+            ),
             Self::ReplayedCommand {
                 client_id,
                 command_id,
@@ -204,6 +272,7 @@ impl AuthoritativeServer {
             next_body_id: 1,
             next_sequence: 1,
             last_command_id: HashMap::new(),
+            construction_units: HashMap::new(),
         }
     }
 
@@ -231,16 +300,7 @@ impl AuthoritativeServer {
         command: ExplosionCommand,
     ) -> Result<(DeltaPacket, DestructionReport), CommandError> {
         validate_command(command)?;
-        if self
-            .last_command_id
-            .get(&client_id)
-            .is_some_and(|last| command.command_id <= *last)
-        {
-            return Err(CommandError::ReplayedCommand {
-                client_id,
-                command_id: command.command_id,
-            });
-        }
+        self.validate_fresh_command(client_id, command.command_id)?;
 
         let base_fingerprint = self.world.fingerprint();
         let base_body_fingerprint = self.body_fingerprint;
@@ -319,6 +379,99 @@ impl AuthoritativeServer {
         Ok((packet, report))
     }
 
+    /// Validates and commits one resource-backed static voxel placement.
+    ///
+    /// # Errors
+    ///
+    /// Rejects replay, air, extreme coordinates, occupied or unsupported targets, conservative
+    /// rigid-body overlap, and exhausted per-client construction units before mutating the world.
+    pub fn execute_build(
+        &mut self,
+        client_id: u64,
+        command: BuildCommand,
+    ) -> Result<(DeltaPacket, BuildReport), CommandError> {
+        self.validate_fresh_command(client_id, command.command_id)?;
+        let cost = build_material_cost(command.material)
+            .ok_or(CommandError::InvalidBuildMaterial(command.material))?;
+        if [command.position.x, command.position.y, command.position.z]
+            .iter()
+            .any(|coordinate| coordinate.unsigned_abs() > MAX_BUILD_COORDINATE.cast_unsigned())
+        {
+            return Err(CommandError::BuildCoordinateOutOfRange(command.position));
+        }
+        if self.world.voxel(command.position).is_solid() {
+            return Err(CommandError::BuildPositionOccupied(command.position));
+        }
+        if !BUILD_NEIGHBORS.iter().any(|offset| {
+            self.world
+                .voxel(saturating_position_add(command.position, *offset))
+                .is_solid()
+        }) {
+            return Err(CommandError::BuildPositionUnsupported(command.position));
+        }
+        if let Some(body_id) = self.bodies.iter().find_map(|(&body_id, body)| {
+            self.body_states
+                .get(&body_id)
+                .copied()
+                .filter(|state| body_overlaps_voxel(body, *state, command.position))
+                .map(|_| body_id)
+        }) {
+            return Err(CommandError::BuildOverlapsBody {
+                position: command.position,
+                body_id,
+            });
+        }
+        let available = self.construction_units(client_id);
+        if available < cost {
+            return Err(CommandError::InsufficientConstructionUnits {
+                available,
+                required: cost,
+            });
+        }
+        let remaining_units = available - cost;
+        let before = Voxel::AIR;
+        let after = Voxel::new(command.material);
+        let base_fingerprint = self.world.fingerprint();
+        self.world.set_voxel(command.position, after);
+        let tick = self.world.tick().wrapping_add(1);
+        self.world.set_tick(tick);
+        let packet = DeltaPacket {
+            sequence: self.next_sequence,
+            tick,
+            base_fingerprint,
+            final_fingerprint: self.world.fingerprint(),
+            base_body_fingerprint: self.body_fingerprint,
+            final_body_fingerprint: self.body_fingerprint,
+            changes: vec![VoxelChange {
+                position: command.position,
+                before,
+                after,
+            }],
+            body_assignments: Vec::new(),
+            body_updates: Vec::new(),
+        };
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.last_command_id.insert(client_id, command.command_id);
+        self.construction_units.insert(client_id, remaining_units);
+        Ok((
+            packet,
+            BuildReport {
+                position: command.position,
+                material: command.material,
+                spent_units: cost,
+                remaining_units,
+            },
+        ))
+    }
+
+    #[must_use]
+    pub fn construction_units(&self, client_id: u64) -> u32 {
+        self.construction_units
+            .get(&client_id)
+            .copied()
+            .unwrap_or(DEFAULT_CONSTRUCTION_UNITS)
+    }
+
     #[must_use]
     pub const fn world(&self) -> &World {
         &self.world
@@ -392,6 +545,20 @@ impl AuthoritativeServer {
         };
         self.next_sequence = self.next_sequence.wrapping_add(1);
         (Some(packet), report)
+    }
+
+    fn validate_fresh_command(&self, client_id: u64, command_id: u64) -> Result<(), CommandError> {
+        if self
+            .last_command_id
+            .get(&client_id)
+            .is_some_and(|last| command_id <= *last)
+        {
+            return Err(CommandError::ReplayedCommand {
+                client_id,
+                command_id,
+            });
+        }
+        Ok(())
     }
 
     fn prepare_detached_bodies(
@@ -681,6 +848,64 @@ const fn validate_command(command: ExplosionCommand) -> Result<(), CommandError>
         return Err(CommandError::EnergyTooLarge(command.peak_energy));
     }
     Ok(())
+}
+
+const fn build_material_cost(material: crate::Material) -> Option<u32> {
+    match material {
+        crate::Material::Air => None,
+        crate::Material::Soil | crate::Material::Wood => Some(1),
+        crate::Material::Stone | crate::Material::Brick | crate::Material::Glass => Some(2),
+        crate::Material::Concrete => Some(3),
+        crate::Material::Steel => Some(6),
+    }
+}
+
+const fn saturating_position_add(position: IVec3, offset: IVec3) -> IVec3 {
+    IVec3::new(
+        position.x.saturating_add(offset.x),
+        position.y.saturating_add(offset.y),
+        position.z.saturating_add(offset.z),
+    )
+}
+
+fn body_overlaps_voxel(body: &RigidBodyDescriptor, state: RigidBodyState, position: IVec3) -> bool {
+    let body_minimum = [
+        state.translation_um.x,
+        state.translation_um.y,
+        state.translation_um.z,
+    ];
+    let body_maximum = [
+        i64::from(
+            body.maximum
+                .x
+                .saturating_sub(body.minimum.x)
+                .saturating_add(1),
+        )
+        .saturating_mul(MICROMETERS_PER_VOXEL)
+        .saturating_add(state.translation_um.x),
+        i64::from(
+            body.maximum
+                .y
+                .saturating_sub(body.minimum.y)
+                .saturating_add(1),
+        )
+        .saturating_mul(MICROMETERS_PER_VOXEL)
+        .saturating_add(state.translation_um.y),
+        i64::from(
+            body.maximum
+                .z
+                .saturating_sub(body.minimum.z)
+                .saturating_add(1),
+        )
+        .saturating_mul(MICROMETERS_PER_VOXEL)
+        .saturating_add(state.translation_um.z),
+    ];
+    let voxel_minimum = [position.x, position.y, position.z]
+        .map(|coordinate| i64::from(coordinate).saturating_mul(MICROMETERS_PER_VOXEL));
+    let voxel_maximum = voxel_minimum.map(|minimum| minimum.saturating_add(MICROMETERS_PER_VOXEL));
+    (0..3).all(|axis| {
+        body_minimum[axis] < voxel_maximum[axis] && voxel_minimum[axis] < body_maximum[axis]
+    })
 }
 
 #[derive(Clone)]
@@ -1771,6 +1996,145 @@ mod tests {
         );
         assert_eq!(client.bodies().len(), 1);
         assert_eq!(client.next_body_id(), 2);
+    }
+
+    #[test]
+    fn supported_build_is_atomic_resource_backed_and_replay_protected() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
+        let mut server = AuthoritativeServer::new(world);
+        let command = BuildCommand {
+            command_id: 1,
+            position: IVec3::new(0, 1, 0),
+            material: Material::Wood,
+        };
+
+        let (packet, report) = server.execute_build(7, command).expect("supported build");
+
+        assert_eq!(packet.changes.len(), 1);
+        assert_eq!(packet.changes[0].before, Voxel::AIR);
+        assert_eq!(packet.changes[0].after, Voxel::new(Material::Wood));
+        assert_eq!(report.spent_units, 1);
+        assert_eq!(report.remaining_units, DEFAULT_CONSTRUCTION_UNITS - 1);
+        assert_eq!(server.construction_units(7), DEFAULT_CONSTRUCTION_UNITS - 1);
+        assert_eq!(
+            server.world().voxel(command.position),
+            Voxel::new(Material::Wood)
+        );
+        assert_eq!(
+            server.execute_explosion(
+                7,
+                ExplosionCommand {
+                    command_id: 1,
+                    center: IVec3::default(),
+                    radius_voxels: 1,
+                    peak_energy: 1,
+                },
+            ),
+            Err(CommandError::ReplayedCommand {
+                client_id: 7,
+                command_id: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_builds_leave_world_sequence_and_resources_unchanged() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
+        let initial_fingerprint = world.fingerprint();
+        let mut server = AuthoritativeServer::new(world);
+        for (command, expected) in [
+            (
+                BuildCommand {
+                    command_id: 1,
+                    position: IVec3::new(0, 1, 0),
+                    material: Material::Air,
+                },
+                CommandError::InvalidBuildMaterial(Material::Air),
+            ),
+            (
+                BuildCommand {
+                    command_id: 2,
+                    position: IVec3::new(MAX_BUILD_COORDINATE + 1, 0, 0),
+                    material: Material::Wood,
+                },
+                CommandError::BuildCoordinateOutOfRange(IVec3::new(MAX_BUILD_COORDINATE + 1, 0, 0)),
+            ),
+            (
+                BuildCommand {
+                    command_id: 3,
+                    position: IVec3::new(4, 4, 4),
+                    material: Material::Wood,
+                },
+                CommandError::BuildPositionUnsupported(IVec3::new(4, 4, 4)),
+            ),
+            (
+                BuildCommand {
+                    command_id: 4,
+                    position: IVec3::new(0, 0, 0),
+                    material: Material::Wood,
+                },
+                CommandError::BuildPositionOccupied(IVec3::new(0, 0, 0)),
+            ),
+        ] {
+            assert_eq!(server.execute_build(9, command), Err(expected));
+        }
+        server.construction_units.insert(10, 1);
+        assert_eq!(
+            server.execute_build(
+                10,
+                BuildCommand {
+                    command_id: 1,
+                    position: IVec3::new(0, 1, 0),
+                    material: Material::Brick,
+                },
+            ),
+            Err(CommandError::InsufficientConstructionUnits {
+                available: 1,
+                required: 2,
+            })
+        );
+        assert_eq!(server.world().fingerprint(), initial_fingerprint);
+        assert_eq!(server.world().tick(), 0);
+        assert_eq!(server.next_sequence(), 1);
+        assert_eq!(server.construction_units(9), DEFAULT_CONSTRUCTION_UNITS);
+    }
+
+    #[test]
+    fn build_rejects_conservative_overlap_with_a_dynamic_body() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
+        let mut server = AuthoritativeServer::new(world);
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![BodyVoxel {
+                position: IVec3::new(0, 1, 0),
+                voxel: Voxel::new(Material::Wood),
+            }],
+            BodyLimits::default(),
+        )
+        .expect("body fixture");
+        server
+            .body_states
+            .insert(1, RigidBodyState::at_spawn(&body));
+        server.bodies.insert(1, body);
+
+        assert_eq!(
+            server.execute_build(
+                3,
+                BuildCommand {
+                    command_id: 1,
+                    position: IVec3::new(0, 1, 0),
+                    material: Material::Wood,
+                },
+            ),
+            Err(CommandError::BuildOverlapsBody {
+                position: IVec3::new(0, 1, 0),
+                body_id: 1,
+            })
+        );
+        assert_eq!(server.world().voxel(IVec3::new(0, 1, 0)), Voxel::AIR);
     }
 
     #[test]

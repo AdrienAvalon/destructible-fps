@@ -1,10 +1,10 @@
 //! Fixed-size UDP control messages for dedicated-server discovery and commands.
 
-use crate::{ExplosionCommand, IVec3};
+use crate::{BuildCommand, ExplosionCommand, IVec3, Material, material::InvalidMaterial};
 use core::fmt;
 
 const CONTROL_MAGIC: [u8; 4] = *b"DFCT";
-const CONTROL_VERSION: u8 = 1;
+const CONTROL_VERSION: u8 = 2;
 const HELLO_KIND: u8 = 1;
 const WELCOME_KIND: u8 = 2;
 const EXPLOSION_KIND: u8 = 3;
@@ -12,6 +12,7 @@ const REPAIR_REQUEST_KIND: u8 = 4;
 const SNAPSHOT_REQUEST_KIND: u8 = 5;
 const SNAPSHOT_FRAGMENTS_REQUEST_KIND: u8 = 6;
 const SNAPSHOT_ACK_KIND: u8 = 7;
+const BUILD_KIND: u8 = 8;
 const HELLO_BYTES: usize = 14;
 const WELCOME_BYTES: usize = 22;
 const EXPLOSION_BYTES: usize = 40;
@@ -19,6 +20,7 @@ const REPAIR_REQUEST_BYTES: usize = 22;
 const SNAPSHOT_REQUEST_BYTES: usize = 14;
 const SNAPSHOT_FRAGMENTS_REQUEST_BYTES: usize = 32;
 const SNAPSHOT_ACK_BYTES: usize = 22;
+const BUILD_BYTES: usize = 35;
 pub const MAX_UDP_DATAGRAM_BYTES: usize = 1_200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,6 +31,10 @@ pub enum ClientControlMessage {
     Explosion {
         session_id: u64,
         command: ExplosionCommand,
+    },
+    Build {
+        session_id: u64,
+        command: BuildCommand,
     },
     RepairRequest {
         session_id: u64,
@@ -61,6 +67,7 @@ pub enum ControlCodecError {
     InvalidMagic,
     UnsupportedVersion(u8),
     InvalidKind(u8),
+    InvalidMaterial(InvalidMaterial),
 }
 
 impl fmt::Display for ControlCodecError {
@@ -76,11 +83,18 @@ impl fmt::Display for ControlCodecError {
                 write!(formatter, "unsupported control version {version}")
             }
             Self::InvalidKind(kind) => write!(formatter, "invalid control message kind {kind}"),
+            Self::InvalidMaterial(error) => error.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for ControlCodecError {}
+
+impl From<InvalidMaterial> for ControlCodecError {
+    fn from(value: InvalidMaterial) -> Self {
+        Self::InvalidMaterial(value)
+    }
+}
 
 #[must_use]
 pub fn encode_client_hello(nonce: u64) -> Vec<u8> {
@@ -99,6 +113,18 @@ pub fn encode_explosion_request(session_id: u64, command: ExplosionCommand) -> V
     push_i32(&mut bytes, command.center.z);
     push_u16(&mut bytes, command.radius_voxels);
     push_u32(&mut bytes, command.peak_energy);
+    bytes
+}
+
+#[must_use]
+pub fn encode_build_request(session_id: u64, command: BuildCommand) -> Vec<u8> {
+    let mut bytes = control_prefix(BUILD_KIND, BUILD_BYTES);
+    push_u64(&mut bytes, session_id);
+    push_u64(&mut bytes, command.command_id);
+    push_i32(&mut bytes, command.position.x);
+    push_i32(&mut bytes, command.position.y);
+    push_i32(&mut bytes, command.position.z);
+    bytes.push(command.material as u8);
     bytes
 }
 
@@ -174,6 +200,17 @@ pub fn decode_client_control(bytes: &[u8]) -> Result<ClientControlMessage, Contr
                     center: IVec3::new(cursor.take_i32(), cursor.take_i32(), cursor.take_i32()),
                     radius_voxels: cursor.take_u16(),
                     peak_energy: cursor.take_u32(),
+                },
+            })
+        }
+        BUILD_KIND => {
+            require_length(bytes, BUILD_BYTES)?;
+            Ok(ClientControlMessage::Build {
+                session_id: cursor.take_u64(),
+                command: BuildCommand {
+                    command_id: cursor.take_u64(),
+                    position: IVec3::new(cursor.take_i32(), cursor.take_i32(), cursor.take_i32()),
+                    material: Material::from_wire(cursor.take_u8())?,
                 },
             })
         }
@@ -282,6 +319,10 @@ struct ControlCursor<'a> {
 }
 
 impl ControlCursor<'_> {
+    fn take_u8(&mut self) -> u8 {
+        self.take_array::<1>()[0]
+    }
+
     fn take_u16(&mut self) -> u16 {
         u16::from_le_bytes(self.take_array())
     }
@@ -350,6 +391,21 @@ mod tests {
             Ok(ClientControlMessage::Explosion {
                 session_id: 9,
                 command,
+            })
+        );
+
+        let build = BuildCommand {
+            command_id: 8,
+            position: IVec3::new(2, 3, -4),
+            material: Material::Wood,
+        };
+        let request = encode_build_request(9, build);
+        assert_eq!(request.len(), BUILD_BYTES);
+        assert_eq!(
+            decode_client_control(&request),
+            Ok(ClientControlMessage::Build {
+                session_id: 9,
+                command: build,
             })
         );
 
@@ -423,5 +479,24 @@ mod tests {
             decode_client_control(&truncated),
             Err(ControlCodecError::InvalidLength { .. })
         ));
+        let mut invalid_material = encode_build_request(
+            1,
+            BuildCommand {
+                command_id: 2,
+                position: IVec3::default(),
+                material: Material::Wood,
+            },
+        );
+        *invalid_material.last_mut().expect("material byte") = u8::MAX;
+        assert_eq!(
+            decode_client_control(&invalid_material),
+            Err(ControlCodecError::InvalidMaterial(InvalidMaterial(u8::MAX)))
+        );
+        let mut old_version = encode_client_hello(1);
+        old_version[4] = 1;
+        assert_eq!(
+            decode_client_control(&old_version),
+            Err(ControlCodecError::UnsupportedVersion(1))
+        );
     }
 }

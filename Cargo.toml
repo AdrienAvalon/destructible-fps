@@ -28,6 +28,10 @@ name = "physics-benchmark"
 path = "src/bin/physics_benchmark.rs"
 
 [[bin]]
+name = "construction-benchmark"
+path = "src/bin/construction_benchmark.rs"
+
+[[bin]]
 name = "dedicated-server"
 path = "src/bin/dedicated_server.rs"
 

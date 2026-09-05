@@ -1,6 +1,7 @@
 use destructible_fps::{
-    AuthenticatedPrincipal, DeltaPacket, ExplosionCommand, IVec3, MAX_SESSION_DATAGRAMS_PER_SECOND,
-    OrderedDeltaInbox, SecureDedicatedServer, SessionCredentialVerifier, World, demo_world,
+    AuthenticatedPrincipal, BuildCommand, DeltaPacket, ExplosionCommand, IVec3,
+    MAX_SESSION_DATAGRAMS_PER_SECOND, Material, OrderedDeltaInbox, SecureDedicatedServer,
+    SessionCredentialVerifier, Voxel, World, demo_world, encode_build_request,
     encode_explosion_request, encode_snapshot_request, establish_session,
     receive_gameplay_datagram, secure_client_config, secure_server_config, send_gameplay_datagram,
 };
@@ -125,6 +126,66 @@ async fn two_authenticated_quic_clients_receive_one_authoritative_transaction() 
     }
     assert_eq!(server.active_sessions(), 1);
     second.close(VarInt::from_u32(0), b"second client complete");
+    server.shutdown().await;
+    client.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_quic_client_builds_one_authoritative_voxel() {
+    let (certificate, private_key) = test_identity();
+    let server_config =
+        secure_server_config(vec![certificate.clone()], private_key).expect("server config");
+    let mut world = World::default();
+    world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Stone));
+    let mut server = SecureDedicatedServer::bind(
+        LOOPBACK_EPHEMERAL,
+        server_config,
+        Arc::new(TestVerifier),
+        world,
+    )
+    .expect("secure authority");
+    let client = trusted_client(certificate);
+    let connection = connect(&client, server.local_addr().expect("server address")).await;
+    let welcome = establish_session(&connection, 107, &TEST_CREDENTIAL)
+        .await
+        .expect("admitted session");
+    for _ in 0..100 {
+        server.tick().expect("admission tick");
+        if server.active_sessions() == 1 {
+            break;
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(server.active_sessions(), 1);
+    let command = BuildCommand {
+        command_id: 1,
+        position: IVec3::new(0, 1, 0),
+        material: Material::Wood,
+    };
+    send_gameplay_datagram(
+        &connection,
+        encode_build_request(welcome.session_id, command),
+    )
+    .expect("encrypted build command");
+    for _ in 0..100 {
+        let report = server.tick().expect("construction tick");
+        if report.authority.commands_applied == 1 {
+            break;
+        }
+        sleep(Duration::from_millis(2)).await;
+    }
+
+    let packet = receive_transaction(&connection).await;
+    assert_eq!(packet.sequence, 1);
+    assert_eq!(packet.changes.len(), 1);
+    assert_eq!(packet.changes[0].position, command.position);
+    assert_eq!(packet.changes[0].after, Voxel::new(Material::Wood));
+    assert_eq!(
+        server.authority().world().voxel(command.position),
+        Voxel::new(Material::Wood)
+    );
+
+    connection.close(VarInt::from_u32(0), b"build complete");
     server.shutdown().await;
     client.wait_idle().await;
 }

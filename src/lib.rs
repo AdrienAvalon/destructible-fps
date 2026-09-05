@@ -51,9 +51,10 @@ pub use physics::{
     step_rigid_bodies, step_rigid_body, valid_fixed_quaternion, valid_rigid_body_state,
 };
 pub use replication::{
-    AuthoritativeServer, BodyStateUpdate, BodyVoxelAssignment, ClientReplica, ClientStatus,
-    CodecError, CommandError, DeltaFrame, DeltaPacket, ExplosionCommand, FrameAssembler,
-    PhysicsTickReport, ReplicationError, decode_frame, encode_frames,
+    AuthoritativeServer, BodyStateUpdate, BodyVoxelAssignment, BuildCommand, BuildReport,
+    ClientReplica, ClientStatus, CodecError, CommandError, DEFAULT_CONSTRUCTION_UNITS, DeltaFrame,
+    DeltaPacket, ExplosionCommand, FrameAssembler, MAX_BUILD_COORDINATE, PhysicsTickReport,
+    ReplicationError, decode_frame, encode_frames,
 };
 pub use secure_server::{
     MAX_CONSECUTIVE_GAMEPLAY_QUEUE_DROPS, MAX_SECURE_CONTROL_EVENTS, MAX_SECURE_GAMEPLAY_BYTES,
@@ -74,7 +75,7 @@ pub use server_config::{
     MAX_STATIC_JWKS_VALIDITY_SECONDS, MAX_TLS_PRIVATE_KEY_BYTES, MIN_STATIC_JWKS_VALIDITY_SECONDS,
     SecureAuthorityLaunchConfig, SecureAuthorityLaunchError, SecureNetworkExposure,
 };
-pub use session::{DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
+pub use session::{BuildResult, DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
 pub use snapshot::{
     AuthoritativeSnapshot, MAX_SNAPSHOT_BODY_VOXELS, MAX_SNAPSHOT_DATAGRAM_BYTES,
     MAX_SNAPSHOT_PAYLOAD_BYTES, MAX_SNAPSHOT_STATIC_VOXELS, SnapshotAssembler, SnapshotCodecError,
@@ -87,8 +88,8 @@ pub use structural::{
 pub use telemetry::{DistributionSummary, SampleWindow};
 pub use transport::{
     ClientControlMessage, ControlCodecError, MAX_UDP_DATAGRAM_BYTES, ServerControlMessage,
-    decode_client_control, decode_server_control, encode_client_hello, encode_explosion_request,
-    encode_repair_request, encode_server_welcome, encode_snapshot_ack,
+    decode_client_control, decode_server_control, encode_build_request, encode_client_hello,
+    encode_explosion_request, encode_repair_request, encode_server_welcome, encode_snapshot_ack,
     encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
 };
 pub use world::{CHUNK_EDGE, IVec3, VoxelChange, World, WorldError, WorldStats, chunk_position};

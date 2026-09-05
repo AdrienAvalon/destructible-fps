@@ -97,7 +97,11 @@ streaming, with no synchronous world meshing on the presentation thread.
   convergence, and continuous multi-contact resolution between fast moving bodies;
 - debris relevance tiers: authoritative hazards, replicated coarse bodies, deterministic cosmetic
   fragments, and settled static clusters;
-- player construction with server-validated placement, resource cost, support, and collision.
+- player construction with shared replay ordering, bounded static placement, per-session resource
+  costs, face support, static occupancy, conservative dynamic-body exclusion, fingerprinted
+  replication, a real authenticated-QUIC test, and a playable wood-placement control (first slice
+  delivered; authoritative reach, persistent inventory, recipes, removal and dynamic attachment
+  remain).
 
 Exit gate: removing a load-bearing member causes a repeatable progressive collapse; the worst-case
 fixture remains inside the 60 Hz server budget and converges bit-for-bit on replicas.

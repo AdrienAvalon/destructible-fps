@@ -40,6 +40,8 @@ pub struct Player {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RayHit {
     pub voxel: IVec3,
+    /// Last empty voxel crossed before impact, when the ray did not start inside geometry.
+    pub adjacent_empty: Option<IVec3>,
     pub point: Vec3,
     pub distance: f32,
 }
@@ -155,6 +157,8 @@ pub fn raycast(world: &World, origin: Vec3, direction: Vec3, max_distance: f32) 
             if world.voxel(voxel).is_solid() {
                 return Some(RayHit {
                     voxel,
+                    adjacent_empty: (previous != IVec3::new(i32::MIN, i32::MIN, i32::MIN))
+                        .then_some(previous),
                     point,
                     distance,
                 });
@@ -228,6 +232,7 @@ mod tests {
         let hit = raycast(&world, Vec3::new(0.5, 2.5, 0.0), -Vec3::Z, 20.0)
             .expect("ray should intersect brick");
         assert_eq!(hit.voxel, IVec3::new(0, 2, -5));
+        assert_eq!(hit.adjacent_empty, Some(IVec3::new(0, 2, -4)));
         assert!((3.9..=4.1).contains(&hit.distance));
     }
 }

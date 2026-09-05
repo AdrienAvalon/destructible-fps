@@ -41,6 +41,10 @@ The Linux demo now combines the authoritative core with a real-time first-person
   bounded angular velocity using compact server-monotonic 64-bit entity IDs, independent 128-bit
   geometry fingerprints, pre/post body fingerprints, and full client-side connectivity, material,
   mass, identity, and state revalidation;
+- control-protocol-v2 construction requests with replay protection, fixed per-session resources,
+  material costs, bounded coordinates, face-support and occupancy checks, conservative dynamic-body
+  exclusion, and ordinary fingerprinted world deltas shared by local, UDP, and authenticated QUIC
+  clients;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
@@ -149,6 +153,7 @@ microbenchmark.
 - `ZQSD` or `WASD` to move, `Shift` to sprint, and `Space` to jump;
 - left click for a localized rifle impact;
 - right click for a larger explosive blast;
+- middle click to place a full-integrity wood voxel on the targeted supported face;
 - `Escape` releases the pointer; press it again to quit.
 
 For a non-interactive graphics check that exits automatically:

@@ -3,6 +3,44 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — server-authoritative construction increment
+
+Source state: parent `f8d38d9` plus the construction increment documented here. A build request joins
+explosions in one per-session monotonic command sequence, but commits only when its material is
+solid, all coordinates stay within the fixed world bound, the target is empty, one static face
+supports it, no conservative dynamic-body AABB overlaps it, and the session has enough of its fixed
+512-unit budget. Material costs range from one to six units. Every refusal occurs before world tick,
+sequence, fingerprint, replay high-water mark, or resources change.
+
+Control protocol v2 transports the fixed 35-byte request over both UDP and authenticated QUIC. A
+successful placement is an ordinary canonical one-change world delta, so existing fragmentation,
+retention, repair, snapshot catch-up, fingerprint validation, and client remeshing need no parallel
+state path. The playable client exposes wood placement on middle click and runs the request through
+the same encode, reverse-order reassembly, replica validation, and dirty-chunk scheduling used by
+destruction.
+
+New coverage proves atomic policy failures, cross-command replay rejection, resource charging,
+dynamic-body exclusion, exact control-codec bounds, invalid material and prior-version rejection,
+in-process replica convergence, bounded authority-core broadcast, and one real OIDC-independent
+credential-authenticated QUIC construction transaction. The complete promotion passed 92 library
+tests, four binary tests, and 41 integration tests in both debug and release; strict Clippy was clean.
+
+```bash
+cargo run --release --bin construction-benchmark -- --iterations 200
+```
+
+The release fixture performed 51,200 supported placements over 200 fresh authoritative worlds in
+9.063 ms: 5,649,173 placements/s, with per-placement p50 0.096 us, p95 0.188 us, p99 0.199 us, and
+maximum 110.540 us on this machine. It isolates validation and commit cost; network scheduling,
+render remeshing, persistent inventory storage, and authoritative player reach are outside this
+microbenchmark.
+
+The eight-second RTX 4050 Vulkan regression smoke streamed all 128 chunks in 35.7 ms, left the one
+dynamic body asleep, and shut down cleanly with zero dropped GPU timestamp samples. GPU-total p50
+was 0.189 ms, p95 0.194 ms, p99 0.195 ms, and maximum 0.206 ms. This confirms that the construction
+input and updated HUD preserve the renderer gate; it does not exercise an automated placement in the
+windowed client.
+
 ## 2026-09-05 — authoritative angular-state increment
 
 Source state: parent `a75db12` plus the angular-state increment documented here. Bodies now carry a

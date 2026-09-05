@@ -1,8 +1,8 @@
 //! Transport-independent bounded authority core, loopback UDP adapter, and client delta inbox.
 
 use crate::{
-    AuthenticatedPrincipal, AuthoritativeServer, ClientControlMessage, CodecError, DeltaPacket,
-    ExplosionCommand, FrameAssembler, PhysicsTickReport, World, decode_client_control,
+    AuthenticatedPrincipal, AuthoritativeServer, BuildCommand, ClientControlMessage, CodecError,
+    DeltaPacket, ExplosionCommand, FrameAssembler, PhysicsTickReport, World, decode_client_control,
     decode_frame, encode_frames, encode_server_welcome, encode_snapshot_frames,
 };
 use core::fmt;
@@ -106,7 +106,13 @@ struct Peer {
 #[derive(Clone, Copy)]
 struct QueuedCommand {
     session_id: u64,
-    command: ExplosionCommand,
+    command: GameplayCommand,
+}
+
+#[derive(Clone, Copy)]
+enum GameplayCommand {
+    Explosion(ExplosionCommand),
+    Build(BuildCommand),
 }
 
 #[derive(Clone, Copy)]
@@ -315,7 +321,16 @@ where
             ClientControlMessage::Explosion {
                 session_id,
                 command,
-            } => self.enqueue_command(source, session_id, command, report),
+            } => self.enqueue_command(
+                source,
+                session_id,
+                GameplayCommand::Explosion(command),
+                report,
+            ),
+            ClientControlMessage::Build {
+                session_id,
+                command,
+            } => self.enqueue_command(source, session_id, GameplayCommand::Build(command), report),
             ClientControlMessage::RepairRequest {
                 session_id,
                 missing_sequence,
@@ -476,7 +491,7 @@ where
         &mut self,
         source: PeerId,
         session_id: u64,
-        command: ExplosionCommand,
+        command: GameplayCommand,
         report: &mut NetworkTickReport,
     ) {
         let Some(peer) = self.peers.get_mut(&source) else {
@@ -826,11 +841,18 @@ where
             let Some(queued) = self.commands.pop_front() else {
                 break;
             };
-            match self
-                .authority
-                .execute_explosion(queued.session_id, queued.command)
-            {
-                Ok((packet, _destruction)) => {
+            let result = match queued.command {
+                GameplayCommand::Explosion(command) => self
+                    .authority
+                    .execute_explosion(queued.session_id, command)
+                    .map(|(packet, _report)| packet),
+                GameplayCommand::Build(command) => self
+                    .authority
+                    .execute_build(queued.session_id, command)
+                    .map(|(packet, _report)| packet),
+            };
+            match result {
+                Ok(packet) => {
                     report.commands_applied += 1;
                     self.broadcast(&packet, sender, report)?;
                 }
@@ -1320,6 +1342,59 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_build_command_is_validated_and_broadcast() {
+        let mut world = World::default();
+        world.set_voxel(
+            crate::IVec3::new(0, 0, 0),
+            crate::Voxel::new(crate::Material::Stone),
+        );
+        let mut server = AuthorityCore::new(world, 1_100).expect("authority core");
+        let principal = AuthenticatedPrincipal::new(
+            std::num::NonZeroU64::new(92).expect("non-zero test principal"),
+        );
+        let mut report = server.begin_tick();
+        assert!(server.admit_authenticated(1_u8, 17, 19, principal, &mut report));
+        let command = BuildCommand {
+            command_id: 1,
+            position: crate::IVec3::new(0, 1, 0),
+            material: crate::Material::Wood,
+        };
+        server.ingest_datagram(
+            1,
+            &crate::encode_build_request(19, command),
+            &mut |_destination, _payload| true,
+            &mut report,
+        );
+        let mut frames = Vec::new();
+
+        let report = server
+            .complete_tick(
+                &mut |destination, payload| {
+                    assert_eq!(destination, 1);
+                    frames.push(payload.to_vec());
+                    true
+                },
+                report,
+            )
+            .expect("bounded construction tick");
+
+        assert_eq!(report.commands_applied, 1);
+        assert_eq!(report.commands_rejected, 0);
+        assert_eq!(
+            server.authority().world().voxel(command.position),
+            crate::Voxel::new(crate::Material::Wood)
+        );
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            decode_frame(&frames[0])
+                .expect("construction delta")
+                .changes
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn command_queue_and_session_validation_are_bounded() {
         let mut server =
             AuthorityCore::new(World::default(), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
@@ -1337,9 +1412,19 @@ mod tests {
         );
         let mut report = NetworkTickReport::default();
 
-        server.enqueue_command(source, 6, TEST_COMMAND, &mut report);
+        server.enqueue_command(
+            source,
+            6,
+            GameplayCommand::Explosion(TEST_COMMAND),
+            &mut report,
+        );
         for _ in 0..=MAX_QUEUED_COMMANDS {
-            server.enqueue_command(source, 7, TEST_COMMAND, &mut report);
+            server.enqueue_command(
+                source,
+                7,
+                GameplayCommand::Explosion(TEST_COMMAND),
+                &mut report,
+            );
         }
 
         assert_eq!(server.queued_commands(), MAX_QUEUED_COMMANDS);

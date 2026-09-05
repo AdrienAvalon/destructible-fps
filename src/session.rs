@@ -1,10 +1,10 @@
 //! In-process playable session that still crosses the authoritative wire-format boundary.
 
 use crate::{
-    AuthoritativeServer, BodyId, CHUNK_EDGE, ClientReplica, CodecError, CommandError,
-    DestructionReport, ExplosionCommand, FrameAssembler, IVec3, PhysicsTickReport,
-    ReplicationError, RigidBodyDescriptor, RigidBodyState, VoxelChange, World, chunk_position,
-    decode_frame, demo_world, encode_frames, player::raycast,
+    AuthoritativeServer, BodyId, BuildCommand, BuildReport, CHUNK_EDGE, ClientReplica, CodecError,
+    CommandError, DestructionReport, ExplosionCommand, FrameAssembler, IVec3, Material,
+    PhysicsTickReport, ReplicationError, RigidBodyDescriptor, RigidBodyState, VoxelChange, World,
+    chunk_position, decode_frame, demo_world, encode_frames, player::raycast,
 };
 use core::fmt;
 use glam::Vec3;
@@ -28,6 +28,15 @@ pub struct ShotResult {
     pub dirty_chunks: Vec<IVec3>,
     pub spawned_body_ids: Vec<BodyId>,
     pub active_bodies: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct BuildResult {
+    pub target: IVec3,
+    pub report: BuildReport,
+    pub datagrams: usize,
+    pub encoded_bytes: usize,
+    pub dirty_chunks: Vec<IVec3>,
 }
 
 #[derive(Debug)]
@@ -209,6 +218,59 @@ impl DemoSession {
             encoded_bytes,
         }))
     }
+
+    /// Finds the empty voxel immediately before a ray hit and requests a validated construction
+    /// transaction from the authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol, construction-policy, or consistency failures. A clean miss returns
+    /// `Ok(None)`.
+    pub fn build(
+        &mut self,
+        origin: Vec3,
+        direction: Vec3,
+        material: Material,
+    ) -> Result<Option<BuildResult>, SessionError> {
+        let Some(target) = raycast(self.client.world(), origin, direction, 12.0)
+            .and_then(|hit| hit.adjacent_empty)
+        else {
+            return Ok(None);
+        };
+        let command = BuildCommand {
+            command_id: self.next_command_id,
+            position: target,
+            material,
+        };
+        self.next_command_id = self.next_command_id.wrapping_add(1);
+        let (packet, report) = self.server.execute_build(CLIENT_ID, command)?;
+        let mut encoded = encode_frames(&packet, DATAGRAM_MTU)?;
+        let encoded_bytes = encoded.iter().map(Vec::len).sum();
+        let datagrams = encoded.len();
+        encoded.reverse();
+        let mut assembled = None;
+        for bytes in encoded {
+            if let Some(packet) = self.assembler.push(decode_frame(&bytes)?)? {
+                assembled = Some(packet);
+            }
+        }
+        let assembled = assembled.ok_or(SessionError::MissingCompletePacket)?;
+        self.client.receive(&assembled)?;
+        if self.client.world().fingerprint() != self.server.world().fingerprint()
+            || self.client.body_fingerprint() != self.server.body_fingerprint()
+            || self.client.body_states() != self.server.body_states()
+            || self.client.next_body_id() != self.server.next_body_id()
+        {
+            return Err(SessionError::DivergedReplica);
+        }
+        Ok(Some(BuildResult {
+            target,
+            report,
+            datagrams,
+            encoded_bytes,
+            dirty_chunks: dirty_chunks(&packet.changes),
+        }))
+    }
 }
 
 #[must_use]
@@ -264,7 +326,7 @@ fn insert_boundary_neighbor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Material, Voxel};
+    use crate::{DEFAULT_CONSTRUCTION_UNITS, Material, Voxel};
 
     #[test]
     fn playable_shot_crosses_codec_and_preserves_replica() {
@@ -283,6 +345,37 @@ mod tests {
         assert!(result.report.fractured_voxels > 0);
         assert!(result.datagrams > 1);
         assert_ne!(session.world().fingerprint(), initial);
+    }
+
+    #[test]
+    fn playable_build_crosses_codec_and_preserves_replica() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 2, -5), Voxel::new(Material::Stone));
+        let mut session = DemoSession::new(world);
+
+        let result = session
+            .build(Vec3::new(0.5, 2.5, 0.0), -Vec3::Z, Material::Wood)
+            .expect("build must replicate")
+            .expect("supported target is visible");
+
+        assert_eq!(result.target, IVec3::new(0, 2, -4));
+        assert_eq!(
+            result.report.remaining_units,
+            DEFAULT_CONSTRUCTION_UNITS - 1
+        );
+        assert_eq!(result.datagrams, 1);
+        assert_eq!(
+            session.world().voxel(result.target),
+            Voxel::new(Material::Wood)
+        );
+        assert_eq!(
+            result.dirty_chunks,
+            dirty_chunks(&[VoxelChange {
+                position: result.target,
+                before: Voxel::AIR,
+                after: Voxel::new(Material::Wood),
+            }])
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use destructible_fps::{
-    DemoSession, FireMode, IVec3, World, chunk_position,
+    DemoSession, FireMode, IVec3, Material, World, chunk_position,
     mesh_scheduler::{
         CompletedMeshJob, MAX_BODIES_PER_MESH_JOB, MAX_BODY_VOXELS_PER_MESH_JOB,
         MAX_CHUNKS_PER_MESH_JOB, MeshScheduler,
@@ -168,7 +168,7 @@ impl Game {
             now.duration_since(before).as_secs_f64() * 1_000.0
         );
         println!(
-            "Commandes: clic pour capturer | ZQSD/WASD deplacement | Maj sprint | Espace saut | gauche tir | droit explosif | Echap libere"
+            "Commandes: clic pour capturer | ZQSD/WASD deplacement | Maj sprint | Espace saut | gauche tir | droit explosif | milieu construit du bois | Echap libere"
         );
         Ok(Self {
             window,
@@ -261,6 +261,38 @@ impl Game {
             Ok(None) => self.last_action = format!("{mode:?}: aucun impact"),
             Err(error) => {
                 self.last_action = format!("erreur d autorite: {error}");
+                eprintln!("{}", self.last_action);
+            }
+        }
+    }
+
+    fn build(&mut self, material: Material) {
+        let before = Instant::now();
+        match self.session.build(
+            self.player.camera_position(),
+            self.player.view_direction(),
+            material,
+        ) {
+            Ok(Some(result)) => {
+                let dirty_count = result.dirty_chunks.len();
+                self.mesh_snapshot = Arc::new(self.session.world().clone());
+                self.queue_dirty_chunks(result.dirty_chunks);
+                self.last_action = format!(
+                    "Construction {:?} en {:?}: {} unite(s), {} restantes, {} datagramme(s)/{:.1} KiB, autorite {:.2} ms, {} chunks planifies",
+                    result.report.material,
+                    result.target,
+                    result.report.spent_units,
+                    result.report.remaining_units,
+                    result.datagrams,
+                    result.encoded_bytes as f64 / 1_024.0,
+                    before.elapsed().as_secs_f64() * 1_000.0,
+                    dirty_count
+                );
+                println!("{}", self.last_action);
+            }
+            Ok(None) => "Construction: aucun support a portee".clone_into(&mut self.last_action),
+            Err(error) => {
+                self.last_action = format!("construction refusee: {error}");
                 eprintln!("{}", self.last_action);
             }
         }
@@ -622,6 +654,8 @@ impl ApplicationHandler for App {
                     game.fire(FireMode::Rifle);
                 } else if button == MouseButton::Right {
                     game.fire(FireMode::Explosive);
+                } else if button == MouseButton::Middle {
+                    game.build(Material::Wood);
                 }
             }
             WindowEvent::RedrawRequested => {

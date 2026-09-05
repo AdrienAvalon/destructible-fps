@@ -147,9 +147,11 @@ destruction, construction, and moving rigid debris. Once the cursor is captured,
 rifle blast, right click an explosive blast, and middle click builds wood. Start every client before
 or after modifying the world: each admission installs an atomic snapshot, selectively requests lost
 fragments, acknowledges installation, and resumes with ordered catch-up deltas. Recovery UI,
-asynchronous network remeshing, and the production QUIC/OIDC connection are not yet wired into
-`multiplayer-demo`. Both this client and the unauthenticated UDP server reject non-loopback addresses;
-they are a local development harness, not a LAN/Internet deployment path.
+the production QUIC/OIDC connection, large-world residency streaming, and asset-quality presentation
+are not yet wired into `multiplayer-demo`. Live changed chunks and detached body geometry are meshed
+through the same single-worker bounded scheduler as the local demo. Both this client and the
+unauthenticated UDP server reject non-loopback addresses; they are a local development harness, not
+a LAN/Internet deployment path.
 
 The legacy dedicated-server process is intentionally restricted to loopback. Its socket has been
 separated from the reusable authority core and its real two-client path is exercised by

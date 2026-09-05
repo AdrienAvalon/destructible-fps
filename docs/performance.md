@@ -3,6 +3,21 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — off-thread graphical delta meshing increment
+
+Source state: parent `d939452` plus the network meshing increment documented here. Applying a world
+transaction no longer meshes changed geometry on the presentation thread. One bounded worker gives
+new rigid-body geometry priority, then processes camera-prioritized immutable chunk snapshots. The
+client caps pending changed chunks at 512, chunk jobs at 256, body jobs at 16, and aggregate body
+geometry at 32,768 voxels. A result whose world fingerprint became stale is requeued instead of
+uploaded.
+
+Two release Vulkan clients ran simultaneously for nine seconds. Both installed snapshots, rendered
+one remote player, applied the same destruction delta, completed one background mesh job, drained
+their mesh queues, and exited successfully. They reached authority ticks 921 and 918 and moved
+80,096,248 um and 22,700,000 um respectively. The complete promotion passed 115 library tests, eight
+binary tests, and 42 integration tests in debug and release; strict Clippy was clean.
+
 ## 2026-09-05 — bounded local correction smoothing increment
 
 Source state: parent `9b4ce19` plus the presentation-only correction increment documented here.

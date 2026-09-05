@@ -114,9 +114,9 @@ streaming, with no synchronous world meshing on the presentation thread.
   input, prediction, reconciliation, interpolation, authoritative construction/destruction, static
   remeshing, rigid-body creation and body transforms to the real development process (slices
   delivered); graphical late-join snapshot bootstrap, missing-fragment repair, acknowledgement and
-  ordered catch-up are delivered; asynchronous network remeshing, secure graphical transport,
-  view authority and dynamic-body contact remain; bounded small-correction smoothing with safe
-  large-discontinuity snapping is delivered.
+  ordered catch-up, bounded small-correction smoothing with safe large-discontinuity snapping, and
+  bounded off-thread live-delta chunk/body meshing are delivered; initial-snapshot residency
+  streaming, secure graphical transport, view authority and dynamic-body contact remain.
 
 Exit gate: removing a load-bearing member causes a repeatable progressive collapse; the worst-case
 fixture remains inside the 60 Hz server budget and converges bit-for-bit on replicas.

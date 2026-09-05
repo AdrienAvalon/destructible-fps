@@ -5,22 +5,26 @@
 )]
 
 use destructible_fps::{
-    BuildCommand, ClientPrediction, ClientPredictionError, ClientReplica, ExplosionCommand,
-    FixedMicrometers3, IVec3, MAX_APPLICATION_DATAGRAM_BYTES, MAX_BUILD_REACH_VOXELS,
-    MAX_RECEIVED_DATAGRAMS_PER_TICK, MICROMETERS_PER_VOXEL, Material, OrderedDeltaInbox,
-    PlayerInputCommand, PlayerInterpolationBuffer, PlayerInterpolationError,
+    BuildCommand, CHUNK_EDGE, ClientPrediction, ClientPredictionError, ClientReplica,
+    ExplosionCommand, FixedMicrometers3, IVec3, MAX_APPLICATION_DATAGRAM_BYTES,
+    MAX_BUILD_REACH_VOXELS, MAX_RECEIVED_DATAGRAMS_PER_TICK, MICROMETERS_PER_VOXEL, Material,
+    OrderedDeltaInbox, PlayerInputCommand, PlayerInterpolationBuffer, PlayerInterpolationError,
     PlayerStateReceiveError, ServerControlMessage, SnapshotAssembler, decode_player_state_packet,
     decode_server_control, demo_world, dirty_chunks, encode_build_request, encode_client_hello,
     encode_explosion_request, encode_player_input, encode_snapshot_ack,
     encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
     is_player_state_datagram, is_snapshot_datagram,
     mesh::{mesh_body, mesh_chunk},
+    mesh_scheduler::{
+        CompletedMeshJob, MAX_BODIES_PER_MESH_JOB, MAX_BODY_VOXELS_PER_MESH_JOB,
+        MAX_CHUNKS_PER_MESH_JOB, MeshScheduler,
+    },
     player::{Player, raycast},
     render::{RenderOutcome, Renderer},
 };
 use glam::Vec3;
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     error::Error,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
@@ -40,6 +44,7 @@ const FIXED_STEP_SECONDS: f32 = 1.0 / 60.0;
 const DEFAULT_SERVER: &str = "127.0.0.1:40000";
 const VISUAL_CORRECTION_HALF_LIFE_SECONDS: f32 = 0.08;
 const MAX_SMOOTHED_CORRECTION_VOXELS: f32 = 2.0;
+const MAX_PENDING_NETWORK_MESH_CHUNKS: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotPhase {
@@ -47,11 +52,23 @@ enum SnapshotPhase {
     Ready,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MeshWorkerPhase {
+    Idle,
+    InFlight,
+}
+
 struct MultiplayerGame {
     window: Arc<Window>,
     renderer: Renderer,
     replica: ClientReplica,
     delta_inbox: OrderedDeltaInbox,
+    mesh_scheduler: MeshScheduler,
+    mesh_snapshot: Arc<destructible_fps::World>,
+    pending_mesh_chunks: HashSet<IVec3>,
+    pending_body_ids: BTreeSet<destructible_fps::BodyId>,
+    mesh_worker_phase: MeshWorkerPhase,
+    completed_mesh_jobs: u64,
     snapshot_assembler: SnapshotAssembler,
     snapshot_phase: SnapshotPhase,
     last_snapshot_request_at: Option<Instant>,
@@ -127,8 +144,14 @@ impl MultiplayerGame {
             window,
             renderer,
             pristine_world_fingerprint: world.fingerprint(),
+            mesh_snapshot: Arc::new(world.clone()),
             replica: ClientReplica::new(world),
             delta_inbox: OrderedDeltaInbox::default(),
+            mesh_scheduler: MeshScheduler::new(),
+            pending_mesh_chunks: HashSet::new(),
+            pending_body_ids: BTreeSet::new(),
+            mesh_worker_phase: MeshWorkerPhase::Idle,
+            completed_mesh_jobs: 0,
             snapshot_assembler: SnapshotAssembler::default(),
             snapshot_phase: SnapshotPhase::Awaiting,
             last_snapshot_request_at: None,
@@ -306,6 +329,9 @@ impl MultiplayerGame {
         self.renderer.upload_body_meshes(body_meshes)?;
         self.renderer
             .update_body_transforms(self.replica.body_states());
+        self.mesh_snapshot = Arc::new(self.replica.world().clone());
+        self.pending_mesh_chunks.clear();
+        self.pending_body_ids.clear();
         self.socket
             .send_to(&encode_snapshot_ack(session_id, snapshot_id), self.server)
             .map_err(|error| format!("acquittement du snapshot: {error}"))?;
@@ -338,19 +364,17 @@ impl MultiplayerGame {
                 .receive(&packet)
                 .map_err(|error| format!("replication du monde refusee: {error}"))?;
             if !chunks.is_empty() {
-                let meshes = chunks
-                    .into_iter()
-                    .map(|chunk| (chunk, mesh_chunk(self.replica.world(), chunk)))
-                    .collect();
-                self.renderer.upload_chunk_meshes(meshes);
+                self.mesh_snapshot = Arc::new(self.replica.world().clone());
+                self.pending_mesh_chunks.extend(chunks);
+                if self.pending_mesh_chunks.len() > MAX_PENDING_NETWORK_MESH_CHUNKS {
+                    return Err(format!(
+                        "file de remeshing reseau saturee: {} chunks, maximum {MAX_PENDING_NETWORK_MESH_CHUNKS}",
+                        self.pending_mesh_chunks.len()
+                    ));
+                }
             }
             if !body_ids.is_empty() {
-                let meshes = body_ids
-                    .into_iter()
-                    .filter_map(|body_id| self.replica.bodies().get(&body_id))
-                    .map(mesh_body)
-                    .collect();
-                self.renderer.upload_body_meshes(meshes)?;
+                self.pending_body_ids.extend(body_ids);
             }
             self.renderer
                 .update_body_transforms(self.replica.body_states());
@@ -361,6 +385,108 @@ impl MultiplayerGame {
                 self.replica.bodies().len()
             );
         }
+        Ok(())
+    }
+
+    fn pump_meshing(&mut self) -> Result<(), String> {
+        match self.mesh_scheduler.poll() {
+            Ok(Some(CompletedMeshJob::Chunks {
+                world_fingerprint,
+                meshes,
+            })) => {
+                self.mesh_worker_phase = MeshWorkerPhase::Idle;
+                if world_fingerprint == self.replica.world().fingerprint() {
+                    self.renderer.upload_chunk_meshes(meshes);
+                    self.completed_mesh_jobs = self.completed_mesh_jobs.saturating_add(1);
+                } else {
+                    self.pending_mesh_chunks
+                        .extend(meshes.into_iter().map(|(chunk, _mesh)| chunk));
+                }
+            }
+            Ok(Some(CompletedMeshJob::Bodies(meshes))) => {
+                self.mesh_worker_phase = MeshWorkerPhase::Idle;
+                self.renderer.upload_body_meshes(meshes)?;
+                self.renderer
+                    .update_body_transforms(self.replica.body_states());
+                self.completed_mesh_jobs = self.completed_mesh_jobs.saturating_add(1);
+            }
+            Ok(None) => {}
+            Err(error) => return Err(format!("worker de remeshing arrete: {error}")),
+        }
+        if self.pending_mesh_chunks.len() > MAX_PENDING_NETWORK_MESH_CHUNKS {
+            return Err(format!(
+                "file de remeshing reseau saturee: {} chunks, maximum {MAX_PENDING_NETWORK_MESH_CHUNKS}",
+                self.pending_mesh_chunks.len()
+            ));
+        }
+        if self.mesh_worker_phase == MeshWorkerPhase::InFlight {
+            return Ok(());
+        }
+        if self.queue_body_mesh_job()? {
+            return Ok(());
+        }
+        self.queue_chunk_mesh_job()
+    }
+
+    fn queue_body_mesh_job(&mut self) -> Result<bool, String> {
+        let mut bodies = Vec::new();
+        let mut body_ids = Vec::new();
+        let mut voxel_count = 0_usize;
+        for &body_id in &self.pending_body_ids {
+            let Some(body) = self.replica.bodies().get(&body_id) else {
+                continue;
+            };
+            if bodies.len() == MAX_BODIES_PER_MESH_JOB {
+                break;
+            }
+            let next_voxel_count = voxel_count.saturating_add(body.voxels.len());
+            if next_voxel_count > MAX_BODY_VOXELS_PER_MESH_JOB {
+                if bodies.is_empty() {
+                    return Err(format!(
+                        "corps {body_id} trop grand pour le worker: {} voxels",
+                        body.voxels.len()
+                    ));
+                }
+                break;
+            }
+            voxel_count = next_voxel_count;
+            body_ids.push(body_id);
+            bodies.push(body.clone());
+        }
+        if bodies.is_empty() {
+            self.pending_body_ids
+                .retain(|body_id| self.replica.bodies().contains_key(body_id));
+            return Ok(false);
+        }
+        self.mesh_scheduler
+            .submit_bodies(bodies)
+            .map_err(|error| format!("maillage de corps non planifie: {error}"))?;
+        for body_id in body_ids {
+            self.pending_body_ids.remove(&body_id);
+        }
+        self.mesh_worker_phase = MeshWorkerPhase::InFlight;
+        Ok(true)
+    }
+
+    fn queue_chunk_mesh_job(&mut self) -> Result<(), String> {
+        if self.pending_mesh_chunks.is_empty() {
+            return Ok(());
+        }
+        let focus = IVec3::new(
+            (self.view.position.x / CHUNK_EDGE as f32).floor() as i32,
+            (self.view.position.y / CHUNK_EDGE as f32).floor() as i32,
+            (self.view.position.z / CHUNK_EDGE as f32).floor() as i32,
+        );
+        let mut chunks = self.pending_mesh_chunks.iter().copied().collect::<Vec<_>>();
+        chunks.sort_unstable_by_key(|chunk| chunk.squared_distance(focus));
+        chunks.truncate(MAX_CHUNKS_PER_MESH_JOB);
+        self.mesh_scheduler
+            .submit(Arc::clone(&self.mesh_snapshot), chunks.clone())
+            .map_err(|error| format!("remeshing reseau non planifie: {error}"))?;
+        for chunk in chunks {
+            self.pending_mesh_chunks.remove(&chunk);
+        }
+        self.mesh_worker_phase = MeshWorkerPhase::InFlight;
         Ok(())
     }
 
@@ -646,6 +772,7 @@ impl MultiplayerGame {
             steps += 1;
         }
         self.smooth_visual_correction(frame_seconds);
+        self.pump_meshing()?;
         self.send_smoke_action()?;
         self.update_remote_players()?;
         match self.renderer.render(
@@ -684,8 +811,16 @@ impl MultiplayerGame {
                     "smoke multijoueur sans destruction repliquee ni snapshot modifie".to_owned(),
                 );
             }
+            if self.applied_world_deltas > 0
+                && (self.completed_mesh_jobs == 0
+                    || !self.pending_mesh_chunks.is_empty()
+                    || !self.pending_body_ids.is_empty()
+                    || self.mesh_worker_phase == MeshWorkerPhase::InFlight)
+            {
+                return Err("smoke termine avant la presentation du delta replique".to_owned());
+            }
             println!(
-                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={} snapshot_pret={}",
+                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={} jobs_mesh={} snapshot_pret={}",
                 self.session_id.unwrap_or_default(),
                 stats.players,
                 self.prediction
@@ -696,6 +831,7 @@ impl MultiplayerGame {
                     .map_or(0, ClientPrediction::pending_inputs),
                 self.maximum_horizontal_displacement_um,
                 self.applied_world_deltas,
+                self.completed_mesh_jobs,
                 self.snapshot_ready()
             );
             event_loop.exit();

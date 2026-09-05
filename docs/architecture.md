@@ -120,7 +120,11 @@ bounded hashed fragments, installs it atomically, resets the ordered delta curso
 of old and new chunk slots, clears stale GPU bodies, uploads the authoritative body set, acknowledges
 installation, and only then accepts player mutations. Stalled transfers request only missing
 64-fragment windows. A late-join release smoke proves that a client can arrive after destruction and
-render the already-modified snapshot. Asynchronous network remeshing remains an explicit gate.
+render the already-modified snapshot. Live delta remeshing now uses one bounded background worker:
+changed chunks are capped at 512 pending entries, prioritized from the current camera, and submitted
+in batches of at most 256; body batches retain the existing 16-body/32,768-voxel cap. Results from a
+stale immutable world snapshot are never uploaded and their chunks are requeued against the newest
+replica. Initial snapshot rebuild remains synchronous until the residency-streaming gate.
 This does not relax exposure: both binaries refuse non-loopback addresses, and the production client
 must use authenticated QUIC/OIDC before any remote deployment.
 

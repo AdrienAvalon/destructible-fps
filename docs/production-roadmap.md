@@ -110,8 +110,10 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   return to live delivery (delivered for loopback);
 - bounded TLS 1.3 QUIC configuration, server-certificate validation, post-TLS opaque credential
   admission, connection-bound principal, admission timeout, and encrypted datagram tests (delivered
-  as an isolated boundary; dedicated-authority wiring, production verifier, and certificate lifecycle
-  remain);
+  as an isolated boundary);
+- offline RS256 access-token verification with strict JWKS key policy, exact issuer/audience and time
+  validation, bounded one-use `jti` cache, atomic rotation, and issuer/subject-derived 256-bit
+  principal (delivered; trusted discovery/refresh and dedicated-authority wiring remain);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
@@ -200,9 +202,9 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. implement bounded offline OIDC token verification with pinned issuer/audience, time claims,
-   identifier mapping, JWKS cache/rotation, and replay policy; then wire the tested QUIC boundary into
-   the dedicated authority with a process-level negative-test matrix before any non-loopback exposure;
+1. refactor the authority into a transport-independent bounded core, wire the tested QUIC/OIDC
+   boundary into the dedicated process, and add trusted configuration loading plus a process-level
+   negative-test matrix before any non-loopback exposure;
 2. add horizontal velocity, material friction/restitution, and deterministic impulse response,
    followed by angular state and replicated orientation.
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at

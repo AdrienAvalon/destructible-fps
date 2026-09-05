@@ -50,18 +50,32 @@ pub struct SessionWelcome {
     pub server_nonce: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AuthenticatedPrincipal(NonZeroU64);
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AuthenticatedPrincipal([u8; 32]);
 
 impl AuthenticatedPrincipal {
+    /// Creates a deterministic numeric principal for bounded local policies and tests.
     #[must_use]
     pub const fn new(id: NonZeroU64) -> Self {
-        Self(id)
+        let encoded = id.get().to_be_bytes();
+        let mut bytes = [0_u8; 32];
+        let mut index = 0;
+        while index < encoded.len() {
+            bytes[24 + index] = encoded[index];
+            index += 1;
+        }
+        Self(bytes)
+    }
+
+    /// Creates an opaque principal from a collision-resistant identity digest.
+    #[must_use]
+    pub const fn from_digest(digest: [u8; 32]) -> Self {
+        Self(digest)
     }
 
     #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0.get()
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -652,7 +666,10 @@ mod tests {
         let principal = TestVerifier(credential)
             .verify(decoded.credential)
             .expect("valid opaque credential");
-        assert_eq!(principal.get(), 7);
+        assert_eq!(
+            principal,
+            AuthenticatedPrincipal::new(NonZeroU64::new(7).expect("non-zero test principal"))
+        );
 
         let welcome = SessionWelcome {
             client_nonce: 11,

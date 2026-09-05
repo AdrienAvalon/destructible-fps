@@ -54,7 +54,10 @@ async fn verified_quic_session_carries_authenticated_gameplay_datagrams() {
         )
         .await
         .expect("authenticated application session");
-        assert_eq!(session.principal().get(), 41);
+        assert_eq!(
+            session.principal(),
+            AuthenticatedPrincipal::new(NonZeroU64::new(41).expect("non-zero test principal"))
+        );
         assert_eq!(session.client_nonce(), 67);
         assert_eq!(session.session_id(), 73);
         assert_eq!(session.server_nonce(), 79);

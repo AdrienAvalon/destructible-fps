@@ -153,6 +153,36 @@ the RTX 4050 Laptop completed 2,549 GPU samples with zero drops: CPU frame-work 
 GPU-total p99 was 0.198 ms at 1,440×900. These unchanged fixtures remained within their current
 milestone budgets; the secure-session code is not on their hot paths yet.
 
+## 2026-09-05 — bounded offline OIDC verification baseline
+
+Source state: commit `ae79f31` plus the OIDC verifier change documented here. One hundred distinct
+pre-signed RS256 access tokens were verified sequentially in the optimized release test. Key
+generation and token signing were outside the timed loop; each timed sample included bounded header
+decode, local `kid` lookup, AWS-LC signature verification, exact standard-claim validation, custom
+time/length policy, SHA-256 principal derivation, replay-cache pruning, and `jti` insertion.
+
+| Measurement | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|
+| Offline RS256 token admission | 0.016 ms | 0.018 ms | 0.021 ms | 0.039 ms |
+
+The JWKS input is capped at 64 KiB / 32 keys; RSA work is limited to 2,048–4,096-bit signing keys with
+exponent 65,537. Tokens remain under the secure-session 4-KiB bound, may be issued for at most 15
+minutes, must have at least ten seconds remaining, and consume one of 4,096 bounded replay entries
+until expiry. Negative tests reject weak/duplicate/malformed keys, non-HTTPS configuration, HMAC
+algorithm substitution, unknown `kid`, wrong issuer/audience, expired or overlong tokens, altered
+signatures, and repeated `jti`; rotation is a validate-before-swap operation. This is CPU-cost and
+policy evidence, not proof of OIDC discovery freshness or end-to-end server integration.
+
+The complete promotion passed 62 library tests, three binary tests, and 31 integration tests in both
+debug and release profiles. On the same release build, destruction p99 was 0.341 ms for 500 events,
+structural-simulation combined p99 was 4.209 ms over 100 iterations, 1,024-body physics p99 was
+0.881 ms over 300 ticks, and the snapshot round-trip p99 was 9.320 ms over 20 iterations. Two
+consecutive five-second GPU smoke tests completed without dropped timestamp samples. The first was
+surface-paced at 376 samples (CPU-work p99 16.971 ms, GPU-total p99 0.799 ms); the immediate repeat
+collected 2,245 samples (CPU-work p99 13.258 ms, GPU-total p99 0.194 ms). The verifier is not on the
+render hot path, so the presentation/clock variance must still be characterized by a sustained
+capture before it can be attributed to this change.
+
 ## 2026-09-05 — Stage 1 telemetry baseline
 
 Command:

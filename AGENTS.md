@@ -52,6 +52,7 @@ cargo test --all-targets
 cargo test --release --all-targets
 cargo test --test network
 cargo test --test secure_transport
+cargo test oidc::tests
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300

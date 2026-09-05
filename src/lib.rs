@@ -9,6 +9,7 @@ pub mod material;
 pub mod mesh;
 pub mod mesh_scheduler;
 pub mod network;
+pub mod oidc;
 pub mod physics;
 pub mod player;
 pub mod render;
@@ -31,6 +32,11 @@ pub use network::{
     MAX_SNAPSHOT_CATCHUP_BYTES, MAX_SNAPSHOT_CATCHUP_PACKETS,
     MAX_SNAPSHOT_FRAMES_PER_PEER_PER_TICK, NetworkRuntimeError, NetworkTickReport,
     OrderedDeltaInbox,
+};
+pub use oidc::{
+    MAX_OIDC_JWKS_BYTES, MAX_OIDC_JWKS_KEYS, MAX_OIDC_REPLAY_ENTRIES,
+    MAX_OIDC_TOKEN_LIFETIME_SECONDS, OIDC_CLOCK_SKEW_SECONDS, OIDC_MINIMUM_REMAINING_SECONDS,
+    OidcSessionVerifier, OidcVerificationError,
 };
 pub use physics::{
     BodyError, BodyId, BodyLimits, BodySimulationReport, BodyStateTransition, BodyStepResult,

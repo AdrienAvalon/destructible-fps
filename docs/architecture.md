@@ -76,11 +76,11 @@ not an Internet congestion algorithm or a substitute for authenticated transport
 An isolated secure-session boundary now proves the intended replacement transport before it is wired
 into the authority. Quinn and rustls negotiate TLS 1.3 with a server certificate verified against
 explicit client roots and the `destructible-fps/1` ALPN. The first bidirectional stream carries one
-versioned opaque credential after TLS; an injected synchronous verifier maps it to a non-zero
-server-owned principal. The verifier must perform bounded offline work and enforce issuer, audience,
-validity, and revocation policy rather than trusting caller-supplied identity. Client nonce, unique
-server session ID, and server nonce bind the admission result to that connection. The implementation
-does not expose or use 0-RTT because gameplay commands are not replay-safe.
+versioned opaque credential after TLS; an injected synchronous verifier maps it to an opaque
+server-owned principal. The verifier performs bounded offline work and must never trust a
+caller-supplied display identity. Client nonce, unique server session ID, and server nonce bind the
+admission result to that connection. The implementation does not expose or use 0-RTT because gameplay
+commands are not replay-safe.
 
 Admission has a five-second internal deadline. Credentials are limited to 4 KiB; the
 application-owned encoded and received buffers are securely zeroized on every exit path, credential
@@ -94,11 +94,28 @@ IP overhead. QUIC supplies transport encryption, integrity, loss recovery for st
 control, and connection migration; application command IDs and authoritative sequencing remain
 necessary for semantic replay protection.
 
+The first concrete verifier accepts only RS256 access tokens against a pre-provisioned JWKS no larger
+than 64 KiB and 32 keys. Every key needs a bounded unique `kid`, cannot declare non-signing use or
+operations, and has a 2,048-to-4,096-bit canonical RSA modulus with exponent 65,537. The token header
+cannot redirect key lookup; embedded `jwk`, `jku`, critical, encryption, and compression parameters
+are rejected. Signature, exact HTTPS
+issuer, exact audience, required `exp/iss/aud/sub`, optional `nbf`, `iat`, minimum remaining validity,
+and a maximum 15-minute issued lifetime are enforced. A 4,096-entry fail-closed cache consumes each
+bounded `jti` once until expiry. This deliberately requires a fresh credential after a failed or
+disconnected admission. The internal 256-bit principal is a domain-separated SHA-256 digest of the
+pinned issuer and validated subject; display names never become identity.
+
+JWKS replacement validates the complete candidate before one write-lock swap, so a bad refresh keeps
+the last accepted keys. Verification performs no DNS, HTTP, or file access and holds the key lock only
+long enough to clone the selected immutable key. A trusted supervisor still needs to validate OIDC
+discovery over TLS, enforce cache/freshness policy, deliver rotation atomically, and fail closed when
+the last accepted set expires.
+
 Real loopback QUIC tests cover a valid encrypted datagram exchange, an untrusted certificate, an
 invalid application credential, a stalled admission deadline, a mismatched nonce echo, oversized
 payloads in both directions, and 20 independent sequential sessions. This boundary is not yet a
 remote game server: the authority still uses its legacy loopback UDP socket, and production
-OIDC/JWKS verification, unpredictable nonce/session allocation, certificate lifecycle, reliable
+OIDC discovery/JWKS refresh, unpredictable nonce/session allocation, certificate lifecycle, reliable
 snapshot streams, rate limits, and process integration remain required before non-loopback exposure.
 
 ## Planned engine layers
@@ -176,7 +193,9 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
   including delta recovery, selective snapshot recovery, ACK retry, and per-channel byte evidence
   (delivered for loopback tests);
 - bounded TLS 1.3 QUIC transport and post-TLS credential admission (delivered as an isolated,
-  loopback-tested boundary; authority integration and production verifier remain);
+  loopback-tested boundary);
+- bounded offline RS256/JWKS OIDC validation, atomic rotation, replay cache, and stable principal
+  mapping (delivered as an isolated verifier; trusted refresh and authority integration remain);
 - unreliable sequenced deltas plus reliable snapshot/control channels;
 - configurable stochastic and trace-replay network simulation beyond the delivered fixed profile;
 - spatial interest management and per-client bandwidth budgets;

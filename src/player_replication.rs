@@ -1,8 +1,10 @@
 //! Bounded lossy replication of authoritative player motion.
 
-use crate::{AuthoritativePlayerState, FixedMicrometers3};
+use crate::{
+    AuthoritativePlayerState, FixedMicrometers3, MAX_BUILD_COORDINATE, MICROMETERS_PER_VOXEL,
+};
 use core::fmt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 const PLAYER_STATE_MAGIC: [u8; 4] = *b"DFPL";
 const PLAYER_STATE_VERSION: u8 = 1;
@@ -12,6 +14,11 @@ const GROUNDED_FLAG: u8 = 1;
 pub const MAX_REPLICATED_PLAYERS: usize = 16;
 pub const PLAYER_STATE_BROADCAST_HZ: u64 = 20;
 pub const PLAYER_STATE_BROADCAST_INTERVAL_TICKS: u64 = 3;
+pub const PLAYER_INTERPOLATION_DELAY_TICKS: u64 = 6;
+pub const MAX_PLAYER_INTERPOLATION_PACKETS: usize = 8;
+pub const MAX_REPLICATED_PLAYER_POSITION_UM: i64 =
+    (MAX_BUILD_COORDINATE as i64 + 1) * MICROMETERS_PER_VOXEL;
+pub const MAX_REPLICATED_PLAYER_VELOCITY_UM_PER_SECOND: i64 = 64_000_000;
 pub const MAX_PLAYER_STATE_DATAGRAM_BYTES: usize =
     PLAYER_STATE_HEADER_BYTES + MAX_REPLICATED_PLAYERS * PLAYER_STATE_ENTRY_BYTES;
 
@@ -54,6 +61,8 @@ pub enum PlayerStateCodecError {
     InvalidSession,
     UnorderedSession { previous: u64, current: u64 },
     InvalidFlags(u8),
+    PositionOutOfRange(u64),
+    VelocityOutOfRange(u64),
 }
 
 impl fmt::Display for PlayerStateCodecError {
@@ -81,6 +90,18 @@ impl fmt::Display for PlayerStateCodecError {
             ),
             Self::InvalidFlags(flags) => {
                 write!(formatter, "invalid player-state flags {flags:#04x}")
+            }
+            Self::PositionOutOfRange(session_id) => {
+                write!(
+                    formatter,
+                    "player {session_id} position exceeds the world bound"
+                )
+            }
+            Self::VelocityOutOfRange(session_id) => {
+                write!(
+                    formatter,
+                    "player {session_id} velocity exceeds the motion bound"
+                )
             }
         }
     }
@@ -286,6 +307,280 @@ impl PlayerStateInbox {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerInterpolationSample {
+    pub target_server_tick: u64,
+    pub target_subtick_per_mille: u16,
+    pub source_ticks: [u64; 2],
+    pub players: Vec<ReplicatedPlayerState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlayerInterpolationError {
+    Receive(PlayerStateReceiveError),
+    InvalidSubtick(u16),
+    NoSamples,
+}
+
+impl fmt::Display for PlayerInterpolationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Receive(error) => error.fmt(formatter),
+            Self::InvalidSubtick(subtick) => {
+                write!(
+                    formatter,
+                    "player interpolation subtick {subtick} exceeds 999"
+                )
+            }
+            Self::NoSamples => write!(formatter, "player interpolation has no samples"),
+        }
+    }
+}
+
+impl std::error::Error for PlayerInterpolationError {}
+
+impl From<PlayerStateReceiveError> for PlayerInterpolationError {
+    fn from(value: PlayerStateReceiveError) -> Self {
+        Self::Receive(value)
+    }
+}
+
+/// Bounded history used to render remote players behind the latest authoritative tick.
+#[derive(Debug, Default)]
+pub struct PlayerInterpolationBuffer {
+    packets: VecDeque<PlayerStatePacket>,
+}
+
+impl PlayerInterpolationBuffer {
+    /// Appends one newer complete view and evicts the oldest view at the fixed history cap.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed or stale/replayed datagrams without changing buffered history.
+    pub fn push(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<PlayerStateApplyReport, PlayerInterpolationError> {
+        let packet = decode_player_state_packet(bytes)
+            .map_err(PlayerStateReceiveError::Codec)
+            .map_err(PlayerInterpolationError::Receive)?;
+        let previous = self.packets.back();
+        if let Some(previous) = previous
+            && packet.server_tick <= previous.server_tick
+        {
+            return Err(PlayerStateReceiveError::StaleServerTick {
+                received: packet.server_tick,
+                last_applied: previous.server_tick,
+            }
+            .into());
+        }
+        let joined_players = packet
+            .players
+            .iter()
+            .filter(|player| {
+                previous.is_none_or(|previous| {
+                    player_by_session(&previous.players, player.session_id).is_none()
+                })
+            })
+            .count();
+        let updated_players = packet.players.len().saturating_sub(joined_players);
+        let removed_players = previous.map_or(0, |previous| {
+            previous
+                .players
+                .iter()
+                .filter(|player| player_by_session(&packet.players, player.session_id).is_none())
+                .count()
+        });
+        let server_tick = packet.server_tick;
+        if self.packets.len() == MAX_PLAYER_INTERPOLATION_PACKETS {
+            self.packets.pop_front();
+        }
+        self.packets.push_back(packet);
+        Ok(PlayerStateApplyReport {
+            server_tick,
+            joined_players,
+            updated_players,
+            removed_players,
+        })
+    }
+
+    /// Samples a complete remote-player view at an explicit server tick and fractional subtick.
+    ///
+    /// Targets outside retained history clamp to the nearest view. Between two views, players that
+    /// leave remain visible until the newer tick while new players appear at that newer tick.
+    ///
+    /// # Errors
+    ///
+    /// Rejects fractional values above 999 or sampling before any state has arrived.
+    pub fn sample(
+        &self,
+        target_server_tick: u64,
+        target_subtick_per_mille: u16,
+    ) -> Result<PlayerInterpolationSample, PlayerInterpolationError> {
+        if target_subtick_per_mille > 999 {
+            return Err(PlayerInterpolationError::InvalidSubtick(
+                target_subtick_per_mille,
+            ));
+        }
+        let first = self
+            .packets
+            .front()
+            .ok_or(PlayerInterpolationError::NoSamples)?;
+        let last = self
+            .packets
+            .back()
+            .ok_or(PlayerInterpolationError::NoSamples)?;
+        if target_server_tick < first.server_tick
+            || (target_server_tick == first.server_tick && target_subtick_per_mille == 0)
+        {
+            return Ok(clamped_sample(
+                target_server_tick,
+                target_subtick_per_mille,
+                first,
+            ));
+        }
+        if target_server_tick >= last.server_tick {
+            return Ok(clamped_sample(
+                target_server_tick,
+                target_subtick_per_mille,
+                last,
+            ));
+        }
+        for (older, newer) in self.packets.iter().zip(self.packets.iter().skip(1)) {
+            if target_server_tick > newer.server_tick
+                || (target_server_tick == newer.server_tick && target_subtick_per_mille > 0)
+            {
+                continue;
+            }
+            if target_server_tick < older.server_tick {
+                continue;
+            }
+            let numerator = i128::from(target_server_tick - older.server_tick)
+                .saturating_mul(1_000)
+                .saturating_add(i128::from(target_subtick_per_mille));
+            let denominator = i128::from(newer.server_tick - older.server_tick) * 1_000;
+            let players = if numerator >= denominator {
+                newer.players.clone()
+            } else {
+                interpolate_players(&older.players, &newer.players, numerator, denominator)
+            };
+            return Ok(PlayerInterpolationSample {
+                target_server_tick,
+                target_subtick_per_mille,
+                source_ticks: [older.server_tick, newer.server_tick],
+                players,
+            });
+        }
+        Ok(clamped_sample(
+            target_server_tick,
+            target_subtick_per_mille,
+            last,
+        ))
+    }
+
+    #[must_use]
+    pub fn delayed_target_tick(&self) -> Option<u64> {
+        self.packets.back().map(|packet| {
+            packet
+                .server_tick
+                .saturating_sub(PLAYER_INTERPOLATION_DELAY_TICKS)
+        })
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+}
+
+fn clamped_sample(
+    target_server_tick: u64,
+    target_subtick_per_mille: u16,
+    packet: &PlayerStatePacket,
+) -> PlayerInterpolationSample {
+    PlayerInterpolationSample {
+        target_server_tick,
+        target_subtick_per_mille,
+        source_ticks: [packet.server_tick; 2],
+        players: packet.players.clone(),
+    }
+}
+
+fn interpolate_players(
+    older: &[ReplicatedPlayerState],
+    newer: &[ReplicatedPlayerState],
+    numerator: i128,
+    denominator: i128,
+) -> Vec<ReplicatedPlayerState> {
+    older
+        .iter()
+        .map(|older_player| {
+            let Some(newer_player) = player_by_session(newer, older_player.session_id) else {
+                return *older_player;
+            };
+            ReplicatedPlayerState {
+                session_id: older_player.session_id,
+                position_um: interpolate_fixed(
+                    older_player.position_um,
+                    newer_player.position_um,
+                    numerator,
+                    denominator,
+                ),
+                velocity_um_per_second: interpolate_fixed(
+                    older_player.velocity_um_per_second,
+                    newer_player.velocity_um_per_second,
+                    numerator,
+                    denominator,
+                ),
+                grounded: older_player.grounded,
+                last_input_sequence: older_player.last_input_sequence,
+            }
+        })
+        .collect()
+}
+
+fn interpolate_fixed(
+    older: FixedMicrometers3,
+    newer: FixedMicrometers3,
+    numerator: i128,
+    denominator: i128,
+) -> FixedMicrometers3 {
+    FixedMicrometers3 {
+        x: interpolate_i64(older.x, newer.x, numerator, denominator),
+        y: interpolate_i64(older.y, newer.y, numerator, denominator),
+        z: interpolate_i64(older.z, newer.z, numerator, denominator),
+    }
+}
+
+fn interpolate_i64(older: i64, newer: i64, numerator: i128, denominator: i128) -> i64 {
+    debug_assert!(denominator > 0 && numerator < denominator);
+    let older = i128::from(older);
+    let difference = i128::from(newer) - older;
+    let interpolated = older + difference * numerator / denominator;
+    i64::try_from(interpolated).unwrap_or_else(|_error| {
+        if interpolated.is_negative() {
+            i64::MIN
+        } else {
+            i64::MAX
+        }
+    })
+}
+
+fn player_by_session(
+    players: &[ReplicatedPlayerState],
+    session_id: u64,
+) -> Option<&ReplicatedPlayerState> {
+    players
+        .binary_search_by_key(&session_id, |player| player.session_id)
+        .ok()
+        .map(|index| &players[index])
+}
+
 const fn validate_header(
     server_tick: u64,
     player_count: usize,
@@ -311,9 +606,24 @@ fn validate_player_order(players: &[ReplicatedPlayerState]) -> Result<(), Player
                 current: player.session_id,
             });
         }
+        if fixed_out_of_range(player.position_um, MAX_REPLICATED_PLAYER_POSITION_UM) {
+            return Err(PlayerStateCodecError::PositionOutOfRange(player.session_id));
+        }
+        if fixed_out_of_range(
+            player.velocity_um_per_second,
+            MAX_REPLICATED_PLAYER_VELOCITY_UM_PER_SECOND,
+        ) {
+            return Err(PlayerStateCodecError::VelocityOutOfRange(player.session_id));
+        }
         previous = player.session_id;
     }
     Ok(())
+}
+
+fn fixed_out_of_range(value: FixedMicrometers3, maximum: i64) -> bool {
+    [value.x, value.y, value.z]
+        .into_iter()
+        .any(|component| component.unsigned_abs() > maximum.cast_unsigned())
 }
 
 fn push_fixed(bytes: &mut Vec<u8>, value: FixedMicrometers3) {
@@ -502,5 +812,107 @@ mod tests {
         );
         assert_eq!(inbox.last_server_tick(), 9);
         assert_eq!(inbox.player(2), Some(next_player));
+    }
+
+    #[test]
+    fn interpolation_is_deterministic_across_join_and_leave_boundaries() {
+        let mut buffer = PlayerInterpolationBuffer::default();
+        let first = encode_player_state_packet(3, &[player(1, 0), player(2, 100)])
+            .expect("first interpolation view");
+        let second = encode_player_state_packet(6, &[player(1, 300), player(3, 900)])
+            .expect("second interpolation view");
+        buffer.push(&first).expect("first buffered view");
+        assert_eq!(
+            buffer.push(&second),
+            Ok(PlayerStateApplyReport {
+                server_tick: 6,
+                joined_players: 1,
+                updated_players: 1,
+                removed_players: 1,
+            })
+        );
+
+        let middle = buffer.sample(4, 500).expect("midpoint view");
+        assert_eq!(middle.source_ticks, [3, 6]);
+        assert_eq!(middle.players.len(), 2);
+        assert_eq!(middle.players[0].session_id, 1);
+        assert_eq!(middle.players[0].position_um.x, 150);
+        assert_eq!(middle.players[1].session_id, 2);
+        assert_eq!(middle.players[1].position_um.x, 100);
+        assert!(middle.players.iter().all(|state| state.session_id != 3));
+
+        let boundary = buffer.sample(6, 0).expect("exact newer boundary");
+        assert_eq!(boundary.players, vec![player(1, 300), player(3, 900)]);
+        assert_eq!(boundary.source_ticks, [6; 2]);
+    }
+
+    #[test]
+    fn interpolation_history_and_stale_rejection_remain_bounded() {
+        let mut buffer = PlayerInterpolationBuffer::default();
+        assert_eq!(
+            buffer.sample(1, 0),
+            Err(PlayerInterpolationError::NoSamples)
+        );
+        for server_tick in 1..=12 {
+            let packet = encode_player_state_packet(
+                server_tick,
+                &[player(1, i64::try_from(server_tick).expect("small tick"))],
+            )
+            .expect("bounded interpolation packet");
+            buffer.push(&packet).expect("newer interpolation packet");
+        }
+        assert_eq!(buffer.len(), MAX_PLAYER_INTERPOLATION_PACKETS);
+        assert_eq!(buffer.delayed_target_tick(), Some(6));
+        let retained = buffer.sample(1, 0).expect("clamped old sample");
+        assert_eq!(retained.source_ticks, [5; 2]);
+        assert_eq!(retained.players[0].position_um.x, 5);
+        assert_eq!(
+            buffer.sample(12, 1_000),
+            Err(PlayerInterpolationError::InvalidSubtick(1_000))
+        );
+        let stale = encode_player_state_packet(11, &[player(1, 99)]).expect("stale packet");
+        assert_eq!(
+            buffer.push(&stale),
+            Err(PlayerInterpolationError::Receive(
+                PlayerStateReceiveError::StaleServerTick {
+                    received: 11,
+                    last_applied: 12,
+                }
+            ))
+        );
+        assert_eq!(buffer.len(), MAX_PLAYER_INTERPOLATION_PACKETS);
+        assert_eq!(
+            buffer.sample(12, 0).expect("latest view").players[0]
+                .position_um
+                .x,
+            12
+        );
+    }
+
+    #[test]
+    fn interpolation_handles_opposite_world_bounds_without_overflow() {
+        let bounded = |server_tick, x| {
+            encode_player_state_packet(
+                server_tick,
+                &[ReplicatedPlayerState {
+                    session_id: 1,
+                    position_um: FixedMicrometers3 { x, y: 0, z: 0 },
+                    velocity_um_per_second: FixedMicrometers3::default(),
+                    grounded: true,
+                    last_input_sequence: server_tick,
+                }],
+            )
+            .expect("bounded extreme state")
+        };
+        let mut buffer = PlayerInterpolationBuffer::default();
+        buffer
+            .push(&bounded(1, -MAX_REPLICATED_PLAYER_POSITION_UM))
+            .expect("lower extreme");
+        buffer
+            .push(&bounded(3, MAX_REPLICATED_PLAYER_POSITION_UM))
+            .expect("upper extreme");
+
+        let middle = buffer.sample(2, 0).expect("extreme midpoint");
+        assert_eq!(middle.players[0].position_um.x, 0);
     }
 }

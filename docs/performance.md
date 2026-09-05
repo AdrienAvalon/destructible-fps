@@ -3,6 +3,22 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — deterministic remote-player interpolation increment
+
+Source state: parent `6c5b1f6` plus the interpolation increment documented here. The client retains at
+most eight validated full views, targets six 60 Hz server ticks (100 ms) behind the newest state, and
+interpolates fixed-micrometre position and velocity with integer arithmetic. World positions and
+velocities are codec-bounded before their use in interpolation. Targets older than history or newer
+than the latest packet clamp to a real authority sample; no unbounded extrapolation is performed.
+Join and leave visibility changes only at the newer complete-view boundary.
+
+The worst retained encoded payload is 8,432 bytes (eight maximum 1,054-byte packets), excluding
+small container allocation metadata. History cannot grow with session duration or packet rate.
+Coverage includes exact midpoint motion, join/leave boundaries, stale atomic rejection, capacity
+eviction, invalid fractional time, delayed target selection, and interpolation between opposite
+world bounds without arithmetic overflow. The complete promotion passed 111 library tests, four
+binary tests, and 41 integration tests in debug and release; strict Clippy was clean.
+
 ## 2026-09-05 — bounded player-state replication increment
 
 Source state: parent `b084d66` plus the player-state increment documented here. Authenticated motion

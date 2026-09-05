@@ -82,6 +82,14 @@ roll state backward. Absence from a newer complete view means the session left. 
 correctness baseline consumes 168.64 kbit/s of payload per client; interpolation, delta baselines,
 and spatial interest remain required before the larger scale gate.
 
+Remote rendering retains at most eight validated complete views and normally samples six server
+ticks, or 100 ms, behind the newest tick. Position and velocity interpolation use fixed integers and
+bounded world/motion inputs, avoiding frame-rate-dependent accumulation. A player leaving remains in
+the older view until the newer boundary; a joining player appears exactly at that boundary. Targets
+outside retained history clamp instead of extrapolating unbounded motion, while an old or malformed
+packet leaves the whole interpolation history unchanged. The local controlled player will use the
+input acknowledgement for prediction reconciliation rather than this delayed remote path.
+
 The dedicated-authority sessions described above are deliberately loopback-only and unauthenticated;
 the snapshot hash is an integrity check, not a MAC, and that legacy transport provides no
 confidentiality, identity, packet authenticity, or congestion control. It must not be exposed beyond

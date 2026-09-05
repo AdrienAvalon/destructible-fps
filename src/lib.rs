@@ -58,10 +58,13 @@ pub use physics::{
     step_rigid_bodies, step_rigid_body, valid_fixed_quaternion, valid_rigid_body_state,
 };
 pub use player_replication::{
-    MAX_PLAYER_STATE_DATAGRAM_BYTES, MAX_REPLICATED_PLAYERS, PLAYER_STATE_BROADCAST_HZ,
-    PLAYER_STATE_BROADCAST_INTERVAL_TICKS, PlayerStateApplyReport, PlayerStateCodecError,
-    PlayerStateInbox, PlayerStatePacket, PlayerStateReceiveError, ReplicatedPlayerState,
-    decode_player_state_packet, encode_player_state_packet, is_player_state_datagram,
+    MAX_PLAYER_INTERPOLATION_PACKETS, MAX_PLAYER_STATE_DATAGRAM_BYTES,
+    MAX_REPLICATED_PLAYER_POSITION_UM, MAX_REPLICATED_PLAYER_VELOCITY_UM_PER_SECOND,
+    MAX_REPLICATED_PLAYERS, PLAYER_INTERPOLATION_DELAY_TICKS, PLAYER_STATE_BROADCAST_HZ,
+    PLAYER_STATE_BROADCAST_INTERVAL_TICKS, PlayerInterpolationBuffer, PlayerInterpolationError,
+    PlayerInterpolationSample, PlayerStateApplyReport, PlayerStateCodecError, PlayerStateInbox,
+    PlayerStatePacket, PlayerStateReceiveError, ReplicatedPlayerState, decode_player_state_packet,
+    encode_player_state_packet, is_player_state_datagram,
 };
 pub use replication::{
     AuthoritativeServer, BodyStateUpdate, BodyVoxelAssignment, BuildCommand, BuildReport,

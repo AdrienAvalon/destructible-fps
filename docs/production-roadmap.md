@@ -105,9 +105,10 @@ streaming, with no synchronous world meshing on the presentation thread.
 - fixed-step authoritative character movement with bounded newest-input retention, independent
   input replay protection, stale-input expiry, gravity, jumping, static collision, fall recovery and
   session cleanup (server slice delivered); a 20 Hz, single-datagram, full-view state stream now
-  replicates fixed position, velocity, grounded state and input acknowledgement for all 16 sessions
-  (delivered; interpolation, prediction/reconciliation, view authority and dynamic-body contact
-  remain).
+  replicates fixed position, velocity, grounded state and input acknowledgement for all 16 sessions;
+  an eight-view integer interpolation history renders remote state at a bounded 100 ms delay with
+  coherent joins and leaves (delivered; local prediction/reconciliation, view authority and
+  dynamic-body contact remain).
 
 Exit gate: removing a load-bearing member causes a repeatable progressive collapse; the worst-case
 fixture remains inside the 60 Hz server budget and converges bit-for-bit on replicas.
@@ -137,7 +138,8 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   two-client secure-authority convergence (delivered in-process over real QUIC sockets);
 - player-state protocol v1 with a sorted 16-player cap, 1,054-byte maximum packet, 20 Hz latest-wins
   broadcast, input acknowledgement, stale/replay rejection, disconnect removal, and real two-client
-  QUIC convergence (delivered; interpolation, prediction and spatial delta baselines remain);
+  QUIC convergence, plus a 100 ms bounded deterministic remote interpolation buffer (delivered;
+  local prediction and spatial delta baselines remain);
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
   Unix permission checks, static-JWKS expiry, signal-aware shutdown, and a four-case external-process
   matrix (delivered for loopback; online refresh and remote policy remain);

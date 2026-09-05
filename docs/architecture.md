@@ -40,6 +40,8 @@ snapshot. Corrupt or stale data cannot partially mutate a replica.
 - boundary-aware chunk invalidation and bounded background remeshing after destruction;
 - per-vertex voxel ambient occlusion, a 2,048² comparison shadow map, procedural lighting,
   roughness, surface variation, fog, and filmic tone mapping with exactly one display transfer;
+- bounded CPU frame distributions and non-blocking GPU timestamp readback with a fixed four-slot
+  ring and graceful capability fallback;
 - auto-terminating real-GPU smoke mode.
 
 Gate evidence: the release smoke test created a Vulkan surface on the RTX 4050 Laptop GPU, validated

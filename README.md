@@ -24,7 +24,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map, procedural material
-  shading, distance fog, single-transfer tone mapping, and a crosshair.
+  shading, distance fog, single-transfer tone mapping, and a crosshair;
+- non-blocking real-GPU timestamp queries and bounded CPU/GPU p50/p95/p99 frame telemetry.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
 game. Structural collapse, detached rigid bodies, remote sessions, audio, asset-quality PBR,
@@ -71,7 +72,9 @@ cargo run --release --bin playable-demo -- --showcase
 ```
 
 The window title reports FPS, frame time, solid voxel count, cursor state, and the most recent
-authoritative destruction result. It is a lightweight live HUD, not a captured performance report.
+authoritative destruction result. An auto-terminating smoke run prints bounded redraw cadence,
+CPU frame-work, GPU shadow, GPU world/HUD, and GPU-total distributions. Point-in-time measurements
+are recorded in [`docs/performance.md`](docs/performance.md).
 
 ## Runtime dependencies
 

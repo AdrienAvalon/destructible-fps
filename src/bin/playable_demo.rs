@@ -5,6 +5,7 @@ use destructible_fps::{
     mesh_scheduler::{MAX_CHUNKS_PER_MESH_JOB, MeshScheduler},
     player::{MovementInput, Player},
     render::{RenderOutcome, Renderer},
+    telemetry::{DistributionSummary, SampleWindow},
 };
 use glam::Vec3;
 use std::{collections::HashSet, error::Error, sync::Arc, time::Duration, time::Instant};
@@ -19,6 +20,65 @@ use winit::{
 
 const FIXED_STEP_SECONDS: f32 = 1.0 / 120.0;
 const MAX_PENDING_MESH_CHUNKS: usize = 512;
+const TELEMETRY_WINDOW: usize = 4_096;
+
+struct RuntimeTelemetry {
+    frame_interval: SampleWindow,
+    cpu_frame_work: SampleWindow,
+    gpu_shadow: SampleWindow,
+    gpu_world_hud: SampleWindow,
+    gpu_total: SampleWindow,
+}
+
+impl RuntimeTelemetry {
+    fn new() -> Self {
+        Self {
+            frame_interval: SampleWindow::new(TELEMETRY_WINDOW),
+            cpu_frame_work: SampleWindow::new(TELEMETRY_WINDOW),
+            gpu_shadow: SampleWindow::new(TELEMETRY_WINDOW),
+            gpu_world_hud: SampleWindow::new(TELEMETRY_WINDOW),
+            gpu_total: SampleWindow::new(TELEMETRY_WINDOW),
+        }
+    }
+
+    fn record_gpu(&mut self, renderer: &mut Renderer) {
+        while let Some(sample) = renderer.take_gpu_frame_time() {
+            self.gpu_shadow.record_ms(sample.shadow_ms);
+            self.gpu_world_hud.record_ms(sample.world_hud_ms);
+            self.gpu_total.record_ms(sample.total_ms);
+        }
+    }
+
+    fn print_report(&self, renderer: &Renderer) {
+        println!(
+            "Telemetrie de frame (fenetre bornee aux {TELEMETRY_WINDOW} derniers echantillons)"
+        );
+        print_distribution("intervalle redraw", self.frame_interval.summary());
+        print_distribution("travail CPU frame", self.cpu_frame_work.summary());
+        if renderer.gpu_timing_supported() {
+            print_distribution("GPU ombres", self.gpu_shadow.summary());
+            print_distribution("GPU monde + HUD", self.gpu_world_hud.summary());
+            print_distribution("GPU frame totale", self.gpu_total.summary());
+            println!(
+                "  echantillons GPU abandonnes {:>8}",
+                renderer.gpu_timing_dropped_samples()
+            );
+        } else {
+            println!("  GPU                      timestamps indisponibles");
+        }
+    }
+}
+
+fn print_distribution(label: &str, summary: Option<DistributionSummary>) {
+    if let Some(summary) = summary {
+        println!(
+            "  {label:<24} n={:>4} p50={:>6.3} ms p95={:>6.3} ms p99={:>6.3} ms max={:>6.3} ms",
+            summary.samples, summary.p50_ms, summary.p95_ms, summary.p99_ms, summary.max_ms
+        );
+    } else {
+        println!("  {label:<24} aucun echantillon");
+    }
+}
 
 struct Game {
     window: Arc<Window>,
@@ -38,6 +98,7 @@ struct Game {
     pending_mesh_chunks: HashSet<IVec3>,
     mesh_job_in_flight: bool,
     mesh_started: Option<Instant>,
+    telemetry: RuntimeTelemetry,
 }
 
 impl Game {
@@ -88,6 +149,7 @@ impl Game {
             pending_mesh_chunks: HashSet::new(),
             mesh_job_in_flight: false,
             mesh_started: None,
+            telemetry: RuntimeTelemetry::new(),
         })
     }
 
@@ -226,11 +288,13 @@ impl Game {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop, exit_after: Option<Duration>) {
+        let cpu_frame_started = Instant::now();
         let now = Instant::now();
-        self.accumulator += now
-            .duration_since(self.previous_frame)
-            .as_secs_f32()
-            .min(0.1);
+        let frame_interval = now.duration_since(self.previous_frame);
+        self.telemetry
+            .frame_interval
+            .record_ms(frame_interval.as_secs_f64() * 1_000.0);
+        self.accumulator += frame_interval.as_secs_f32().min(0.1);
         self.previous_frame = now;
         if !self.showcase {
             let input = self.movement_input();
@@ -265,6 +329,10 @@ impl Game {
                 }
             }
         }
+        self.telemetry.record_gpu(&mut self.renderer);
+        self.telemetry
+            .cpu_frame_work
+            .record_ms(cpu_frame_started.elapsed().as_secs_f64() * 1_000.0);
 
         self.frames_since_stats += 1;
         let stats_elapsed = now.duration_since(self.stats_since);
@@ -286,6 +354,7 @@ impl Game {
             self.stats_since = now;
         }
         if exit_after.is_some_and(|duration| now.duration_since(self.started) >= duration) {
+            self.telemetry.print_report(&self.renderer);
             println!("smoke test graphique termine proprement");
             event_loop.exit();
         }

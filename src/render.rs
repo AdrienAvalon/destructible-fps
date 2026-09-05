@@ -8,12 +8,19 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, mpsc},
+};
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_MAP_SIZE: u32 = 2_048;
+const GPU_TIMESTAMP_COUNT: u32 = 4;
+const GPU_TIMESTAMP_BYTES: u64 = 4 * 8;
+const GPU_READBACK_SLOTS: usize = 4;
+const MAX_COMPLETED_GPU_SAMPLES: usize = 16;
 const SHADER: &str = include_str!("shaders/world.wgsl");
 
 #[repr(C)]
@@ -36,6 +43,164 @@ struct GpuChunk {
 pub struct RenderStats {
     pub chunks: usize,
     pub exposed_faces: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuFrameTime {
+    pub shadow_ms: f64,
+    pub world_hud_ms: f64,
+    pub total_ms: f64,
+}
+
+enum ReadbackState {
+    Idle,
+    Scheduled,
+    Pending(mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>),
+}
+
+struct ReadbackSlot {
+    buffer: wgpu::Buffer,
+    state: ReadbackState,
+}
+
+struct GpuProfiler {
+    query_set: wgpu::QuerySet,
+    resolve_buffer: wgpu::Buffer,
+    slots: Vec<ReadbackSlot>,
+    next_slot: usize,
+    timestamp_period_ns: f64,
+    completed: VecDeque<GpuFrameTime>,
+    dropped_samples: u64,
+}
+
+impl GpuProfiler {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("frame GPU timestamp queries"),
+            ty: wgpu::QueryType::Timestamp,
+            count: GPU_TIMESTAMP_COUNT,
+        });
+        let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frame GPU timestamp resolve buffer"),
+            size: GPU_TIMESTAMP_BYTES,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let slots = (0..GPU_READBACK_SLOTS)
+            .map(|_| ReadbackSlot {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("frame GPU timestamp readback"),
+                    size: GPU_TIMESTAMP_BYTES,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }),
+                state: ReadbackState::Idle,
+            })
+            .collect();
+        Self {
+            query_set,
+            resolve_buffer,
+            slots,
+            next_slot: 0,
+            timestamp_period_ns: f64::from(queue.get_timestamp_period()),
+            completed: VecDeque::with_capacity(MAX_COMPLETED_GPU_SAMPLES),
+            dropped_samples: 0,
+        }
+    }
+
+    fn poll(&mut self, device: &wgpu::Device) {
+        if device.poll(wgpu::PollType::Poll).is_err() {
+            return;
+        }
+        for slot in &mut self.slots {
+            let result = match &slot.state {
+                ReadbackState::Pending(receiver) => receiver.try_recv(),
+                ReadbackState::Idle | ReadbackState::Scheduled => continue,
+            };
+            match result {
+                Ok(Ok(())) => {
+                    if let Ok(view) = slot.buffer.get_mapped_range(..) {
+                        let timestamps = bytemuck::cast_slice::<u8, u64>(&view);
+                        if let Some(sample) = gpu_frame_time(timestamps, self.timestamp_period_ns) {
+                            if self.completed.len() == MAX_COMPLETED_GPU_SAMPLES {
+                                self.completed.pop_front();
+                                self.dropped_samples = self.dropped_samples.saturating_add(1);
+                            }
+                            self.completed.push_back(sample);
+                        }
+                        drop(view);
+                    }
+                    slot.buffer.unmap();
+                    slot.state = ReadbackState::Idle;
+                }
+                Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
+                    slot.state = ReadbackState::Idle;
+                    self.dropped_samples = self.dropped_samples.saturating_add(1);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    const fn timestamps(&self, begin: u32, end: u32) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some(begin),
+            end_of_pass_write_index: Some(end),
+        }
+    }
+
+    fn encode_readback(&mut self, encoder: &mut wgpu::CommandEncoder) -> Option<usize> {
+        let slot_index = (0..self.slots.len())
+            .map(|offset| (self.next_slot + offset) % self.slots.len())
+            .find(|&index| matches!(self.slots[index].state, ReadbackState::Idle));
+        let Some(slot_index) = slot_index else {
+            self.dropped_samples = self.dropped_samples.saturating_add(1);
+            return None;
+        };
+        encoder.resolve_query_set(
+            &self.query_set,
+            0..GPU_TIMESTAMP_COUNT,
+            &self.resolve_buffer,
+            0,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.resolve_buffer,
+            0,
+            &self.slots[slot_index].buffer,
+            0,
+            GPU_TIMESTAMP_BYTES,
+        );
+        self.slots[slot_index].state = ReadbackState::Scheduled;
+        self.next_slot = (slot_index + 1) % self.slots.len();
+        Some(slot_index)
+    }
+
+    fn map_after_submit(&mut self, slot_index: usize) {
+        let slot = &mut self.slots[slot_index];
+        debug_assert!(matches!(slot.state, ReadbackState::Scheduled));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        slot.buffer
+            .map_async(wgpu::MapMode::Read, .., move |result| {
+                let _ = sender.try_send(result);
+            });
+        slot.state = ReadbackState::Pending(receiver);
+    }
+}
+
+fn gpu_frame_time(timestamps: &[u64], period_ns: f64) -> Option<GpuFrameTime> {
+    let [shadow_begin, shadow_end, world_begin, world_end] = *timestamps else {
+        return None;
+    };
+    if shadow_end < shadow_begin || world_begin < shadow_end || world_end < world_begin {
+        return None;
+    }
+    let ticks_to_ms = |ticks: u64| ticks as f64 * period_ns / 1_000_000.0;
+    Some(GpuFrameTime {
+        shadow_ms: ticks_to_ms(shadow_end - shadow_begin),
+        world_hud_ms: ticks_to_ms(world_end - world_begin),
+        total_ms: ticks_to_ms(world_end - shadow_begin),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +227,7 @@ pub struct Renderer {
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
     shadow_sampling_bind_group: wgpu::BindGroup,
+    gpu_profiler: Option<GpuProfiler>,
     chunks: HashMap<IVec3, GpuChunk>,
     stats: RenderStats,
 }
@@ -95,9 +261,16 @@ impl Renderer {
             "GPU: {} ({:?}, backend {:?}, pilote {})",
             info.name, info.device_type, info.backend, info.driver
         );
+        let supports_gpu_timestamps = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let required_features = if supports_gpu_timestamps {
+            wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("destructible-fps device"),
+                required_features,
                 ..Default::default()
             })
             .await
@@ -110,6 +283,15 @@ impl Renderer {
             config.format = format;
         }
         surface.configure(&device, &config);
+        let gpu_profiler = supports_gpu_timestamps.then(|| GpuProfiler::new(&device, &queue));
+        println!(
+            "Telemetrie GPU par timestamps: {}",
+            if supports_gpu_timestamps {
+                "active"
+            } else {
+                "indisponible sur cet adaptateur"
+            }
+        );
 
         let globals = Globals {
             view_projection: Mat4::IDENTITY.to_cols_array_2d(),
@@ -335,6 +517,7 @@ impl Renderer {
             globals_buffer,
             globals_bind_group,
             shadow_sampling_bind_group,
+            gpu_profiler,
             chunks: HashMap::new(),
             stats: RenderStats::default(),
         };
@@ -438,6 +621,24 @@ impl Renderer {
         self.stats
     }
 
+    pub fn take_gpu_frame_time(&mut self) -> Option<GpuFrameTime> {
+        self.gpu_profiler
+            .as_mut()
+            .and_then(|profiler| profiler.completed.pop_front())
+    }
+
+    #[must_use]
+    pub fn gpu_timing_dropped_samples(&self) -> u64 {
+        self.gpu_profiler
+            .as_ref()
+            .map_or(0, |profiler| profiler.dropped_samples)
+    }
+
+    #[must_use]
+    pub const fn gpu_timing_supported(&self) -> bool {
+        self.gpu_profiler.is_some()
+    }
+
     #[allow(clippy::too_many_lines)]
     pub fn render(
         &mut self,
@@ -445,6 +646,9 @@ impl Renderer {
         view_direction: Vec3,
         elapsed_seconds: f32,
     ) -> RenderOutcome {
+        if let Some(profiler) = &mut self.gpu_profiler {
+            profiler.poll(&self.device);
+        }
         let aspect = self.config.width as f32 / self.config.height as f32;
         let projection =
             glam::camera::rh::proj::directx::perspective(70_f32.to_radians(), aspect, 0.05, 420.0);
@@ -482,6 +686,10 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
+        let shadow_timestamp_writes = self
+            .gpu_profiler
+            .as_ref()
+            .map(|profiler| profiler.timestamps(0, 1));
         {
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("directional shadow pass"),
@@ -494,6 +702,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: shadow_timestamp_writes,
                 ..Default::default()
             });
             shadow_pass.set_pipeline(&self.shadow_pipeline);
@@ -504,6 +713,10 @@ impl Renderer {
                 shadow_pass.draw_indexed(0..chunk.index_count, 0, 0..1);
             }
         }
+        let world_timestamp_writes = self
+            .gpu_profiler
+            .as_ref()
+            .map(|profiler| profiler.timestamps(2, 3));
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("world and HUD pass"),
@@ -529,6 +742,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: world_timestamp_writes,
                 ..Default::default()
             });
             pass.set_pipeline(&self.world_pipeline);
@@ -542,7 +756,14 @@ impl Renderer {
             pass.set_pipeline(&self.crosshair_pipeline);
             pass.draw(0..12, 0..1);
         }
+        let readback_slot = self
+            .gpu_profiler
+            .as_mut()
+            .and_then(|profiler| profiler.encode_readback(&mut encoder));
         self.queue.submit([encoder.finish()]);
+        if let (Some(profiler), Some(slot_index)) = (&mut self.gpu_profiler, readback_slot) {
+            profiler.map_after_submit(slot_index);
+        }
         self.queue.present(output);
         if suboptimal {
             RenderOutcome::Reconfigure
@@ -636,5 +857,21 @@ mod tests {
         assert!(ndc.x.abs() <= 1.0);
         assert!(ndc.y.abs() <= 1.0);
         assert!((0.0..=1.0).contains(&ndc.z));
+    }
+
+    #[test]
+    fn gpu_timestamps_are_split_into_pass_and_total_times() {
+        let sample = gpu_frame_time(&[100, 160, 175, 275], 10.0).expect("valid timestamps");
+
+        assert_eq!(
+            sample,
+            GpuFrameTime {
+                shadow_ms: 0.0006,
+                world_hud_ms: 0.001,
+                total_ms: 0.00175,
+            }
+        );
+        assert!(gpu_frame_time(&[100, 99, 175, 275], 10.0).is_none());
+        assert!(gpu_frame_time(&[100, 160, 175], 10.0).is_none());
     }
 }

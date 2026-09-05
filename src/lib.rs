@@ -12,6 +12,7 @@ pub mod player;
 pub mod render;
 pub mod replication;
 pub mod session;
+pub mod telemetry;
 pub mod world;
 
 pub use destruction::{DestructionReport, Explosion};

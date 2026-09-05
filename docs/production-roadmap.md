@@ -43,15 +43,17 @@ developer impressions are never release evidence.
 - server-to-client UDP loopback tests and repeatable destruction benchmark;
 - fixed-step first-person movement, collision, rifle, explosive, crosshair, and Vulkan presentation;
 - boundary-aware background remeshing on immutable world snapshots;
-- voxel ambient occlusion, directional shadows, fog, and filmic output.
+- voxel ambient occlusion, directional shadows, fog, and filmic output;
+- bounded CPU frame distributions and non-blocking real-GPU timestamp telemetry.
 
 Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, and actual captures.
 
 ### Stage 1 — observable production renderer
 
+- real GPU timestamp queries and bounded CPU/GPU p50/p95/p99 telemetry (delivered; automated budget
+  comparison remains);
 - asynchronous initial meshing and distance-prioritized chunk streaming;
 - camera frustum, hierarchical-Z occlusion, indirect drawing, and mesh-buffer arenas;
-- GPU timestamp queries and CPU frame-phase telemetry with p50/p95/p99 reports;
 - physically based material table, texture arrays, normal/roughness/metalness maps, and HDR pipeline;
 - cascaded sun shadows, local lights, temporal anti-aliasing, and measured dynamic resolution;
 - deterministic screenshot scenes and image-difference regression thresholds.
@@ -162,8 +164,8 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add CPU phase distributions and real GPU timestamp telemetry to make renderer decisions empirical;
-2. stream the initial chunk mesh through the existing bounded worker and add frustum culling;
+1. stream the initial chunk mesh through a bounded worker without blocking window responsiveness;
+2. add chunk frustum culling with visible/drawn counters and an adversarial camera fixture;
 3. implement the first incremental support graph and a deterministic unsupported-island fixture.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,

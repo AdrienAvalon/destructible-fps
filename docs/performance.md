@@ -3,6 +3,22 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — graphical retained-delta recovery increment
+
+Source state: parent `905a0ad` plus the graphical recovery increment documented here. Once a future
+complete transaction is buffered, the client waits 100 ms then requests the exact expected sequence
+at a maximum of four requests per second. Ordered application, atomic replica validation and stale
+mesh-result rejection remain unchanged. The smoke harness now emits two authority mutations and can
+drop every frame of the first until the second has arrived.
+
+Two release Vulkan clients ran for ten seconds. The impaired client discarded sequence 1, buffered
+sequence 2, sent one repair request, then applied both transactions contiguously and completed the
+combined background remesh (`deltas_monde=2`, `reparations=1`, `jobs_mesh=1`). The other client
+applied both live transactions and completed two mesh jobs. Both also installed initial snapshots,
+rendered one remote player and moved more than one voxel before clean exit at authority tick 1,101.
+The complete promotion passed 119 library tests, eight binary tests, and 42 integration tests in
+debug and release; strict Clippy was clean.
+
 ## 2026-09-05 — server-side network explosion envelope
 
 Source state: parent `c1c4f06` plus the authority-policy increment documented here. Before calling the

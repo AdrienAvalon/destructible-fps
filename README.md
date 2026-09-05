@@ -65,7 +65,7 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - a two-window loopback multiplayer demo connecting to the real 60 Hz development server, with
   camera-relative input, prediction/reconciliation, interpolated remote avatars, reconnect attempts,
   replicated authoritative destruction/construction, rigid debris, automatic smoke trajectories,
-  and a real two-client process regression test;
+  exact retained-delta repair, and a real two-client process regression test;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
@@ -144,6 +144,11 @@ then one or more clients in separate terminals:
 cargo run --release --bin dedicated-server -- --bind 127.0.0.1:40000
 cargo run --release --bin multiplayer-demo -- --server 127.0.0.1:40000
 ```
+
+The graphical recovery path can be exercised by adding
+`--smoke-seconds 10 --smoke-drop-first-delta` to one client while another runs the ordinary smoke.
+That client drops the whole first mutation until it observes the second, then must repair and present
+both in order before the process can succeed.
 
 This first networked graphical slice synchronizes character movement, remote players, authoritative
 destruction, construction, and moving rigid debris. Once the cursor is captured, left click fires a

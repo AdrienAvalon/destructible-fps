@@ -141,6 +141,12 @@ changed chunks are capped at 512 pending entries, prioritized from the current c
 in batches of at most 256; body batches retain the existing 16-body/32,768-voxel cap. Results from a
 stale immutable world snapshot are never uploaded and their chunks are requeued against the newest
 replica. Initial snapshot rebuild remains synchronous until the residency-streaming gate.
+After bootstrap, a complete future delta starts a 100 ms gap timer. The graphical client requests
+the exact expected sequence at most four times per second while the later transaction remains in
+the bounded ordered inbox. An intentionally impaired Vulkan smoke drops the complete first
+transaction, accepts the second, obtains the retained frames, releases both in order and requires
+their mesh queues to drain before success. An expired retained sequence can still move the client
+back through the same atomic snapshot path.
 This does not relax exposure: both binaries refuse non-loopback addresses, and the production client
 must use authenticated QUIC/OIDC before any remote deployment.
 

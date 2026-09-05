@@ -129,7 +129,8 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   source-bound development sessions, hard ingress/queue/simulation/egress budgets, ordered delta
   inbox, and a two-client process integration test (delivered for loopback only);
 - count-and-byte-bounded recent-delta history, bounded repair queue, prioritized exact
-  retransmission, and a process test that deliberately loses one sequence (delivered);
+  retransmission, a process test that deliberately loses one sequence, and graphical future-gap
+  detection/retry proven by a real Vulkan client that discards a whole transaction (delivered);
 - canonical four-MiB-bounded snapshots, MTU-safe framing, one-transfer client assembly, paced
   per-peer emission, fixed-window selective retransmission after a lost fragment, acknowledged
   atomic install, shared-buffer per-transfer catch-up capped at 256 packets/eight MiB, and ordered

@@ -9,11 +9,11 @@ use destructible_fps::{
     ExplosionCommand, FixedMicrometers3, IVec3, MAX_APPLICATION_DATAGRAM_BYTES,
     MAX_BUILD_REACH_VOXELS, MAX_RECEIVED_DATAGRAMS_PER_TICK, MICROMETERS_PER_VOXEL, Material,
     OrderedDeltaInbox, PlayerInputCommand, PlayerInterpolationBuffer, PlayerInterpolationError,
-    PlayerStateReceiveError, ServerControlMessage, SnapshotAssembler, decode_player_state_packet,
-    decode_server_control, demo_world, dirty_chunks, encode_build_request, encode_client_hello,
-    encode_explosion_request, encode_player_input, encode_snapshot_ack,
-    encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
-    is_player_state_datagram, is_snapshot_datagram,
+    PlayerStateReceiveError, ServerControlMessage, SnapshotAssembler, decode_frame,
+    decode_player_state_packet, decode_server_control, demo_world, dirty_chunks,
+    encode_build_request, encode_client_hello, encode_explosion_request, encode_player_input,
+    encode_repair_request, encode_snapshot_ack, encode_snapshot_fragments_request,
+    encode_snapshot_request, is_delta_datagram, is_player_state_datagram, is_snapshot_datagram,
     mesh::{mesh_body, mesh_chunk},
     mesh_scheduler::{
         CompletedMeshJob, MAX_BODIES_PER_MESH_JOB, MAX_BODY_VOXELS_PER_MESH_JOB,
@@ -58,11 +58,23 @@ enum MeshWorkerPhase {
     InFlight,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeltaImpairment {
+    None,
+    DropUntilFuture { sequence: u64 },
+    Repairing { sequence: u64 },
+    Completed { sequence: u64 },
+}
+
 struct MultiplayerGame {
     window: Arc<Window>,
     renderer: Renderer,
     replica: ClientReplica,
     delta_inbox: OrderedDeltaInbox,
+    delta_gap_since: Option<Instant>,
+    last_delta_repair_at: Option<Instant>,
+    delta_repairs_sent: u64,
+    delta_impairment: DeltaImpairment,
     mesh_scheduler: MeshScheduler,
     mesh_snapshot: Arc<destructible_fps::World>,
     pending_mesh_chunks: HashSet<IVec3>,
@@ -97,11 +109,16 @@ struct MultiplayerGame {
     initial_position_um: Option<FixedMicrometers3>,
     maximum_horizontal_displacement_um: u64,
     applied_world_deltas: u64,
-    smoke_action_sent: bool,
+    smoke_actions_sent: u8,
 }
 
 impl MultiplayerGame {
-    fn new(window: Arc<Window>, server: SocketAddr, smoke_motion: bool) -> Result<Self, String> {
+    fn new(
+        window: Arc<Window>,
+        server: SocketAddr,
+        smoke_motion: bool,
+        smoke_drop_first_delta: bool,
+    ) -> Result<Self, String> {
         let bind = match server.ip() {
             IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
@@ -147,6 +164,14 @@ impl MultiplayerGame {
             mesh_snapshot: Arc::new(world.clone()),
             replica: ClientReplica::new(world),
             delta_inbox: OrderedDeltaInbox::default(),
+            delta_gap_since: None,
+            last_delta_repair_at: None,
+            delta_repairs_sent: 0,
+            delta_impairment: if smoke_drop_first_delta {
+                DeltaImpairment::DropUntilFuture { sequence: 1 }
+            } else {
+                DeltaImpairment::None
+            },
             mesh_scheduler: MeshScheduler::new(),
             pending_mesh_chunks: HashSet::new(),
             pending_body_ids: BTreeSet::new(),
@@ -179,7 +204,7 @@ impl MultiplayerGame {
             initial_position_um: None,
             maximum_horizontal_displacement_um: 0,
             applied_world_deltas: 0,
-            smoke_action_sent: false,
+            smoke_actions_sent: 0,
         })
     }
 
@@ -233,7 +258,36 @@ impl MultiplayerGame {
                 .map_err(|error| format!("nouvelle tentative de handshake: {error}"))?;
             self.last_hello_at = Instant::now();
         }
+        self.repair_delta_if_needed()?;
         self.repair_snapshot_if_needed()?;
+        Ok(())
+    }
+
+    fn repair_delta_if_needed(&mut self) -> Result<(), String> {
+        if !self.snapshot_ready() {
+            return Ok(());
+        }
+        let (Some(session_id), Some(gap_since)) = (self.session_id, self.delta_gap_since) else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if now.duration_since(gap_since) < Duration::from_millis(100)
+            || self
+                .last_delta_repair_at
+                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(250))
+        {
+            return Ok(());
+        }
+        let missing_sequence = self.delta_inbox.expected_sequence();
+        self.socket
+            .send_to(
+                &encode_repair_request(session_id, missing_sequence),
+                self.server,
+            )
+            .map_err(|error| format!("demande de reparation delta {missing_sequence}: {error}"))?;
+        self.last_delta_repair_at = Some(now);
+        self.delta_repairs_sent = self.delta_repairs_sent.saturating_add(1);
+        self.last_status = format!("reparation du delta {missing_sequence} demandee");
         Ok(())
     }
 
@@ -299,6 +353,9 @@ impl MultiplayerGame {
             .map_err(|error| format!("snapshot monde invalide: {error}"))?;
         self.last_snapshot_progress_at = Some(Instant::now());
         let Some(snapshot) = snapshot else {
+            if self.snapshot_assembler.active_snapshot_id().is_some() {
+                self.snapshot_phase = SnapshotPhase::Awaiting;
+            }
             return Ok(());
         };
         let Some(session_id) = self.session_id else {
@@ -316,6 +373,8 @@ impl MultiplayerGame {
             .install_into(&mut self.replica)
             .map_err(|error| format!("installation du snapshot refusee: {error}"))?;
         self.delta_inbox = OrderedDeltaInbox::new(next_sequence);
+        self.delta_gap_since = None;
+        self.last_delta_repair_at = None;
         chunk_positions.extend(self.replica.world().chunk_positions());
         let mut chunk_positions = chunk_positions.into_iter().collect::<Vec<_>>();
         chunk_positions.sort_unstable_by_key(|chunk| (chunk.x, chunk.y, chunk.z));
@@ -347,10 +406,32 @@ impl MultiplayerGame {
         if !self.snapshot_ready() {
             return Ok(());
         }
+        let frame_sequence = decode_frame(payload)
+            .map_err(|error| format!("fragment delta invalide: {error}"))?
+            .sequence;
+        match self.delta_impairment {
+            DeltaImpairment::DropUntilFuture { sequence } if frame_sequence == sequence => {
+                return Ok(());
+            }
+            DeltaImpairment::DropUntilFuture { sequence } if frame_sequence > sequence => {
+                self.delta_impairment = DeltaImpairment::Repairing { sequence };
+            }
+            DeltaImpairment::Repairing { sequence } if frame_sequence == sequence => {
+                self.delta_impairment = DeltaImpairment::Completed { sequence };
+            }
+            _ => {}
+        }
         let packets = self
             .delta_inbox
             .push(payload)
             .map_err(|error| format!("delta monde invalide: {error}"))?;
+        if packets.is_empty() {
+            if self.delta_inbox.buffered_complete_packets() > 0 {
+                self.delta_gap_since.get_or_insert_with(Instant::now);
+            }
+        } else {
+            self.delta_gap_since = None;
+        }
         for packet in packets {
             let chunks = dirty_chunks(&packet.changes);
             let mut body_ids = packet
@@ -683,11 +764,9 @@ impl MultiplayerGame {
     }
 
     fn send_smoke_action(&mut self) -> Result<(), String> {
-        if !self.smoke_motion
-            || !self.snapshot_ready()
-            || self.smoke_action_sent
-            || self.started.elapsed().as_secs_f32() < 3.0
-        {
+        let elapsed = self.started.elapsed().as_secs_f32();
+        let due_actions = u8::from(elapsed >= 3.0) + u8::from(elapsed >= 4.0);
+        if !self.smoke_motion || !self.snapshot_ready() || self.smoke_actions_sent >= due_actions {
             return Ok(());
         }
         let Some(session_id) = self.session_id else {
@@ -697,7 +776,11 @@ impl MultiplayerGame {
             let command_id = self.take_command_id()?;
             let command = ExplosionCommand {
                 command_id,
-                center: IVec3::new(-20, 6, 0),
+                center: if self.smoke_actions_sent == 0 {
+                    IVec3::new(-20, 6, 0)
+                } else {
+                    IVec3::new(20, 6, 0)
+                },
                 radius_voxels: 2,
                 peak_energy: 7_500,
             };
@@ -705,7 +788,7 @@ impl MultiplayerGame {
                 .send_to(&encode_explosion_request(session_id, command), self.server)
                 .map_err(|error| format!("envoi destruction smoke: {error}"))?;
         }
-        self.smoke_action_sent = true;
+        self.smoke_actions_sent = self.smoke_actions_sent.saturating_add(1);
         Ok(())
     }
 
@@ -811,6 +894,15 @@ impl MultiplayerGame {
                     "smoke multijoueur sans destruction repliquee ni snapshot modifie".to_owned(),
                 );
             }
+            if self.smoke_actions_sent < 2 {
+                return Err("smoke termine avant les deux actions autoritaires".to_owned());
+            }
+            if self.delta_impairment != DeltaImpairment::None
+                && (!matches!(self.delta_impairment, DeltaImpairment::Completed { .. })
+                    || self.delta_repairs_sent == 0)
+            {
+                return Err("smoke termine sans reparer le delta volontairement perdu".to_owned());
+            }
             if self.applied_world_deltas > 0
                 && (self.completed_mesh_jobs == 0
                     || !self.pending_mesh_chunks.is_empty()
@@ -820,7 +912,7 @@ impl MultiplayerGame {
                 return Err("smoke termine avant la presentation du delta replique".to_owned());
             }
             println!(
-                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={} jobs_mesh={} snapshot_pret={}",
+                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={} reparations={} jobs_mesh={} snapshot_pret={}",
                 self.session_id.unwrap_or_default(),
                 stats.players,
                 self.prediction
@@ -831,6 +923,7 @@ impl MultiplayerGame {
                     .map_or(0, ClientPrediction::pending_inputs),
                 self.maximum_horizontal_displacement_um,
                 self.applied_world_deltas,
+                self.delta_repairs_sent,
                 self.completed_mesh_jobs,
                 self.snapshot_ready()
             );
@@ -916,6 +1009,7 @@ struct App {
     game: Option<MultiplayerGame>,
     server: SocketAddr,
     exit_after: Option<Duration>,
+    smoke_drop_first_delta: bool,
     failure: Option<String>,
 }
 
@@ -933,7 +1027,12 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         };
-        match MultiplayerGame::new(Arc::new(window), self.server, self.exit_after.is_some()) {
+        match MultiplayerGame::new(
+            Arc::new(window),
+            self.server,
+            self.exit_after.is_some(),
+            self.smoke_drop_first_delta,
+        ) {
             Ok(game) => self.game = Some(game),
             Err(error) => {
                 self.failure = Some(error);
@@ -1031,11 +1130,13 @@ impl ApplicationHandler for App {
 struct Options {
     server: SocketAddr,
     exit_after: Option<Duration>,
+    smoke_drop_first_delta: bool,
 }
 
 fn options() -> Result<Options, Box<dyn Error>> {
     let mut server: SocketAddr = DEFAULT_SERVER.parse()?;
     let mut exit_after = None;
+    let mut smoke_drop_first_delta = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -1055,6 +1156,7 @@ fn options() -> Result<Options, Box<dyn Error>> {
                 }
                 exit_after = Some(Duration::from_secs_f64(seconds));
             }
+            "--smoke-drop-first-delta" => smoke_drop_first_delta = true,
             _ => return Err(format!("argument inconnu: {argument}").into()),
         }
     }
@@ -1063,7 +1165,14 @@ fn options() -> Result<Options, Box<dyn Error>> {
             "multiplayer-demo utilise uniquement le serveur UDP loopback de developpement".into(),
         );
     }
-    Ok(Options { server, exit_after })
+    if smoke_drop_first_delta && exit_after.is_none() {
+        return Err("--smoke-drop-first-delta exige --smoke-seconds".into());
+    }
+    Ok(Options {
+        server,
+        exit_after,
+        smoke_drop_first_delta,
+    })
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -1074,6 +1183,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         game: None,
         server: options.server,
         exit_after: options.exit_after,
+        smoke_drop_first_delta: options.smoke_drop_first_delta,
         failure: None,
     };
     event_loop.run_app(&mut app)?;

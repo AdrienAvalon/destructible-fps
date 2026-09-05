@@ -23,11 +23,19 @@ The dedicated server owns commands, damage, fracture, structural separation, rig
 and persistent world state. Clients predict only reversible player and weapon motion. A client never
 announces that a wall was destroyed; it requests an action and receives the resulting transaction.
 
-Delta protocol v3 uses monotonically increasing sequences, independent 128-bit pre/post
+Delta protocol v4 uses monotonically increasing sequences, independent 128-bit pre/post
 fingerprints for the static world and active body set, bounded fragments, and before-state
 validation. Detached body membership and integer dynamic state travel in separate canonical frames;
 both are reconstructed and validated before any static-world write. Missing data stops application
-and requests a snapshot. Corrupt or stale data cannot partially mutate a replica.
+and requests a snapshot. Snapshot installation itself rejects a mismatched body/state set, invalid
+high-water mark, non-canonical descriptor or inconsistent world fingerprint before replacing any
+replica state. Corrupt or stale data cannot partially mutate a replica.
+
+Runtime bodies use compact non-zero 64-bit IDs reserved monotonically by the server only when the
+whole detachment transaction commits. Their canonical geometry retains a separate 128-bit
+fingerprint, and the active-body fingerprint mixes entity ID, geometry, and dynamic state. A future
+persistent server must durably store the ID high-water mark with its world snapshot before it may
+restore and allocate another body.
 
 ## Planned engine layers
 
@@ -70,9 +78,9 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - bounded incremental topology analysis around changed voxels, foundation/authored anchors, and
   canonical detached-island descriptors (delivered as an isolated server-side primitive);
 - revalidated rigid-body descriptors with fixed integer centre of mass, diagonal inertia, mass,
-  bounds, canonical geometry, and stable identity (delivered);
-- atomic static-world detachment and protocol-v3 body replication with independent fingerprints,
-  hostile-input limits, and replica reconstruction (delivered);
+  bounds, canonical geometry fingerprint, and independent monotonic entity identity (delivered);
+- atomic static-world detachment and protocol-v4 body replication with independent fingerprints,
+  compact 64-bit IDs, hostile-input limits, and replica reconstruction (delivered);
 - local-space body meshes produced by the bounded background worker, fixed-capacity GPU transform
   instances, body frustum culling, and world/shadow rendering (delivered);
 - deterministic 60 Hz micrometre state, gravity, swept vertical collision against static voxels and

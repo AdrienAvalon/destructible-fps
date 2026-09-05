@@ -126,7 +126,7 @@ fn structural_detachment_is_one_replicated_authoritative_transaction() {
 
     let mut assembler = FrameAssembler::default();
     let mut complete = None;
-    for bytes in encode_frames(&packet, 126)
+    for bytes in encode_frames(&packet, 118)
         .expect("minimum body-assignment MTU")
         .into_iter()
         .rev()
@@ -172,6 +172,7 @@ fn failed_body_promotion_rolls_back_the_complete_server_transaction() {
     );
     assert!(server.bodies().is_empty());
     assert_eq!(server.body_fingerprint(), 0);
+    assert_eq!(server.next_body_id(), 1);
     assert_eq!(server.world().tick(), 0);
     assert_eq!(
         server.execute_explosion(7, sever_column_command()),
@@ -193,11 +194,73 @@ fn corrupted_body_assignment_is_rejected_before_client_mutation() {
 
     assert!(matches!(
         client.receive(&packet),
-        Err(ReplicationError::Body(BodyError::IdentifierMismatch { .. }))
+        Err(ReplicationError::BodyFingerprintMismatch { .. })
     ));
     assert_eq!(client.world().fingerprint(), initial_fingerprint);
     assert!(client.bodies().is_empty());
     assert_eq!(client.body_fingerprint(), 0);
+}
+
+#[test]
+fn non_monotonic_body_id_is_rejected_before_client_mutation() {
+    let initial = fragile_column();
+    let initial_fingerprint = initial.fingerprint();
+    let mut server = AuthoritativeServer::new(initial.clone());
+    let mut client = ClientReplica::new(initial);
+    let (mut packet, _) = server
+        .execute_explosion(7, sever_column_command())
+        .expect("valid body transaction");
+    for assignment in &mut packet.body_assignments {
+        assignment.body_id = 2;
+    }
+
+    assert_eq!(
+        client.receive(&packet),
+        Err(ReplicationError::NonMonotonicBodyId {
+            expected: 1,
+            received: 2,
+        })
+    );
+    assert_eq!(client.world().fingerprint(), initial_fingerprint);
+    assert_eq!(client.next_body_id(), 1);
+    assert!(client.bodies().is_empty());
+}
+
+#[test]
+fn server_assigns_monotonic_entity_ids_independent_from_geometry() {
+    let mut world = World::default();
+    for x in [0, 4] {
+        world.set_voxel(IVec3::new(x, 0, 0), Voxel::new(Material::Steel));
+        world.set_voxel(IVec3::new(x, 1, 0), Voxel::new(Material::Glass));
+        world.fill_box(
+            IVec3::new(x, 2, 0),
+            IVec3::new(x, 3, 0),
+            Voxel::new(Material::Wood),
+        );
+    }
+    let mut server = AuthoritativeServer::new(world);
+
+    let (first, _) = server
+        .execute_explosion(7, sever_column_command())
+        .expect("first column detaches");
+    let (second, _) = server
+        .execute_explosion(
+            7,
+            ExplosionCommand {
+                command_id: 2,
+                center: IVec3::new(4, 1, 0),
+                ..sever_column_command()
+            },
+        )
+        .expect("second column detaches");
+
+    assert!(first.body_assignments.iter().all(|item| item.body_id == 1));
+    assert!(second.body_assignments.iter().all(|item| item.body_id == 2));
+    assert_eq!(server.next_body_id(), 3);
+    assert_ne!(
+        server.bodies()[&1].geometry_fingerprint,
+        server.bodies()[&2].geometry_fingerprint
+    );
 }
 
 #[test]
@@ -243,9 +306,9 @@ fn corrupted_body_motion_is_rejected_before_replica_state_changes() {
     let before = client.body_states().clone();
     let (packet, _) = server.advance_physics();
     let mut packet = packet.expect("falling body changes on first physics tick");
-    let frames = encode_frames(&packet, 166).expect("one minimum-size body-state frame");
+    let frames = encode_frames(&packet, 158).expect("one minimum-size body-state frame");
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].len(), 166);
+    assert_eq!(frames[0].len(), 158);
     let mut invalid_wire_state = frames[0].clone();
     *invalid_wire_state.last_mut().expect("sleeping flag") = 2;
     assert_eq!(

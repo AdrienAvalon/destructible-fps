@@ -2,7 +2,7 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use crate::{CHUNK_EDGE, IVec3, Material, RigidBodyDescriptor, Voxel, World};
+use crate::{BodyId, CHUNK_EDGE, IVec3, Material, RigidBodyDescriptor, Voxel, World};
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashSet;
 
@@ -24,7 +24,7 @@ pub struct CpuMesh {
 
 #[derive(Debug)]
 pub struct CpuBodyMesh {
-    pub body_id: u128,
+    pub body_id: BodyId,
     pub origin: IVec3,
     pub maximum: IVec3,
     pub mesh: CpuMesh,
@@ -333,7 +333,7 @@ mod tests {
         );
         let island = describe_island(&world, vec![IVec3::new(10, 20, -4), IVec3::new(11, 20, -4)]);
         let body =
-            RigidBodyDescriptor::from_detached_island(&world, &island, BodyLimits::default())
+            RigidBodyDescriptor::from_detached_island(1, &world, &island, BodyLimits::default())
                 .expect("connected body");
 
         let body_mesh = mesh_body(&body);

@@ -3,7 +3,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use crate::{
-    CHUNK_EDGE, IVec3,
+    BodyId, CHUNK_EDGE, IVec3,
     mesh::{CpuBodyMesh, CpuMesh, Vertex},
     physics::{MICROMETERS_PER_VOXEL, RigidBodyState},
     replication::MAX_ACTIVE_BODIES,
@@ -258,7 +258,7 @@ pub struct Renderer {
     shadow_sampling_bind_group: wgpu::BindGroup,
     gpu_profiler: Option<GpuProfiler>,
     chunks: HashMap<IVec3, GpuMesh>,
-    bodies: HashMap<u128, GpuBody>,
+    bodies: HashMap<BodyId, GpuBody>,
     stats: RenderStats,
 }
 
@@ -750,7 +750,7 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn update_body_transforms(&mut self, states: &BTreeMap<u128, RigidBodyState>) {
+    pub fn update_body_transforms(&mut self, states: &BTreeMap<BodyId, RigidBodyState>) {
         let scale = MICROMETERS_PER_VOXEL as f32;
         for (&body_id, state) in states {
             let Some(body) = self.bodies.get_mut(&body_id) else {

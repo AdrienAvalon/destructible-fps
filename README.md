@@ -19,8 +19,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,
   server-owned body descriptors in the same transaction;
-- protocol-v3 body assignments and fixed-state updates with independent pre/post body fingerprints
-  and full client-side connectivity, material, mass, identity, and state revalidation;
+- protocol-v4 body assignments and fixed-state updates using compact server-monotonic 64-bit entity
+  IDs, independent 128-bit geometry fingerprints, pre/post body fingerprints, and full client-side
+  connectivity, material, mass, identity, and state revalidation;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;

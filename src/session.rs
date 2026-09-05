@@ -1,10 +1,10 @@
 //! In-process playable session that still crosses the authoritative wire-format boundary.
 
 use crate::{
-    AuthoritativeServer, CHUNK_EDGE, ClientReplica, CodecError, CommandError, DestructionReport,
-    ExplosionCommand, FrameAssembler, IVec3, PhysicsTickReport, ReplicationError,
-    RigidBodyDescriptor, RigidBodyState, VoxelChange, World, chunk_position, decode_frame,
-    demo_world, encode_frames, player::raycast,
+    AuthoritativeServer, BodyId, CHUNK_EDGE, ClientReplica, CodecError, CommandError,
+    DestructionReport, ExplosionCommand, FrameAssembler, IVec3, PhysicsTickReport,
+    ReplicationError, RigidBodyDescriptor, RigidBodyState, VoxelChange, World, chunk_position,
+    decode_frame, demo_world, encode_frames, player::raycast,
 };
 use core::fmt;
 use glam::Vec3;
@@ -26,7 +26,7 @@ pub struct ShotResult {
     pub datagrams: usize,
     pub encoded_bytes: usize,
     pub dirty_chunks: Vec<IVec3>,
-    pub spawned_body_ids: Vec<u128>,
+    pub spawned_body_ids: Vec<BodyId>,
     pub active_bodies: usize,
 }
 
@@ -105,12 +105,12 @@ impl DemoSession {
     }
 
     #[must_use]
-    pub const fn bodies(&self) -> &BTreeMap<u128, RigidBodyDescriptor> {
+    pub const fn bodies(&self) -> &BTreeMap<BodyId, RigidBodyDescriptor> {
         self.client.bodies()
     }
 
     #[must_use]
-    pub const fn body_states(&self) -> &BTreeMap<u128, RigidBodyState> {
+    pub const fn body_states(&self) -> &BTreeMap<BodyId, RigidBodyState> {
         self.client.body_states()
     }
 
@@ -137,6 +137,7 @@ impl DemoSession {
         if self.client.world().fingerprint() != self.server.world().fingerprint()
             || self.client.body_fingerprint() != self.server.body_fingerprint()
             || self.client.body_states() != self.server.body_states()
+            || self.client.next_body_id() != self.server.next_body_id()
         {
             return Err(SessionError::DivergedReplica);
         }
@@ -187,6 +188,7 @@ impl DemoSession {
         if self.client.world().fingerprint() != self.server.world().fingerprint()
             || self.client.body_fingerprint() != self.server.body_fingerprint()
             || self.client.body_states() != self.server.body_states()
+            || self.client.next_body_id() != self.server.next_body_id()
         {
             return Err(SessionError::DivergedReplica);
         }

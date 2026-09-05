@@ -1,6 +1,6 @@
 use destructible_fps::{
-    BodyLimits, IVec3, Material, RigidBodyDescriptor, RigidBodyState, SampleWindow, Voxel, World,
-    step_rigid_bodies,
+    BodyId, BodyLimits, IVec3, Material, RigidBodyDescriptor, RigidBodyState, SampleWindow, Voxel,
+    World, step_rigid_bodies,
 };
 use std::{collections::BTreeMap, error::Error, hint::black_box, time::Instant};
 
@@ -10,8 +10,8 @@ const MAX_BODIES: usize = 1_024;
 const MAX_TICKS: usize = 10_000;
 const BODIES_PER_COLUMN: usize = 4;
 
-type BodyMap = BTreeMap<u128, RigidBodyDescriptor>;
-type StateMap = BTreeMap<u128, RigidBodyState>;
+type BodyMap = BTreeMap<BodyId, RigidBodyDescriptor>;
+type StateMap = BTreeMap<BodyId, RigidBodyState>;
 type Fixture = (World, BodyMap, StateMap);
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -118,8 +118,13 @@ fn fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
         let y = 8 + i32::try_from(index % BODIES_PER_COLUMN)? * 2;
         let position = IVec3::new(x, y, z);
         world.set_voxel(position, Voxel::new(Material::Concrete));
-        let body =
-            RigidBodyDescriptor::from_world_voxels(&world, vec![position], BodyLimits::default())?;
+        let body_id = BodyId::try_from(index + 1)?;
+        let body = RigidBodyDescriptor::from_world_voxels(
+            body_id,
+            &world,
+            vec![position],
+            BodyLimits::default(),
+        )?;
         world.set_voxel(position, Voxel::AIR);
         states.insert(body.id, RigidBodyState::at_spawn(&body));
         bodies.insert(body.id, body);

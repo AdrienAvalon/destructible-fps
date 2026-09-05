@@ -36,12 +36,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let promotion_started = Instant::now();
         let body =
-            RigidBodyDescriptor::from_detached_island(&world, island, BodyLimits::default())?;
+            RigidBodyDescriptor::from_detached_island(1, &world, island, BodyLimits::default())?;
         promotion_samples.record_ms(promotion_started.elapsed().as_secs_f64() * 1_000.0);
         total_samples.record_ms(iteration_started.elapsed().as_secs_f64() * 1_000.0);
         if expected_fingerprint
-            .replace(body.id)
-            .is_some_and(|expected| expected != body.id)
+            .replace(body.geometry_fingerprint)
+            .is_some_and(|expected| expected != body.geometry_fingerprint)
         {
             return Err("structural island fingerprint changed between iterations".into());
         }

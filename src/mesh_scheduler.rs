@@ -253,7 +253,7 @@ mod tests {
         world.set_voxel(IVec3::new(4, 8, 2), Voxel::new(Material::Brick));
         let island = describe_island(&world, vec![IVec3::new(4, 8, 2)]);
         let body =
-            RigidBodyDescriptor::from_detached_island(&world, &island, BodyLimits::default())
+            RigidBodyDescriptor::from_detached_island(1, &world, &island, BodyLimits::default())
                 .expect("body fixture");
         let scheduler = MeshScheduler::new();
         scheduler

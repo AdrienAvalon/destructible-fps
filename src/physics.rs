@@ -16,6 +16,7 @@ const MAX_LINEAR_SPEED_UM_PER_SECOND: i64 = 250_000_000;
 const MAX_WORLD_TRANSLATION_UM: i64 = 3_000_000_000_000_000;
 const SLEEP_TICKS: u16 = 30;
 pub const MAX_BROAD_PHASE_PAIRS: usize = 8_192;
+pub type BodyId = u64;
 const BODY_NEIGHBORS: [IVec3; 6] = [
     IVec3::new(-1, 0, 0),
     IVec3::new(1, 0, 0),
@@ -70,13 +71,13 @@ pub struct BodyStepResult {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BroadPhaseResult {
-    pub pairs: Vec<(u128, u128)>,
+    pub pairs: Vec<(BodyId, BodyId)>,
     pub saturated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BodyStateTransition {
-    pub body_id: u128,
+    pub body_id: BodyId,
     pub before: RigidBodyState,
     pub after: RigidBodyState,
 }
@@ -108,7 +109,9 @@ pub struct BodyVoxel {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RigidBodyDescriptor {
-    pub id: u128,
+    pub id: BodyId,
+    /// Content identity derived independently from the monotonic runtime entity ID.
+    pub geometry_fingerprint: u128,
     pub voxels: Vec<BodyVoxel>,
     pub minimum: IVec3,
     pub maximum: IVec3,
@@ -123,13 +126,13 @@ pub struct RigidBodyDescriptor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BodyError {
+    InvalidEntityId(BodyId),
     EmptyIsland,
     TooManyVoxels(usize),
     NonCanonicalVoxels(IVec3),
     NonStructuralVoxel(IVec3),
     DisconnectedVoxels,
     IslandDescriptorMismatch,
-    IdentifierMismatch { expected: u128, actual: u128 },
     ZeroMass,
     CenterOfMassOverflow,
 }
@@ -137,6 +140,7 @@ pub enum BodyError {
 impl fmt::Display for BodyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidEntityId(id) => write!(formatter, "invalid rigid-body entity ID {id}"),
             Self::EmptyIsland => write!(formatter, "detached island is empty"),
             Self::TooManyVoxels(count) => write!(formatter, "rigid body has {count} voxels"),
             Self::NonCanonicalVoxels(position) => {
@@ -158,10 +162,6 @@ impl fmt::Display for BodyError {
                     "detached island descriptor does not match its world voxels"
                 )
             }
-            Self::IdentifierMismatch { expected, actual } => write!(
-                formatter,
-                "rigid-body identifier mismatch: expected {expected:032x}, computed {actual:032x}"
-            ),
             Self::ZeroMass => write!(formatter, "detached island has zero physical mass"),
             Self::CenterOfMassOverflow => write!(formatter, "center of mass exceeds fixed units"),
         }
@@ -178,12 +178,13 @@ impl RigidBodyDescriptor {
     ///
     /// Rejects empty, oversized, non-canonical, disconnected, non-structural, or zero-mass input.
     pub fn from_world_voxels(
+        body_id: BodyId,
         world: &World,
         voxels: Vec<IVec3>,
         limits: BodyLimits,
     ) -> Result<Self, BodyError> {
         let island = describe_island(world, voxels);
-        Self::from_detached_island(world, &island, limits)
+        Self::from_detached_island(body_id, world, &island, limits)
     }
 
     /// Revalidates and promotes one detached island into deterministic server physics state.
@@ -196,6 +197,7 @@ impl RigidBodyDescriptor {
     /// Rejects empty, oversized, non-canonical, forged, or zero-mass island descriptors and fixed
     /// coordinate overflow.
     pub fn from_detached_island(
+        body_id: BodyId,
         world: &World,
         island: &DetachedIsland,
         limits: BodyLimits,
@@ -228,20 +230,24 @@ impl RigidBodyDescriptor {
                 voxel: world.voxel(position),
             })
             .collect();
-        Self::from_replicated_voxels(canonical.fingerprint, voxels, limits)
+        Self::from_replicated_voxels(body_id, voxels, limits)
     }
 
-    /// Rebuilds and verifies a body from untrusted replicated voxel membership.
+    /// Rebuilds and verifies a body from untrusted replicated voxel membership and an independent
+    /// non-zero runtime entity ID.
     ///
     /// # Errors
     ///
-    /// Applies the same size, canonical-order, structural-material, connectivity, mass, and identity
-    /// checks as local promotion.
+    /// Applies the same size, canonical-order, structural-material, connectivity, and mass checks as
+    /// local promotion. The derived geometry fingerprint remains independent from `body_id`.
     pub fn from_replicated_voxels(
-        expected_id: u128,
+        body_id: BodyId,
         voxels: Vec<BodyVoxel>,
         limits: BodyLimits,
     ) -> Result<Self, BodyError> {
+        if body_id == 0 {
+            return Err(BodyError::InvalidEntityId(body_id));
+        }
         if voxels.is_empty() {
             return Err(BodyError::EmptyIsland);
         }
@@ -276,17 +282,12 @@ impl RigidBodyDescriptor {
         if mass_kg == 0 {
             return Err(BodyError::ZeroMass);
         }
-        if fingerprint != expected_id {
-            return Err(BodyError::IdentifierMismatch {
-                expected: expected_id,
-                actual: fingerprint,
-            });
-        }
         let center_of_mass_mm = center_of_mass(&voxels, mass_kg)?;
         let inertia_diagonal_kg_mm2 = inertia_diagonal(&voxels, center_of_mass_mm);
         let (collision_bottom, collision_top) = collision_surfaces(&voxels);
         Ok(Self {
-            id: fingerprint,
+            id: body_id,
+            geometry_fingerprint: fingerprint,
             voxels,
             minimum,
             maximum,
@@ -401,8 +402,8 @@ pub fn step_rigid_body(
 
 #[must_use]
 pub fn broad_phase_pairs(
-    bodies: &BTreeMap<u128, RigidBodyDescriptor>,
-    states: &BTreeMap<u128, RigidBodyState>,
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    states: &BTreeMap<BodyId, RigidBodyState>,
 ) -> BroadPhaseResult {
     broad_phase_between(bodies, states, states)
 }
@@ -412,8 +413,8 @@ pub fn broad_phase_pairs(
 #[must_use]
 pub fn step_rigid_bodies(
     world: &World,
-    bodies: &BTreeMap<u128, RigidBodyDescriptor>,
-    states: &mut BTreeMap<u128, RigidBodyState>,
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    states: &mut BTreeMap<BodyId, RigidBodyState>,
 ) -> BodySimulationReport {
     let mut next = states.clone();
     let static_collisions = integrate_static_bodies(world, bodies, &mut next);
@@ -453,8 +454,8 @@ pub fn step_rigid_bodies(
 
 fn integrate_static_bodies(
     world: &World,
-    bodies: &BTreeMap<u128, RigidBodyDescriptor>,
-    states: &mut BTreeMap<u128, RigidBodyState>,
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    states: &mut BTreeMap<BodyId, RigidBodyState>,
 ) -> usize {
     bodies
         .iter()
@@ -467,10 +468,10 @@ fn integrate_static_bodies(
 }
 
 fn resolve_body_contacts(
-    bodies: &BTreeMap<u128, RigidBodyDescriptor>,
-    before: &BTreeMap<u128, RigidBodyState>,
-    next: &mut BTreeMap<u128, RigidBodyState>,
-    adjacency: &BTreeMap<u128, Vec<u128>>,
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    before: &BTreeMap<BodyId, RigidBodyState>,
+    next: &mut BTreeMap<BodyId, RigidBodyState>,
+    adjacency: &BTreeMap<BodyId, Vec<BodyId>>,
 ) -> usize {
     let mut ordered_bodies = bodies
         .keys()
@@ -540,9 +541,9 @@ fn resolve_body_contacts(
 }
 
 fn state_transitions(
-    bodies: &BTreeMap<u128, RigidBodyDescriptor>,
-    before: &BTreeMap<u128, RigidBodyState>,
-    after: &BTreeMap<u128, RigidBodyState>,
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    before: &BTreeMap<BodyId, RigidBodyState>,
+    after: &BTreeMap<BodyId, RigidBodyState>,
 ) -> Vec<BodyStateTransition> {
     bodies
         .keys()
@@ -559,9 +560,9 @@ fn state_transitions(
 }
 
 fn broad_phase_between(
-    bodies: &BTreeMap<u128, RigidBodyDescriptor>,
-    before: &BTreeMap<u128, RigidBodyState>,
-    after: &BTreeMap<u128, RigidBodyState>,
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    before: &BTreeMap<BodyId, RigidBodyState>,
+    after: &BTreeMap<BodyId, RigidBodyState>,
 ) -> BroadPhaseResult {
     if before.values().all(|state| state.sleeping) && after.values().all(|state| state.sleeping) {
         return BroadPhaseResult::default();
@@ -607,8 +608,8 @@ fn broad_phase_between(
     }
 }
 
-fn pair_adjacency(pairs: &[(u128, u128)]) -> BTreeMap<u128, Vec<u128>> {
-    let mut adjacency = BTreeMap::<u128, Vec<u128>>::new();
+fn pair_adjacency(pairs: &[(BodyId, BodyId)]) -> BTreeMap<BodyId, Vec<BodyId>> {
+    let mut adjacency = BTreeMap::<BodyId, Vec<BodyId>>::new();
     for &(left, right) in pairs {
         adjacency.entry(left).or_default().push(right);
         adjacency.entry(right).or_default().push(left);
@@ -620,10 +621,10 @@ fn pair_adjacency(pairs: &[(u128, u128)]) -> BTreeMap<u128, Vec<u128>> {
 }
 
 fn propagate_waking(
-    bodies: &BTreeMap<u128, RigidBodyDescriptor>,
-    before: &BTreeMap<u128, RigidBodyState>,
-    next: &mut BTreeMap<u128, RigidBodyState>,
-    adjacency: &BTreeMap<u128, Vec<u128>>,
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    before: &BTreeMap<BodyId, RigidBodyState>,
+    next: &mut BTreeMap<BodyId, RigidBodyState>,
+    adjacency: &BTreeMap<BodyId, Vec<BodyId>>,
 ) {
     let mut moving = before
         .iter()
@@ -1052,7 +1053,7 @@ mod tests {
         let island = describe_island(&world, vec![IVec3::new(0, 0, 0)]);
 
         let body =
-            RigidBodyDescriptor::from_detached_island(&world, &island, BodyLimits::default())
+            RigidBodyDescriptor::from_detached_island(1, &world, &island, BodyLimits::default())
                 .expect("one concrete voxel is physical");
 
         assert_eq!(body.mass_kg, 2_400);
@@ -1082,7 +1083,7 @@ mod tests {
         let island = describe_island(&world, vec![IVec3::new(-1, 2, 0), IVec3::new(0, 2, 0)]);
 
         let body =
-            RigidBodyDescriptor::from_detached_island(&world, &island, BodyLimits::default())
+            RigidBodyDescriptor::from_detached_island(1, &world, &island, BodyLimits::default())
                 .expect("symmetric body");
 
         assert_eq!(body.center_of_mass_mm.x, 0);
@@ -1100,7 +1101,7 @@ mod tests {
         island.mass_kg += 1;
 
         assert_eq!(
-            RigidBodyDescriptor::from_detached_island(&world, &island, BodyLimits::default()),
+            RigidBodyDescriptor::from_detached_island(1, &world, &island, BodyLimits::default()),
             Err(BodyError::IslandDescriptorMismatch)
         );
     }
@@ -1112,6 +1113,7 @@ mod tests {
 
         assert_eq!(
             RigidBodyDescriptor::from_detached_island(
+                1,
                 &world,
                 &island,
                 BodyLimits { max_voxels: 0 }
@@ -1121,8 +1123,19 @@ mod tests {
     }
 
     #[test]
-    fn replicated_voxels_require_connectivity_and_matching_identity() {
+    fn replicated_voxels_require_connectivity_but_not_unique_geometry() {
         let voxel = Voxel::new(Material::Steel);
+        assert_eq!(
+            RigidBodyDescriptor::from_replicated_voxels(
+                0,
+                vec![BodyVoxel {
+                    position: IVec3::new(0, 2, 0),
+                    voxel,
+                }],
+                BodyLimits::default(),
+            ),
+            Err(BodyError::InvalidEntityId(0))
+        );
         let disconnected = vec![
             BodyVoxel {
                 position: IVec3::new(0, 2, 0),
@@ -1134,7 +1147,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            RigidBodyDescriptor::from_replicated_voxels(0, disconnected, BodyLimits::default()),
+            RigidBodyDescriptor::from_replicated_voxels(1, disconnected, BodyLimits::default()),
             Err(BodyError::DisconnectedVoxels)
         );
 
@@ -1142,10 +1155,17 @@ mod tests {
             position: IVec3::new(0, 2, 0),
             voxel,
         }];
-        assert!(matches!(
-            RigidBodyDescriptor::from_replicated_voxels(123, canonical, BodyLimits::default()),
-            Err(BodyError::IdentifierMismatch { expected: 123, .. })
-        ));
+        let first = RigidBodyDescriptor::from_replicated_voxels(
+            123,
+            canonical.clone(),
+            BodyLimits::default(),
+        )
+        .expect("first entity");
+        let second =
+            RigidBodyDescriptor::from_replicated_voxels(124, canonical, BodyLimits::default())
+                .expect("same geometry under a new entity ID");
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.geometry_fingerprint, second.geometry_fingerprint);
     }
 
     #[test]
@@ -1155,7 +1175,7 @@ mod tests {
         world.set_voxel(IVec3::new(0, 3, 0), Voxel::new(Material::Wood));
         let island = describe_island(&world, vec![IVec3::new(0, 3, 0)]);
         let body =
-            RigidBodyDescriptor::from_detached_island(&world, &island, BodyLimits::default())
+            RigidBodyDescriptor::from_detached_island(1, &world, &island, BodyLimits::default())
                 .expect("one falling voxel");
         world.set_voxel(IVec3::new(0, 3, 0), Voxel::AIR);
         let mut state = RigidBodyState::at_spawn(&body);
@@ -1184,10 +1204,15 @@ mod tests {
         world.set_voxel(IVec3::new(2, 2, 0), Voxel::new(Material::Steel));
         let first_island = describe_island(&world, vec![IVec3::new(0, 2, 0)]);
         let second_island = describe_island(&world, vec![IVec3::new(2, 2, 0)]);
-        let first =
-            RigidBodyDescriptor::from_detached_island(&world, &first_island, BodyLimits::default())
-                .expect("first body");
+        let first = RigidBodyDescriptor::from_detached_island(
+            1,
+            &world,
+            &first_island,
+            BodyLimits::default(),
+        )
+        .expect("first body");
         let second = RigidBodyDescriptor::from_detached_island(
+            2,
             &world,
             &second_island,
             BodyLimits::default(),
@@ -1197,11 +1222,10 @@ mod tests {
         let mut second_state = RigidBodyState::at_spawn(&second);
         first_state.translation_um.x = 0;
         second_state.translation_um.x = MICROMETERS_PER_VOXEL / 2;
+        let first_id = first.id;
+        let second_id = second.id;
         let bodies = BTreeMap::from([(first.id, first), (second.id, second)]);
-        let states = BTreeMap::from([
-            (first_island.fingerprint(), first_state),
-            (second_island.fingerprint(), second_state),
-        ]);
+        let states = BTreeMap::from([(first_id, first_state), (second_id, second_state)]);
 
         let broad_phase = broad_phase_pairs(&bodies, &states);
         assert_eq!(broad_phase.pairs.len(), 1);
@@ -1219,6 +1243,7 @@ mod tests {
             let position = IVec3::new(0, height, 0);
             world.set_voxel(position, Voxel::new(material));
             let body = RigidBodyDescriptor::from_world_voxels(
+                u64::try_from(body_ids.len() + 1).expect("small fixture"),
                 &world,
                 vec![position],
                 BodyLimits::default(),
@@ -1263,6 +1288,7 @@ mod tests {
             let position = IVec3::new(i32::try_from(index).expect("small fixture"), 4, 0);
             world.set_voxel(position, Voxel::new(Material::Concrete));
             let body = RigidBodyDescriptor::from_world_voxels(
+                u64::try_from(index + 1).expect("small fixture"),
                 &world,
                 vec![position],
                 BodyLimits::default(),

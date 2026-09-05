@@ -72,14 +72,17 @@ streaming, with no synchronous world meshing on the presentation thread.
   isolated primitive);
 - bounded promotion into revalidated authoritative body descriptors with integer-millimetre centre
   of mass and integer inertia (delivered);
-- atomic explosion/topology/body transactions and protocol-v3 body membership replication with
+- atomic explosion/topology/body transactions and protocol-v4 body membership replication with
   independent body fingerprints, bounded reassembly memory, and hostile-input rejection
   (delivered);
+- non-zero server-monotonic 64-bit body IDs separated from canonical 128-bit geometry fingerprints,
+  with checked reservation and rollback-safe exhaustion handling (delivered; persistent high-water
+  storage remains a Stage 3 requirement);
 - preserved-material body rendering through bounded off-thread local-space meshing and a
   fixed-capacity GPU transform arena (delivered);
 - 60 Hz micrometre gravity, swept vertical static and body-column collision, stable stacking, wake
   propagation, deterministic sleeping, bounded sweep-and-prune with fail-closed overflow,
-  protocol-v3 state updates, and batched GPU transforms (delivered for downward axis-aligned
+  protocol-v4 state updates, and batched GPU transforms (delivered for downward axis-aligned
   contacts);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
@@ -183,11 +186,11 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. replace spawn-position body identity with a separate monotonic entity identity before allowing
-   structures to be rebuilt and detached repeatedly at the same coordinates;
-2. add horizontal velocity, material friction/restitution, and deterministic impulse response;
-3. add angular state, inertia-driven impulses, conservative rotated bounds, and replicated
-   orientation.
+1. add horizontal velocity, material friction/restitution, and deterministic impulse response;
+2. add angular state, inertia-driven impulses, conservative rotated bounds, and replicated
+   orientation;
+3. split the loopback authority into a dedicated server process with a versioned handshake, bounded
+   loss recovery, snapshot repair, and reproducible multi-process tests.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

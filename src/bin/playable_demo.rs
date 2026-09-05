@@ -115,7 +115,7 @@ struct Game {
     mesh_snapshot: Arc<World>,
     mesh_phase: MeshPhase,
     pending_mesh_chunks: HashSet<IVec3>,
-    pending_body_ids: BTreeSet<u128>,
+    pending_body_ids: BTreeSet<destructible_fps::BodyId>,
     mesh_job_in_flight: bool,
     mesh_started: Option<Instant>,
     telemetry: RuntimeTelemetry,

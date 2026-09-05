@@ -1,8 +1,8 @@
 use crate::destruction::{DestructionReport, Explosion};
 use crate::material::{InvalidMaterial, Voxel};
 use crate::physics::{
-    BodyError, BodyLimits, BodyVoxel, FixedMicrometers3, RigidBodyDescriptor, RigidBodyState,
-    step_rigid_bodies, valid_rigid_body_state,
+    BodyError, BodyId, BodyLimits, BodyVoxel, FixedMicrometers3, RigidBodyDescriptor,
+    RigidBodyState, step_rigid_bodies, valid_rigid_body_state,
 };
 use crate::structural::{
     StructuralAnchors, StructuralError, StructuralLimits, analyze_structural_changes,
@@ -12,12 +12,12 @@ use core::fmt;
 use std::collections::{BTreeMap, HashMap};
 
 const MAGIC: [u8; 4] = *b"DFPS";
-const PROTOCOL_VERSION: u8 = 3;
+const PROTOCOL_VERSION: u8 = 4;
 const DELTA_KIND: u8 = 1;
 const HEADER_BYTES: usize = 96;
 const CHANGE_BYTES: usize = 16;
-const BODY_ASSIGNMENT_BYTES: usize = 30;
-const BODY_UPDATE_BYTES: usize = 70;
+const BODY_ASSIGNMENT_BYTES: usize = 22;
+const BODY_UPDATE_BYTES: usize = 62;
 const MAX_DATAGRAM_BYTES: usize = 1_200;
 const MAX_FRAGMENTS: u16 = 1_024;
 const MAX_PENDING_PACKETS: usize = 64;
@@ -36,14 +36,14 @@ pub struct ExplosionCommand {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BodyVoxelAssignment {
-    pub body_id: u128,
+    pub body_id: BodyId,
     pub position: IVec3,
     pub voxel: Voxel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BodyStateUpdate {
-    pub body_id: u128,
+    pub body_id: BodyId,
     pub state: RigidBodyState,
 }
 
@@ -89,13 +89,14 @@ pub struct DeltaFrame {
 #[derive(Clone)]
 pub struct AuthoritativeServer {
     world: World,
-    bodies: BTreeMap<u128, RigidBodyDescriptor>,
-    body_states: BTreeMap<u128, RigidBodyState>,
+    bodies: BTreeMap<BodyId, RigidBodyDescriptor>,
+    body_states: BTreeMap<BodyId, RigidBodyState>,
     body_fingerprint: u128,
     active_body_voxels: usize,
     structural_anchors: StructuralAnchors,
     structural_limits: StructuralLimits,
     body_limits: BodyLimits,
+    next_body_id: BodyId,
     next_sequence: u64,
     last_command_id: HashMap<u64, u64>,
 }
@@ -113,7 +114,8 @@ pub enum CommandError {
     Body(BodyError),
     TooManyActiveBodies(usize),
     TooManyActiveBodyVoxels(usize),
-    DuplicateBodyId(u128),
+    DuplicateBodyId(BodyId),
+    BodyIdExhausted,
     TransactionTooLarge {
         changes: usize,
         body_assignments: usize,
@@ -145,7 +147,8 @@ impl fmt::Display for CommandError {
             Self::TooManyActiveBodyVoxels(count) => {
                 write!(formatter, "active rigid-body voxels would reach {count}")
             }
-            Self::DuplicateBodyId(id) => write!(formatter, "duplicate rigid-body id {id:032x}"),
+            Self::DuplicateBodyId(id) => write!(formatter, "duplicate rigid-body id {id}"),
+            Self::BodyIdExhausted => write!(formatter, "rigid-body entity ID space is exhausted"),
             Self::TransactionTooLarge {
                 changes,
                 body_assignments,
@@ -183,6 +186,7 @@ impl AuthoritativeServer {
             structural_anchors: StructuralAnchors::foundation_plane(0),
             structural_limits: StructuralLimits::default(),
             body_limits: BodyLimits::default(),
+            next_body_id: 1,
             next_sequence: 1,
             last_command_id: HashMap::new(),
         }
@@ -238,6 +242,14 @@ impl AuthoritativeServer {
             }
         };
         let spawned_voxels = bodies.iter().map(|body| body.voxels.len()).sum::<usize>();
+        let Ok(spawned_body_count) = BodyId::try_from(bodies.len()) else {
+            rollback_changes(&mut self.world, &report.changes);
+            return Err(CommandError::BodyIdExhausted);
+        };
+        let Some(next_body_id) = self.next_body_id.checked_add(spawned_body_count) else {
+            rollback_changes(&mut self.world, &report.changes);
+            return Err(CommandError::BodyIdExhausted);
+        };
         let active_body_count = self.bodies.len().saturating_add(bodies.len());
         let active_body_voxels = self.active_body_voxels.saturating_add(spawned_voxels);
         if active_body_count > MAX_ACTIVE_BODIES {
@@ -263,10 +275,11 @@ impl AuthoritativeServer {
         report.changes = changes;
         for body in bodies {
             let state = RigidBodyState::at_spawn(&body);
-            self.body_fingerprint ^= body_fingerprint_token(body.id, state);
+            self.body_fingerprint ^= body_fingerprint_token(&body, state);
             self.body_states.insert(body.id, state);
             self.bodies.insert(body.id, body);
         }
+        self.next_body_id = next_body_id;
         self.active_body_voxels = active_body_voxels;
         let tick = self.world.tick().wrapping_add(1);
         self.world.set_tick(tick);
@@ -292,7 +305,7 @@ impl AuthoritativeServer {
     }
 
     #[must_use]
-    pub const fn bodies(&self) -> &BTreeMap<u128, RigidBodyDescriptor> {
+    pub const fn bodies(&self) -> &BTreeMap<BodyId, RigidBodyDescriptor> {
         &self.bodies
     }
 
@@ -302,8 +315,13 @@ impl AuthoritativeServer {
     }
 
     #[must_use]
-    pub const fn body_states(&self) -> &BTreeMap<u128, RigidBodyState> {
+    pub const fn body_states(&self) -> &BTreeMap<BodyId, RigidBodyState> {
         &self.body_states
+    }
+
+    #[must_use]
+    pub const fn next_body_id(&self) -> BodyId {
+        self.next_body_id
     }
 
     #[must_use]
@@ -321,8 +339,11 @@ impl AuthoritativeServer {
         let base_body_fingerprint = self.body_fingerprint;
         let mut updates = Vec::with_capacity(simulation.transitions.len());
         for transition in simulation.transitions {
-            self.body_fingerprint ^= body_fingerprint_token(transition.body_id, transition.before)
-                ^ body_fingerprint_token(transition.body_id, transition.after);
+            let Some(body) = self.bodies.get(&transition.body_id) else {
+                continue;
+            };
+            self.body_fingerprint ^= body_fingerprint_token(body, transition.before)
+                ^ body_fingerprint_token(body, transition.after);
             updates.push(BodyStateUpdate {
                 body_id: transition.body_id,
                 state: transition.after,
@@ -369,10 +390,24 @@ impl AuthoritativeServer {
                 body_assignments: spawned_voxels,
             });
         }
+        let body_count = BodyId::try_from(structural.detached_islands.len())
+            .map_err(|_| CommandError::BodyIdExhausted)?;
+        self.next_body_id
+            .checked_add(body_count)
+            .ok_or(CommandError::BodyIdExhausted)?;
         let mut bodies = Vec::with_capacity(structural.detached_islands.len());
-        for island in structural.detached_islands {
-            let body =
-                RigidBodyDescriptor::from_detached_island(&self.world, &island, self.body_limits)?;
+        for (offset, island) in structural.detached_islands.into_iter().enumerate() {
+            let offset = BodyId::try_from(offset).map_err(|_| CommandError::BodyIdExhausted)?;
+            let body_id = self
+                .next_body_id
+                .checked_add(offset)
+                .ok_or(CommandError::BodyIdExhausted)?;
+            let body = RigidBodyDescriptor::from_detached_island(
+                body_id,
+                &self.world,
+                &island,
+                self.body_limits,
+            )?;
             if self.bodies.contains_key(&body.id)
                 || bodies
                     .iter()
@@ -426,8 +461,10 @@ fn rollback_changes(world: &mut World, changes: &[VoxelChange]) {
     }
 }
 
-const fn body_fingerprint_token(id: u128, state: RigidBodyState) -> u128 {
-    let mut token = id.rotate_left(41) ^ 0xa076_1d64_78bd_642f_e703_7ed1_a0b4_28db_u128;
+const fn body_fingerprint_token(body: &RigidBodyDescriptor, state: RigidBodyState) -> u128 {
+    let mut token = (body.id as u128).rotate_left(41)
+        ^ body.geometry_fingerprint.rotate_left(67)
+        ^ 0xa076_1d64_78bd_642f_e703_7ed1_a0b4_28db_u128;
     let values = [
         state.translation_um.x,
         state.translation_um.y,
@@ -503,10 +540,11 @@ const fn validate_command(command: ExplosionCommand) -> Result<(), CommandError>
 #[derive(Clone)]
 pub struct ClientReplica {
     world: World,
-    bodies: BTreeMap<u128, RigidBodyDescriptor>,
-    body_states: BTreeMap<u128, RigidBodyState>,
+    bodies: BTreeMap<BodyId, RigidBodyDescriptor>,
+    body_states: BTreeMap<BodyId, RigidBodyState>,
     body_fingerprint: u128,
     active_body_voxels: usize,
+    next_body_id: BodyId,
     expected_sequence: u64,
 }
 
@@ -518,15 +556,38 @@ pub enum ClientStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReplicationError {
-    SequenceGap { expected: u64, received: u64 },
-    BaseFingerprintMismatch { expected: u128, received: u128 },
-    BodyFingerprintMismatch { expected: u128, received: u128 },
+    SequenceGap {
+        expected: u64,
+        received: u64,
+    },
+    BaseFingerprintMismatch {
+        expected: u128,
+        received: u128,
+    },
+    BodyFingerprintMismatch {
+        expected: u128,
+        received: u128,
+    },
     NonCanonicalBodyAssignments,
     BodyAssignmentWithoutRemoval(IVec3),
-    DuplicateBodyId(u128),
+    DuplicateBodyId(BodyId),
+    NonMonotonicBodyId {
+        expected: BodyId,
+        received: BodyId,
+    },
+    BodyIdExhausted,
     NonCanonicalBodyUpdates,
-    UnknownBody(u128),
-    InvalidBodyState(u128),
+    UnknownBody(BodyId),
+    InvalidBodyState(BodyId),
+    SnapshotBodySetMismatch,
+    InvalidSnapshotBodyId {
+        map_key: BodyId,
+        descriptor_id: BodyId,
+        next_body_id: BodyId,
+    },
+    InvalidSnapshotHighWaterMark(BodyId),
+    InvalidSnapshotSequence(u64),
+    InvalidSnapshotDescriptor(BodyId),
     TooManyActiveBodies(usize),
     TooManyActiveBodyVoxels(usize),
     Body(BodyError),
@@ -557,16 +618,41 @@ impl fmt::Display for ReplicationError {
                 formatter,
                 "body assignment at {position:?} has no matching static-world removal"
             ),
-            Self::DuplicateBodyId(id) => write!(formatter, "duplicate rigid-body id {id:032x}"),
+            Self::DuplicateBodyId(id) => write!(formatter, "duplicate rigid-body id {id}"),
+            Self::NonMonotonicBodyId { expected, received } => write!(
+                formatter,
+                "non-monotonic rigid-body ID: expected {expected}, received {received}"
+            ),
+            Self::BodyIdExhausted => write!(formatter, "rigid-body entity ID space is exhausted"),
             Self::NonCanonicalBodyUpdates => {
                 write!(formatter, "body updates are not canonically ordered")
             }
-            Self::UnknownBody(id) => write!(formatter, "body update targets unknown id {id:032x}"),
+            Self::UnknownBody(id) => write!(formatter, "body update targets unknown id {id}"),
             Self::InvalidBodyState(id) => {
+                write!(formatter, "body update contains invalid state for {id}")
+            }
+            Self::SnapshotBodySetMismatch => {
                 write!(
                     formatter,
-                    "body update contains invalid state for {id:032x}"
+                    "snapshot body descriptors and states do not match"
                 )
+            }
+            Self::InvalidSnapshotBodyId {
+                map_key,
+                descriptor_id,
+                next_body_id,
+            } => write!(
+                formatter,
+                "invalid snapshot body ID: key {map_key}, descriptor {descriptor_id}, next {next_body_id}"
+            ),
+            Self::InvalidSnapshotHighWaterMark(id) => {
+                write!(formatter, "invalid snapshot body ID high-water mark {id}")
+            }
+            Self::InvalidSnapshotSequence(sequence) => {
+                write!(formatter, "invalid snapshot next sequence {sequence}")
+            }
+            Self::InvalidSnapshotDescriptor(id) => {
+                write!(formatter, "snapshot body descriptor {id} is not canonical")
             }
             Self::TooManyActiveBodies(count) => {
                 write!(
@@ -607,6 +693,7 @@ impl ClientReplica {
             body_states: BTreeMap::new(),
             body_fingerprint: 0,
             active_body_voxels: 0,
+            next_body_id: 1,
             expected_sequence: 1,
         }
     }
@@ -640,6 +727,7 @@ impl ClientReplica {
         }
         let bodies =
             rebuild_replicated_bodies(&packet.changes, &packet.body_assignments, &self.bodies)?;
+        let next_body_id = validate_spawned_body_ids(&bodies, self.next_body_id)?;
         let active_body_count = self.bodies.len().saturating_add(bodies.len());
         let spawned_voxels = bodies.iter().map(|body| body.voxels.len()).sum::<usize>();
         let active_body_voxels = self.active_body_voxels.saturating_add(spawned_voxels);
@@ -655,7 +743,7 @@ impl ClientReplica {
         let mut final_body_fingerprint = self.body_fingerprint;
         for body in &bodies {
             let state = RigidBodyState::at_spawn(body);
-            final_body_fingerprint ^= body_fingerprint_token(body.id, state);
+            final_body_fingerprint ^= body_fingerprint_token(body, state);
             spawned_states.insert(body.id, state);
         }
         for pair in packet.body_updates.windows(2) {
@@ -672,13 +760,18 @@ impl ClientReplica {
                 .or_else(|| self.body_states.get(&update.body_id))
                 .copied()
                 .ok_or(ReplicationError::UnknownBody(update.body_id))?;
+            let body = bodies
+                .iter()
+                .find(|body| body.id == update.body_id)
+                .or_else(|| self.bodies.get(&update.body_id))
+                .ok_or(ReplicationError::UnknownBody(update.body_id))?;
             if update.state.translation_um.x != previous.translation_um.x
                 || update.state.translation_um.z != previous.translation_um.z
             {
                 return Err(ReplicationError::InvalidBodyState(update.body_id));
             }
-            final_body_fingerprint ^= body_fingerprint_token(update.body_id, previous)
-                ^ body_fingerprint_token(update.body_id, update.state);
+            final_body_fingerprint ^=
+                body_fingerprint_token(body, previous) ^ body_fingerprint_token(body, update.state);
             if let Some(state) = spawned_states.get_mut(&update.body_id) {
                 *state = update.state;
             }
@@ -700,6 +793,7 @@ impl ClientReplica {
         }
         self.body_fingerprint = final_body_fingerprint;
         self.active_body_voxels = active_body_voxels;
+        self.next_body_id = next_body_id;
         self.world.set_tick(packet.tick);
         self.expected_sequence = self.expected_sequence.wrapping_add(1);
         Ok(ClientStatus::Applied)
@@ -707,32 +801,31 @@ impl ClientReplica {
 
     /// Installs a server snapshot after a detected gap. The next delta is explicit to avoid
     /// accepting a stale snapshot that would silently move the client backwards.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an internally inconsistent world, descriptor/state mismatch, non-canonical body,
+    /// invalid dynamic state, exhausted limit, or body ID at/above the supplied high-water mark.
     pub fn install_snapshot(
         &mut self,
         world: World,
-        bodies: BTreeMap<u128, RigidBodyDescriptor>,
-        body_states: &BTreeMap<u128, RigidBodyState>,
+        bodies: BTreeMap<BodyId, RigidBodyDescriptor>,
+        body_states: &BTreeMap<BodyId, RigidBodyState>,
+        next_body_id: BodyId,
         next_sequence: u64,
-    ) {
-        self.active_body_voxels = bodies.values().map(|body| body.voxels.len()).sum();
-        let body_states = bodies
-            .iter()
-            .map(|(&id, body)| {
-                let state = body_states
-                    .get(&id)
-                    .copied()
-                    .filter(|state| valid_rigid_body_state(*state))
-                    .unwrap_or_else(|| RigidBodyState::at_spawn(body));
-                (id, state)
-            })
-            .collect::<BTreeMap<_, _>>();
-        self.body_fingerprint = bodies.iter().fold(0, |fingerprint, (&id, _body)| {
-            fingerprint ^ body_fingerprint_token(id, body_states[&id])
+    ) -> Result<(), ReplicationError> {
+        validate_snapshot(&world, &bodies, body_states, next_body_id, next_sequence)?;
+        let active_body_voxels = bodies.values().map(|body| body.voxels.len()).sum();
+        self.body_fingerprint = bodies.iter().fold(0, |fingerprint, (&id, body)| {
+            fingerprint ^ body_fingerprint_token(body, body_states[&id])
         });
         self.world = world;
         self.bodies = bodies;
-        self.body_states = body_states;
+        self.body_states.clone_from(body_states);
+        self.active_body_voxels = active_body_voxels;
+        self.next_body_id = next_body_id;
         self.expected_sequence = next_sequence;
+        Ok(())
     }
 
     #[must_use]
@@ -741,7 +834,7 @@ impl ClientReplica {
     }
 
     #[must_use]
-    pub const fn bodies(&self) -> &BTreeMap<u128, RigidBodyDescriptor> {
+    pub const fn bodies(&self) -> &BTreeMap<BodyId, RigidBodyDescriptor> {
         &self.bodies
     }
 
@@ -751,15 +844,106 @@ impl ClientReplica {
     }
 
     #[must_use]
-    pub const fn body_states(&self) -> &BTreeMap<u128, RigidBodyState> {
+    pub const fn body_states(&self) -> &BTreeMap<BodyId, RigidBodyState> {
         &self.body_states
     }
+
+    #[must_use]
+    pub const fn next_body_id(&self) -> BodyId {
+        self.next_body_id
+    }
+}
+
+fn validate_snapshot(
+    world: &World,
+    bodies: &BTreeMap<BodyId, RigidBodyDescriptor>,
+    body_states: &BTreeMap<BodyId, RigidBodyState>,
+    next_body_id: BodyId,
+    next_sequence: u64,
+) -> Result<(), ReplicationError> {
+    let recomputed = world.recompute_fingerprint();
+    if world.fingerprint() != recomputed {
+        return Err(ReplicationError::World(
+            WorldError::FinalFingerprintMismatch {
+                expected: world.fingerprint(),
+                actual: recomputed,
+            },
+        ));
+    }
+    if next_body_id == 0 {
+        return Err(ReplicationError::InvalidSnapshotHighWaterMark(next_body_id));
+    }
+    if next_sequence == 0 {
+        return Err(ReplicationError::InvalidSnapshotSequence(next_sequence));
+    }
+    if bodies.len() > MAX_ACTIVE_BODIES || body_states.len() != bodies.len() {
+        return Err(ReplicationError::SnapshotBodySetMismatch);
+    }
+    let active_body_voxels = bodies
+        .values()
+        .try_fold(0_usize, |total, body| total.checked_add(body.voxels.len()))
+        .ok_or(ReplicationError::TooManyActiveBodyVoxels(usize::MAX))?;
+    if active_body_voxels > MAX_ACTIVE_BODY_VOXELS {
+        return Err(ReplicationError::TooManyActiveBodyVoxels(
+            active_body_voxels,
+        ));
+    }
+    for (&id, body) in bodies {
+        if id == 0 || body.id != id || id >= next_body_id {
+            return Err(ReplicationError::InvalidSnapshotBodyId {
+                map_key: id,
+                descriptor_id: body.id,
+                next_body_id,
+            });
+        }
+        let rebuilt = RigidBodyDescriptor::from_replicated_voxels(
+            id,
+            body.voxels.clone(),
+            BodyLimits::default(),
+        )?;
+        if rebuilt != *body {
+            return Err(ReplicationError::InvalidSnapshotDescriptor(id));
+        }
+        let state = body_states
+            .get(&id)
+            .copied()
+            .ok_or(ReplicationError::SnapshotBodySetMismatch)?;
+        let spawn = RigidBodyState::at_spawn(body);
+        if !valid_rigid_body_state(state)
+            || state.translation_um.x != spawn.translation_um.x
+            || state.translation_um.z != spawn.translation_um.z
+        {
+            return Err(ReplicationError::InvalidBodyState(id));
+        }
+    }
+    if body_states.keys().any(|id| !bodies.contains_key(id)) {
+        return Err(ReplicationError::SnapshotBodySetMismatch);
+    }
+    Ok(())
+}
+
+fn validate_spawned_body_ids(
+    bodies: &[RigidBodyDescriptor],
+    mut next_body_id: BodyId,
+) -> Result<BodyId, ReplicationError> {
+    for body in bodies {
+        if body.id != next_body_id {
+            return Err(ReplicationError::NonMonotonicBodyId {
+                expected: next_body_id,
+                received: body.id,
+            });
+        }
+        next_body_id = next_body_id
+            .checked_add(1)
+            .ok_or(ReplicationError::BodyIdExhausted)?;
+    }
+    Ok(next_body_id)
 }
 
 fn rebuild_replicated_bodies(
     changes: &[VoxelChange],
     assignments: &[BodyVoxelAssignment],
-    existing: &BTreeMap<u128, RigidBodyDescriptor>,
+    existing: &BTreeMap<BodyId, RigidBodyDescriptor>,
 ) -> Result<Vec<RigidBodyDescriptor>, ReplicationError> {
     if assignments.len() > MAX_SPAWNED_BODY_VOXELS {
         return Err(ReplicationError::TooManyActiveBodyVoxels(assignments.len()));
@@ -780,7 +964,7 @@ fn rebuild_replicated_bodies(
         .iter()
         .map(|change| (change.position, change))
         .collect();
-    let mut grouped = BTreeMap::<u128, Vec<BodyVoxel>>::new();
+    let mut grouped = BTreeMap::<BodyId, Vec<BodyVoxel>>::new();
     for assignment in assignments {
         let valid_removal = changes_by_position
             .get(&assignment.position)
@@ -962,7 +1146,7 @@ fn encode_change(bytes: &mut Vec<u8>, change: VoxelChange) {
 }
 
 fn encode_body_assignment(bytes: &mut Vec<u8>, assignment: BodyVoxelAssignment) {
-    push_u128(bytes, assignment.body_id);
+    push_u64(bytes, assignment.body_id);
     push_i32(bytes, assignment.position.x);
     push_i32(bytes, assignment.position.y);
     push_i32(bytes, assignment.position.z);
@@ -1037,7 +1221,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DeltaFrame, CodecError> {
     }
     let mut body_assignments = Vec::with_capacity(assignment_count);
     for _ in 0..assignment_count {
-        let body_id = cursor.take_u128()?;
+        let body_id = cursor.take_u64()?;
         let position = IVec3::new(cursor.take_i32()?, cursor.take_i32()?, cursor.take_i32()?);
         let voxel = Voxel::from_wire(cursor.take_u8()?, cursor.take_u8()?)?;
         body_assignments.push(BodyVoxelAssignment {
@@ -1066,7 +1250,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DeltaFrame, CodecError> {
 }
 
 fn encode_body_update(bytes: &mut Vec<u8>, update: BodyStateUpdate) {
-    push_u128(bytes, update.body_id);
+    push_u64(bytes, update.body_id);
     push_i64(bytes, update.state.translation_um.x);
     push_i64(bytes, update.state.translation_um.y);
     push_i64(bytes, update.state.translation_um.z);
@@ -1079,7 +1263,7 @@ fn encode_body_update(bytes: &mut Vec<u8>, update: BodyStateUpdate) {
 }
 
 fn decode_body_update(cursor: &mut Cursor<'_>) -> Result<BodyStateUpdate, CodecError> {
-    let body_id = cursor.take_u128()?;
+    let body_id = cursor.take_u64()?;
     let state = RigidBodyState {
         translation_um: FixedMicrometers3 {
             x: cursor.take_i64()?,
@@ -1306,4 +1490,115 @@ fn push_i32(bytes: &mut Vec<u8>, value: i32) {
 
 fn push_i64(bytes: &mut Vec<u8>, value: i64) {
     bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Material;
+
+    #[test]
+    fn snapshot_validation_is_atomic_and_fail_closed() {
+        let mut snapshot_world = World::default();
+        let position = IVec3::new(0, 4, 0);
+        snapshot_world.set_voxel(position, Voxel::new(Material::Wood));
+        let body = RigidBodyDescriptor::from_world_voxels(
+            1,
+            &snapshot_world,
+            vec![position],
+            BodyLimits::default(),
+        )
+        .expect("snapshot body");
+        snapshot_world.set_voxel(position, Voxel::AIR);
+        let state = RigidBodyState::at_spawn(&body);
+        let bodies = BTreeMap::from([(1, body.clone())]);
+        let states = BTreeMap::from([(1, state)]);
+        let mut client = ClientReplica::new(World::default());
+
+        assert_eq!(
+            client.install_snapshot(
+                snapshot_world.clone(),
+                bodies.clone(),
+                &BTreeMap::new(),
+                2,
+                7
+            ),
+            Err(ReplicationError::SnapshotBodySetMismatch)
+        );
+        assert!(client.bodies().is_empty());
+        assert_eq!(client.next_body_id(), 1);
+
+        let mut forged = body;
+        forged.geometry_fingerprint ^= 1;
+        assert_eq!(
+            client.install_snapshot(
+                snapshot_world.clone(),
+                BTreeMap::from([(1, forged)]),
+                &states,
+                2,
+                7,
+            ),
+            Err(ReplicationError::InvalidSnapshotDescriptor(1))
+        );
+        assert!(client.bodies().is_empty());
+
+        let mut displaced_states = states.clone();
+        displaced_states
+            .get_mut(&1)
+            .expect("snapshot state")
+            .translation_um
+            .x += 1;
+        assert_eq!(
+            client.install_snapshot(
+                snapshot_world.clone(),
+                bodies.clone(),
+                &displaced_states,
+                2,
+                7,
+            ),
+            Err(ReplicationError::InvalidBodyState(1))
+        );
+        assert!(client.bodies().is_empty());
+
+        assert_eq!(
+            client.install_snapshot(snapshot_world, bodies, &states, 2, 7),
+            Ok(())
+        );
+        assert_eq!(client.bodies().len(), 1);
+        assert_eq!(client.next_body_id(), 2);
+    }
+
+    #[test]
+    fn exhausted_body_id_space_rolls_back_before_commit() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Steel));
+        world.set_voxel(IVec3::new(0, 1, 0), Voxel::new(Material::Glass));
+        world.fill_box(
+            IVec3::new(0, 2, 0),
+            IVec3::new(0, 3, 0),
+            Voxel::new(Material::Wood),
+        );
+        let expected_fingerprint = world.fingerprint();
+        let mut server = AuthoritativeServer::new(world);
+        server.next_body_id = BodyId::MAX;
+
+        let result = server.execute_explosion(
+            1,
+            ExplosionCommand {
+                command_id: 1,
+                center: IVec3::new(0, 1, 0),
+                radius_voxels: 1,
+                peak_energy: 600,
+            },
+        );
+
+        assert_eq!(result, Err(CommandError::BodyIdExhausted));
+        assert_eq!(server.world().fingerprint(), expected_fingerprint);
+        assert_eq!(
+            server.world().voxel(IVec3::new(0, 1, 0)),
+            Voxel::new(Material::Glass)
+        );
+        assert!(server.bodies().is_empty());
+        assert_eq!(server.next_body_id(), BodyId::MAX);
+    }
 }

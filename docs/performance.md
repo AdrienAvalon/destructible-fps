@@ -60,11 +60,14 @@ cargo run --release --bin destruction-benchmark -- --events 500
 ```
 
 The representative multi-material scene completed 500 server-authoritative destruction, structural
-analysis, body promotion, protocol-v3 fragmentation, reordering, decode, reassembly,
-client-application, and final-verification cycles at 21,366 events/s. Event latency was 0.013 ms
-p50, 0.217 ms p95, and 0.372 ms p99, or 2.2% of one 60 Hz frame budget. The run produced 847
-application datagrams (0.527 MiB), fractured 13,009 voxels, detached 1,361 voxels into 32 active
+analysis, body promotion, protocol-v4 fragmentation, reordering, decode, reassembly,
+client-application, and final-verification cycles at 21,524 events/s. Event latency was 0.012 ms
+p50, 0.229 ms p95, and 0.354 ms p99, or 2.1% of one 60 Hz frame budget. The run produced 838
+application datagrams (0.515 MiB), fractured 13,009 voxels, detached 1,361 voxels into 32 active
 bodies, and ended with identical static-world and body-set state on server and client.
+Against the immediately preceding protocol-v3 run of the same deterministic fixture, compact IDs
+reduced output from 847 to 838 datagrams and from 0.527 to 0.515 MiB (about 2.3%) without changing
+the simulated result.
 
 ## 2026-09-05 — structural island extraction
 
@@ -80,23 +83,24 @@ foundation path, computes mass/bounds, and reproduces the same 128-bit island fi
 
 | Measurement | Result |
 |---|---:|
-| Combined throughput | 244 analyses and promotions/s |
-| Topology analysis p50 | 2.621 ms |
-| Topology analysis p95 | 2.718 ms |
-| Topology analysis p99 | 2.737 ms |
-| Body promotion p50 | 1.466 ms |
-| Body promotion p95 | 1.514 ms |
-| Body promotion p99 | 1.538 ms |
-| Combined p50 | 4.091 ms |
-| Combined p95 | 4.191 ms |
-| Combined p99 | 4.244 ms |
-| Combined max | 4.245 ms |
+| Combined throughput | 250 analyses and promotions/s |
+| Topology analysis p50 | 2.569 ms |
+| Topology analysis p95 | 2.605 ms |
+| Topology analysis p99 | 2.624 ms |
+| Body promotion p50 | 1.425 ms |
+| Body promotion p95 | 1.466 ms |
+| Body promotion p99 | 1.491 ms |
+| Combined p50 | 3.995 ms |
+| Combined p95 | 4.058 ms |
+| Combined p99 | 4.117 ms |
+| Combined max | 4.225 ms |
 
 The promotion step revalidates the read-only island proof, canonical material voxels, six-neighbour
-connectivity and identity before computing fixed-unit centre of mass and diagonal inertia. The
-combined result is below the 12 ms server-work target on this fixture. Static-world detachment and
-replication are integrated separately in the end-to-end benchmark; fixed-step motion, collision
-solving, sleeping, and progressive stress remain later promotion gates.
+connectivity and geometry fingerprint before computing fixed-unit centre of mass and diagonal
+inertia. Runtime identity is a separate checked server-monotonic 64-bit value. The combined result
+is below the 12 ms server-work target on this fixture. Static-world detachment and replication are
+integrated separately in the end-to-end benchmark; fixed-step collision performance is recorded
+below, while progressive stress remains a later promotion gate.
 
 ## 2026-09-05 — replicated body rendering
 
@@ -110,8 +114,8 @@ The deterministic showcase first severed a fragile support to guarantee one repl
 breached the main facade. Body geometry was built by the same single-queue bounded background worker
 as chunk geometry, in local coordinates, and uploaded into a fixed 1,024-instance transform arena.
 The Vulkan run reported 1/1 body visible, 90/128 chunks visible, 91 world draws, and 129 shadow draws.
-With fixed-step motion enabled, GPU total was 0.180 ms p50, 0.194 ms p95, 0.197 ms p99, and 0.202 ms
-maximum across 2,022 completed samples, with zero dropped timestamp samples. The body reached the
+With fixed-step motion enabled, GPU total was 0.150 ms p50, 0.176 ms p95, 0.177 ms p99, and 0.180 ms
+maximum across 1,987 completed samples, with zero dropped timestamp samples. The body reached the
 static ground and the smoke gate reported 1/1 body sleeping. The scene is intentionally small: this
 validates the body shader, upload, culling, state replication, and draw paths, not the final
 active-body rendering budget.
@@ -131,10 +135,10 @@ four exact canonical heights or the benchmark fails.
 
 | Measurement | Result |
 |---|---:|
-| Tick p50 | 0.407 ms |
-| Tick p95 | 0.803 ms |
-| Tick p99 | 0.822 ms |
-| Tick max | 0.859 ms |
+| Tick p50 | 0.410 ms |
+| Tick p95 | 0.831 ms |
+| Tick p99 | 0.848 ms |
+| Tick max | 0.885 ms |
 | Maximum updated bodies | 1,024 |
 | Maximum broad-phase pairs | 768 |
 | Static contact resolutions | 7,680 |

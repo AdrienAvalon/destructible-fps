@@ -3,6 +3,23 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — graphical late-join snapshot increment
+
+Source state: parent `5a79f19` plus the graphical snapshot increment documented here. Every loopback
+graphical admission now requests and atomically installs the bounded authoritative snapshot before
+accepting world deltas. It resets the ordered sequence cursor, remeshes the union of former and new
+chunk positions so empty chunks disappear, clears stale GPU rigid bodies, uploads the snapshot body
+set, acknowledges installation, and then receives the server's ordered catch-up queue. A stalled
+transfer requests fixed 64-fragment missing windows at bounded intervals.
+
+The first release Vulkan client ran for 15 seconds and destructively changed the authority. A second
+release Vulkan client was deliberately started five seconds later. It joined as session 2, rendered
+the existing remote player, moved 22,700,000 um, installed the already-modified snapshot and exited
+successfully without receiving the earlier live delta (`deltas_monde=0`, `snapshot_pret=true`). The
+first client independently observed the live destruction delta and moved 80,096,248 um. The complete
+promotion retained 115 library tests, six binary tests, and 42 integration tests in debug and release;
+strict Clippy was clean.
+
 ## 2026-09-05 — two-client graphical destruction replication increment
 
 Source state: parent `4488131` plus the graphical world-replication increment documented here. The

@@ -113,7 +113,12 @@ tracks their replicated transforms. Mouse actions send requests only; the author
 broadcasts the resulting mutation. A release smoke run requires both real Vulkan clients to apply
 the same destruction delta. The loopback authority emits the same player-state and world-delta
 packets as QUIC so the transport-independent simulation and client presentation can be exercised in
-two real windows. Late-join snapshot bootstrap and asynchronous remeshing remain explicit gates.
+two real windows. Every admitted graphical client requests the current snapshot, assembles its
+bounded hashed fragments, installs it atomically, resets the ordered delta cursor, rebuilds the union
+of old and new chunk slots, clears stale GPU bodies, uploads the authoritative body set, acknowledges
+installation, and only then accepts player mutations. Stalled transfers request only missing
+64-fragment windows. A late-join release smoke proves that a client can arrive after destruction and
+render the already-modified snapshot. Asynchronous network remeshing remains an explicit gate.
 This does not relax exposure: both binaries refuse non-loopback addresses, and the production client
 must use authenticated QUIC/OIDC before any remote deployment.
 

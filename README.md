@@ -144,10 +144,11 @@ cargo run --release --bin multiplayer-demo -- --server 127.0.0.1:40000
 This first networked graphical slice synchronizes character movement, remote players, authoritative
 destruction, construction, and moving rigid debris. Once the cursor is captured, left click fires a
 rifle blast, right click an explosive blast, and middle click builds wood. Start every client before
-modifying the world: initial snapshot recovery, recovery UI, asynchronous network remeshing, and the
-production QUIC/OIDC connection are not yet wired into `multiplayer-demo`. Both this client and the
-unauthenticated UDP server reject non-loopback addresses; they are a local development harness, not
-a LAN/Internet deployment path.
+or after modifying the world: each admission installs an atomic snapshot, selectively requests lost
+fragments, acknowledges installation, and resumes with ordered catch-up deltas. Recovery UI,
+asynchronous network remeshing, and the production QUIC/OIDC connection are not yet wired into
+`multiplayer-demo`. Both this client and the unauthenticated UDP server reject non-loopback addresses;
+they are a local development harness, not a LAN/Internet deployment path.
 
 The legacy dedicated-server process is intentionally restricted to loopback. Its socket has been
 separated from the reusable authority core and its real two-client path is exercised by

@@ -9,9 +9,11 @@ use destructible_fps::{
     FixedMicrometers3, IVec3, MAX_APPLICATION_DATAGRAM_BYTES, MAX_BUILD_REACH_VOXELS,
     MAX_RECEIVED_DATAGRAMS_PER_TICK, MICROMETERS_PER_VOXEL, Material, OrderedDeltaInbox,
     PlayerInputCommand, PlayerInterpolationBuffer, PlayerInterpolationError,
-    PlayerStateReceiveError, ServerControlMessage, decode_player_state_packet,
+    PlayerStateReceiveError, ServerControlMessage, SnapshotAssembler, decode_player_state_packet,
     decode_server_control, demo_world, dirty_chunks, encode_build_request, encode_client_hello,
-    encode_explosion_request, encode_player_input, is_delta_datagram, is_player_state_datagram,
+    encode_explosion_request, encode_player_input, encode_snapshot_ack,
+    encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
+    is_player_state_datagram, is_snapshot_datagram,
     mesh::{mesh_body, mesh_chunk},
     player::{Player, raycast},
     render::{RenderOutcome, Renderer},
@@ -37,11 +39,23 @@ use winit::{
 const FIXED_STEP_SECONDS: f32 = 1.0 / 60.0;
 const DEFAULT_SERVER: &str = "127.0.0.1:40000";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotPhase {
+    Awaiting,
+    Ready,
+}
+
 struct MultiplayerGame {
     window: Arc<Window>,
     renderer: Renderer,
     replica: ClientReplica,
     delta_inbox: OrderedDeltaInbox,
+    snapshot_assembler: SnapshotAssembler,
+    snapshot_phase: SnapshotPhase,
+    last_snapshot_request_at: Option<Instant>,
+    last_snapshot_progress_at: Option<Instant>,
+    last_snapshot_repair_at: Option<Instant>,
+    pristine_world_fingerprint: u128,
     socket: UdpSocket,
     server: SocketAddr,
     nonce: u64,
@@ -109,8 +123,14 @@ impl MultiplayerGame {
         Ok(Self {
             window,
             renderer,
+            pristine_world_fingerprint: world.fingerprint(),
             replica: ClientReplica::new(world),
             delta_inbox: OrderedDeltaInbox::default(),
+            snapshot_assembler: SnapshotAssembler::default(),
+            snapshot_phase: SnapshotPhase::Awaiting,
+            last_snapshot_request_at: None,
+            last_snapshot_progress_at: None,
+            last_snapshot_repair_at: None,
             socket,
             server,
             nonce,
@@ -134,6 +154,10 @@ impl MultiplayerGame {
             applied_world_deltas: 0,
             smoke_action_sent: false,
         })
+    }
+
+    fn snapshot_ready(&self) -> bool {
+        self.snapshot_phase == SnapshotPhase::Ready
     }
 
     fn capture_cursor(&mut self) {
@@ -168,6 +192,8 @@ impl MultiplayerGame {
             let payload = &bytes[..length];
             if is_player_state_datagram(payload) {
                 self.receive_player_state(payload)?;
+            } else if is_snapshot_datagram(payload) {
+                self.receive_snapshot(payload)?;
             } else if is_delta_datagram(payload) {
                 self.receive_world_delta(payload)?;
             } else if payload.starts_with(b"DFCT") {
@@ -180,10 +206,117 @@ impl MultiplayerGame {
                 .map_err(|error| format!("nouvelle tentative de handshake: {error}"))?;
             self.last_hello_at = Instant::now();
         }
+        self.repair_snapshot_if_needed()?;
+        Ok(())
+    }
+
+    fn request_snapshot(&mut self, session_id: u64) -> Result<(), String> {
+        self.socket
+            .send_to(&encode_snapshot_request(session_id), self.server)
+            .map_err(|error| format!("demande de snapshot: {error}"))?;
+        self.last_snapshot_request_at = Some(Instant::now());
+        "synchronisation initiale du monde".clone_into(&mut self.last_status);
+        Ok(())
+    }
+
+    fn repair_snapshot_if_needed(&mut self) -> Result<(), String> {
+        let Some(session_id) = self.session_id else {
+            return Ok(());
+        };
+        if self.snapshot_ready() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if self.snapshot_assembler.active_snapshot_id().is_none() {
+            if self
+                .last_snapshot_request_at
+                .is_none_or(|requested| now.duration_since(requested) >= Duration::from_secs(1))
+            {
+                self.request_snapshot(session_id)?;
+            }
+            return Ok(());
+        }
+        let stalled = self
+            .last_snapshot_progress_at
+            .is_some_and(|progress| now.duration_since(progress) >= Duration::from_millis(500));
+        let repair_due = self
+            .last_snapshot_repair_at
+            .is_none_or(|repair| now.duration_since(repair) >= Duration::from_millis(500));
+        if stalled && repair_due {
+            let Some(snapshot_id) = self.snapshot_assembler.active_snapshot_id() else {
+                return Ok(());
+            };
+            for (base_fragment, missing_mask) in self.snapshot_assembler.missing_fragment_windows()
+            {
+                self.socket
+                    .send_to(
+                        &encode_snapshot_fragments_request(
+                            session_id,
+                            snapshot_id,
+                            base_fragment,
+                            missing_mask,
+                        ),
+                        self.server,
+                    )
+                    .map_err(|error| format!("reparation de snapshot: {error}"))?;
+            }
+            self.last_snapshot_repair_at = Some(now);
+        }
+        Ok(())
+    }
+
+    fn receive_snapshot(&mut self, payload: &[u8]) -> Result<(), String> {
+        let snapshot = self
+            .snapshot_assembler
+            .push(payload)
+            .map_err(|error| format!("snapshot monde invalide: {error}"))?;
+        self.last_snapshot_progress_at = Some(Instant::now());
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        let Some(session_id) = self.session_id else {
+            return Err("snapshot recu avant admission".to_owned());
+        };
+        let snapshot_id = snapshot.snapshot_id();
+        let next_sequence = snapshot.next_sequence();
+        let mut chunk_positions = self
+            .replica
+            .world()
+            .chunk_positions()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        snapshot
+            .install_into(&mut self.replica)
+            .map_err(|error| format!("installation du snapshot refusee: {error}"))?;
+        self.delta_inbox = OrderedDeltaInbox::new(next_sequence);
+        chunk_positions.extend(self.replica.world().chunk_positions());
+        let mut chunk_positions = chunk_positions.into_iter().collect::<Vec<_>>();
+        chunk_positions.sort_unstable_by_key(|chunk| (chunk.x, chunk.y, chunk.z));
+        let chunk_meshes = chunk_positions
+            .into_iter()
+            .map(|chunk| (chunk, mesh_chunk(self.replica.world(), chunk)))
+            .collect();
+        self.renderer.upload_chunk_meshes(chunk_meshes);
+        self.renderer.clear_body_meshes();
+        let body_meshes = self.replica.bodies().values().map(mesh_body).collect();
+        self.renderer.upload_body_meshes(body_meshes)?;
+        self.renderer
+            .update_body_transforms(self.replica.body_states());
+        self.socket
+            .send_to(&encode_snapshot_ack(session_id, snapshot_id), self.server)
+            .map_err(|error| format!("acquittement du snapshot: {error}"))?;
+        self.snapshot_phase = SnapshotPhase::Ready;
+        self.last_status = format!(
+            "snapshot {snapshot_id} installe | sequence {next_sequence} | {} corps",
+            self.replica.bodies().len()
+        );
         Ok(())
     }
 
     fn receive_world_delta(&mut self, payload: &[u8]) -> Result<(), String> {
+        if !self.snapshot_ready() {
+            return Ok(());
+        }
         let packets = self
             .delta_inbox
             .push(payload)
@@ -235,8 +368,11 @@ impl MultiplayerGame {
                 if self.session_id.is_some_and(|current| current != session_id) {
                     return Err("le serveur a remplace une session active".to_owned());
                 }
+                let first_welcome = self.session_id.is_none();
                 self.session_id = Some(session_id);
-                self.last_status = format!("session {session_id} etablie");
+                if first_welcome {
+                    self.request_snapshot(session_id)?;
+                }
                 Ok(())
             }
             ServerControlMessage::Welcome { .. } => {
@@ -328,6 +464,10 @@ impl MultiplayerGame {
     }
 
     fn send_explosion(&mut self, radius_voxels: u16, peak_energy: u32) -> Result<(), String> {
+        if !self.snapshot_ready() {
+            "action suspendue pendant la synchronisation".clone_into(&mut self.last_status);
+            return Ok(());
+        }
         let Some(session_id) = self.session_id else {
             return Ok(());
         };
@@ -355,6 +495,10 @@ impl MultiplayerGame {
     }
 
     fn send_build(&mut self, material: Material) -> Result<(), String> {
+        if !self.snapshot_ready() {
+            "action suspendue pendant la synchronisation".clone_into(&mut self.last_status);
+            return Ok(());
+        }
         let Some(session_id) = self.session_id else {
             return Ok(());
         };
@@ -392,6 +536,7 @@ impl MultiplayerGame {
 
     fn send_smoke_action(&mut self) -> Result<(), String> {
         if !self.smoke_motion
+            || !self.snapshot_ready()
             || self.smoke_action_sent
             || self.started.elapsed().as_secs_f32() < 3.0
         {
@@ -490,7 +635,7 @@ impl MultiplayerGame {
             self.last_status
         ));
         if exit_after.is_some_and(|duration| self.started.elapsed() >= duration) {
-            if self.session_id.is_none() || self.prediction.is_none() {
+            if self.session_id.is_none() || self.prediction.is_none() || !self.snapshot_ready() {
                 return Err("smoke multijoueur termine sans session jouable".to_owned());
             }
             if self.maximum_horizontal_displacement_um < MICROMETERS_PER_VOXEL.cast_unsigned() {
@@ -499,11 +644,15 @@ impl MultiplayerGame {
                     self.maximum_horizontal_displacement_um
                 ));
             }
-            if self.applied_world_deltas == 0 {
-                return Err("smoke multijoueur sans delta de destruction replique".to_owned());
+            if self.applied_world_deltas == 0
+                && self.replica.world().fingerprint() == self.pristine_world_fingerprint
+            {
+                return Err(
+                    "smoke multijoueur sans destruction repliquee ni snapshot modifie".to_owned(),
+                );
             }
             println!(
-                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={}",
+                "SMOKE session={} joueurs_distants={} tick={} pending={} deplacement_um={} deltas_monde={} snapshot_pret={}",
                 self.session_id.unwrap_or_default(),
                 stats.players,
                 self.prediction
@@ -513,7 +662,8 @@ impl MultiplayerGame {
                     .as_ref()
                     .map_or(0, ClientPrediction::pending_inputs),
                 self.maximum_horizontal_displacement_um,
-                self.applied_world_deltas
+                self.applied_world_deltas,
+                self.snapshot_ready()
             );
             event_loop.exit();
         }

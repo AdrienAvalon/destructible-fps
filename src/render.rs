@@ -770,6 +770,13 @@ impl Renderer {
         Ok(())
     }
 
+    /// Drops every rendered rigid body before installing an authoritative replacement snapshot.
+    pub fn clear_body_meshes(&mut self) {
+        self.bodies.clear();
+        self.body_instances.clear();
+        self.refresh_stats();
+    }
+
     pub fn update_body_transforms(&mut self, states: &BTreeMap<BodyId, RigidBodyState>) {
         let scale = MICROMETERS_PER_VOXEL as f32;
         for (&body_id, state) in states {

@@ -8,9 +8,11 @@ const CONTROL_VERSION: u8 = 1;
 const HELLO_KIND: u8 = 1;
 const WELCOME_KIND: u8 = 2;
 const EXPLOSION_KIND: u8 = 3;
+const REPAIR_REQUEST_KIND: u8 = 4;
 const HELLO_BYTES: usize = 14;
 const WELCOME_BYTES: usize = 22;
 const EXPLOSION_BYTES: usize = 40;
+const REPAIR_REQUEST_BYTES: usize = 22;
 pub const MAX_UDP_DATAGRAM_BYTES: usize = 1_200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,6 +23,10 @@ pub enum ClientControlMessage {
     Explosion {
         session_id: u64,
         command: ExplosionCommand,
+    },
+    RepairRequest {
+        session_id: u64,
+        missing_sequence: u64,
     },
 }
 
@@ -78,6 +84,14 @@ pub fn encode_explosion_request(session_id: u64, command: ExplosionCommand) -> V
 }
 
 #[must_use]
+pub fn encode_repair_request(session_id: u64, missing_sequence: u64) -> Vec<u8> {
+    let mut bytes = control_prefix(REPAIR_REQUEST_KIND, REPAIR_REQUEST_BYTES);
+    push_u64(&mut bytes, session_id);
+    push_u64(&mut bytes, missing_sequence);
+    bytes
+}
+
+#[must_use]
 pub fn encode_server_welcome(nonce: u64, session_id: u64) -> Vec<u8> {
     let mut bytes = control_prefix(WELCOME_KIND, WELCOME_BYTES);
     push_u64(&mut bytes, nonce);
@@ -109,6 +123,13 @@ pub fn decode_client_control(bytes: &[u8]) -> Result<ClientControlMessage, Contr
                     radius_voxels: cursor.take_u16(),
                     peak_energy: cursor.take_u32(),
                 },
+            })
+        }
+        REPAIR_REQUEST_KIND => {
+            require_length(bytes, REPAIR_REQUEST_BYTES)?;
+            Ok(ClientControlMessage::RepairRequest {
+                session_id: cursor.take_u64(),
+                missing_sequence: cursor.take_u64(),
             })
         }
         kind => Err(ControlCodecError::InvalidKind(kind)),
@@ -265,6 +286,16 @@ mod tests {
             Ok(ServerControlMessage::Welcome {
                 nonce: 42,
                 session_id: 9,
+            })
+        );
+
+        let repair = encode_repair_request(9, 11);
+        assert_eq!(repair.len(), REPAIR_REQUEST_BYTES);
+        assert_eq!(
+            decode_client_control(&repair),
+            Ok(ClientControlMessage::RepairRequest {
+                session_id: 9,
+                missing_sequence: 11,
             })
         );
     }

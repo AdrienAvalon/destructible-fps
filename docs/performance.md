@@ -7,7 +7,7 @@ machine. They are not portable guarantees or substitutes for the later platform 
 
 Source state: parent `ce27090` plus the dedicated transport change documented in this section.
 
-`cargo test --all-targets` and `cargo test --release --all-targets` each passed 44 library tests,
+`cargo test --all-targets` and `cargo test --release --all-targets` each passed 45 library tests,
 three binary tests, and 18 integration tests. The new integration test starts the actual release or
 debug dedicated-server child process, negotiates two independent loopback UDP clients, submits one
 bounded command, drains fragmented deltas in sequence, and verifies identical static world, body
@@ -18,7 +18,23 @@ The transport has explicit safety ceilings of 16 peers, 64 received datagrams, 2
 32 simulated commands, and 4,096 attempted outbound datagrams per server tick. Complete out-of-order
 client packets retain at most 16 packets and 8 MiB in addition to the existing bounded fragment
 assembler. These are overload bounds, not the final 256-kbit/s per-player bandwidth policy; interest
-management, acknowledgements, loss repair, and per-client budgets remain required.
+management, acknowledgements, snapshot repair, and per-client budgets remain required.
+
+The next transport increment retains at most 64 encoded delta packets and 8 MiB, admits at most 64
+queued repair requests, and serves at most 16 before new simulation each tick under the same 4,096
+send-attempt ceiling. A second process test discards every initial frame of sequence 1 for one client,
+buffers a complete future packet without applying it, requests the missing sequence, and finishes
+with identical replicas. This proves bounded short-gap retransmission; it does not cover expired
+history, sustained loss, congestion control, or final per-client bandwidth policy.
+
+The complete post-change promotion passed 46 library tests, three binary tests, and 19 integration
+tests in both debug and release; the two process transport tests completed together in 0.21 s in
+release. Destruction, structural, and 1,024-body physics p99 were respectively 0.365 ms, 4.123 ms,
+and 0.878 ms. The repeated Vulkan smoke completed cleanly with zero dropped GPU samples and
+0.194 ms GPU-total p99. CPU frame-work p99 was 16.890 ms in that run because surface/presentation
+pacing clustered around 16.7 ms, versus 11.729 ms in the immediately preceding run; this variance
+needs the later sustained capture and does not establish a renderer regression or a shipping-budget
+pass.
 
 The full promotion rerun produced the following point-in-time results:
 

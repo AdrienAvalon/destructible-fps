@@ -13,6 +13,7 @@ struct Options {
     bind: SocketAddr,
     max_ticks: u64,
     exit_after_commands: Option<usize>,
+    exit_after_repairs: Option<usize>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -26,6 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let mut deadline = Instant::now();
     let mut applied_commands = 0_usize;
+    let mut served_repairs = 0_usize;
     let mut ticks = 0_u64;
     let mut inbound = 0_usize;
     let mut outbound = 0_usize;
@@ -33,11 +35,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         let report = server.tick()?;
         ticks += 1;
         applied_commands = applied_commands.saturating_add(report.commands_applied);
+        served_repairs = served_repairs.saturating_add(report.repairs_served);
         inbound = inbound.saturating_add(report.received_datagrams);
         outbound = outbound.saturating_add(report.outbound_datagrams);
         if options
             .exit_after_commands
             .is_some_and(|target| applied_commands >= target)
+            || options
+                .exit_after_repairs
+                .is_some_and(|target| served_repairs >= target)
         {
             break;
         }
@@ -50,7 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     println!(
-        "STOP ticks={ticks} commands={applied_commands} peers={} inbound={inbound} outbound={outbound}",
+        "STOP ticks={ticks} commands={applied_commands} repairs={served_repairs} peers={} inbound={inbound} outbound={outbound}",
         server.peer_count()
     );
     Ok(())
@@ -60,6 +66,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut bind = DEFAULT_BIND.parse::<SocketAddr>()?;
     let mut max_ticks = u64::MAX;
     let mut exit_after_commands = None;
+    let mut exit_after_repairs = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -83,6 +90,14 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                         .parse()?,
                 );
             }
+            "--exit-after-repairs" => {
+                exit_after_repairs = Some(
+                    arguments
+                        .next()
+                        .ok_or("--exit-after-repairs requires a value")?
+                        .parse()?,
+                );
+            }
             _ => return Err(format!("unknown argument: {argument}").into()),
         }
     }
@@ -95,10 +110,14 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     if exit_after_commands == Some(0) {
         return Err("--exit-after-commands must be greater than zero".into());
     }
+    if exit_after_repairs == Some(0) {
+        return Err("--exit-after-repairs must be greater than zero".into());
+    }
     Ok(Options {
         bind,
         max_ticks,
         exit_after_commands,
+        exit_after_repairs,
     })
 }
 

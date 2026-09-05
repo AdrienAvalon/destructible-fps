@@ -16,6 +16,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - out-of-order frame reassembly;
 - a real nonblocking UDP dedicated-server process, fixed versioned control handshake, and
   two-client process-level loopback synchronization test;
+- bounded recent-delta retention and prioritized exact retransmission: a process test deliberately
+  drops a complete sequence, buffers later deltas, requests repair, and proves convergence;
 - strict caps on incomplete packets, fragments, and retained bytes to prevent
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,
@@ -42,8 +44,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
 game. Horizontal and angular rigid-body response, progressive structural stress, authenticated
-remote sessions, loss repair, audio, asset-quality PBR, temporal anti-aliasing, and large-world
-residency streaming remain explicit later gates.
+remote sessions, snapshot fallback for losses outside retained history, audio, asset-quality PBR,
+temporal anti-aliasing, and large-world residency streaming remain explicit later gates.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits

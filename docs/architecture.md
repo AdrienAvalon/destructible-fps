@@ -26,10 +26,11 @@ announces that a wall was destroyed; it requests an action and receives the resu
 Delta protocol v4 uses monotonically increasing sequences, independent 128-bit pre/post
 fingerprints for the static world and active body set, bounded fragments, and before-state
 validation. Detached body membership and integer dynamic state travel in separate canonical frames;
-both are reconstructed and validated before any static-world write. Missing data stops application
-and requests a snapshot. Snapshot installation itself rejects a mismatched body/state set, invalid
-high-water mark, non-canonical descriptor or inconsistent world fingerprint before replacing any
-replica state. Corrupt or stale data cannot partially mutate a replica.
+both are reconstructed and validated before any static-world write. Missing data stops application;
+the UDP client can request an exact retained transaction before falling back to a future snapshot
+path. Snapshot installation itself rejects a mismatched body/state set, invalid high-water mark,
+non-canonical descriptor or inconsistent world fingerprint before replacing any replica state.
+Corrupt or stale data cannot partially mutate a replica.
 
 Runtime bodies use compact non-zero 64-bit IDs reserved monotonically by the server only when the
 whole detachment transaction commits. Their canonical geometry retains a separate 128-bit
@@ -42,9 +43,13 @@ versioned control codec admits source-bound development sessions, validates boun
 commands, separates receive and simulation phases, and applies hard per-tick limits to ingress,
 queued work, simulation, and egress. Complete deltas are released to clients only in contiguous
 sequence order, including when UDP delivers later packets first. A process-level integration test
-drives two independent sockets and proves identical world/body state and fingerprints. These
-sessions are deliberately loopback-only and unauthenticated; they provide no confidentiality,
-identity, or packet authenticity and must not be exposed beyond the developer machine.
+drives two independent sockets and proves identical world/body state and fingerprints. A second
+test drops a whole sequence for one client, keeps later complete packets buffered, and recovers by
+requesting the exact server-retained frames. The retention history, repair queue, repairs per tick,
+and shared send-attempt budget are all fixed. An expired-history miss is observable and remains
+fail-closed until the snapshot fallback is delivered. These sessions are deliberately loopback-only
+and unauthenticated; they provide no confidentiality, identity, or packet authenticity and must not
+be exposed beyond the developer machine.
 
 ## Planned engine layers
 
@@ -112,6 +117,8 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
 - separate nonblocking UDP authority, versioned control handshake, source-bound development
   sessions, bounded queues and per-tick work, ordered client delivery, and a real two-client
   process test (delivered for unauthenticated loopback only);
+- exact short-gap repair from a count-and-byte-bounded delta history, prioritized before new
+  simulation, with deliberate whole-sequence loss and convergence coverage (delivered);
 - encrypted client authentication and session negotiation;
 - unreliable sequenced deltas plus reliable snapshot/control channels;
 - loss, duplication, reordering, latency, and bandwidth simulation;

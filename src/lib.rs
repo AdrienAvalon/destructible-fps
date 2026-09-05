@@ -23,8 +23,9 @@ pub use destruction::{DestructionReport, Explosion};
 pub use generator::demo_world;
 pub use material::{Material, MaterialProperties, Voxel};
 pub use network::{
-    DedicatedServer, MAX_OUTBOUND_DATAGRAMS_PER_TICK, MAX_QUEUED_COMMANDS,
-    MAX_RECEIVED_DATAGRAMS_PER_TICK, MAX_SERVER_PEERS, MAX_SIMULATED_COMMANDS_PER_TICK,
+    DedicatedServer, MAX_OUTBOUND_DATAGRAMS_PER_TICK, MAX_QUEUED_COMMANDS, MAX_QUEUED_REPAIRS,
+    MAX_RECEIVED_DATAGRAMS_PER_TICK, MAX_REPAIRS_PER_TICK, MAX_RETAINED_DELTA_BYTES,
+    MAX_RETAINED_DELTA_PACKETS, MAX_SERVER_PEERS, MAX_SIMULATED_COMMANDS_PER_TICK,
     NetworkRuntimeError, NetworkTickReport, OrderedDeltaInbox,
 };
 pub use physics::{
@@ -48,6 +49,6 @@ pub use telemetry::{DistributionSummary, SampleWindow};
 pub use transport::{
     ClientControlMessage, ControlCodecError, MAX_UDP_DATAGRAM_BYTES, ServerControlMessage,
     decode_client_control, decode_server_control, encode_client_hello, encode_explosion_request,
-    encode_server_welcome, is_delta_datagram,
+    encode_repair_request, encode_server_welcome, is_delta_datagram,
 };
 pub use world::{CHUNK_EDGE, IVec3, VoxelChange, World, WorldError, WorldStats, chunk_position};

@@ -14,9 +14,13 @@ use std::{
 
 pub const MAX_SERVER_PEERS: usize = 16;
 pub const MAX_QUEUED_COMMANDS: usize = 256;
+pub const MAX_QUEUED_REPAIRS: usize = 64;
 pub const MAX_RECEIVED_DATAGRAMS_PER_TICK: usize = 64;
 pub const MAX_SIMULATED_COMMANDS_PER_TICK: usize = 32;
+pub const MAX_REPAIRS_PER_TICK: usize = 16;
 pub const MAX_OUTBOUND_DATAGRAMS_PER_TICK: usize = 4_096;
+pub const MAX_RETAINED_DELTA_PACKETS: usize = 64;
+pub const MAX_RETAINED_DELTA_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_PEER_IDLE_TICKS: u64 = 3_600;
 const MAX_COMPLETE_PACKETS: usize = 16;
 const MAX_COMPLETE_PACKET_BYTES: usize = 8 * 1_024 * 1_024;
@@ -29,6 +33,9 @@ pub struct NetworkTickReport {
     pub rejected_sessions: usize,
     pub peer_limit_drops: usize,
     pub queue_limit_drops: usize,
+    pub repair_queue_drops: usize,
+    pub repairs_served: usize,
+    pub repair_misses: usize,
     pub commands_applied: usize,
     pub commands_rejected: usize,
     pub outbound_attempts: usize,
@@ -79,11 +86,27 @@ struct QueuedCommand {
     command: ExplosionCommand,
 }
 
+#[derive(Clone, Copy)]
+struct QueuedRepair {
+    source: SocketAddr,
+    session_id: u64,
+    missing_sequence: u64,
+}
+
+struct RetainedDelta {
+    sequence: u64,
+    frames: Vec<Vec<u8>>,
+    bytes: usize,
+}
+
 pub struct DedicatedServer {
     socket: UdpSocket,
     authority: AuthoritativeServer,
     peers: BTreeMap<SocketAddr, Peer>,
     commands: VecDeque<QueuedCommand>,
+    repairs: VecDeque<QueuedRepair>,
+    retained_deltas: VecDeque<RetainedDelta>,
+    retained_delta_bytes: usize,
     next_session_id: u64,
     tick: u64,
 }
@@ -109,6 +132,9 @@ impl DedicatedServer {
             authority: AuthoritativeServer::new(world),
             peers: BTreeMap::new(),
             commands: VecDeque::new(),
+            repairs: VecDeque::new(),
+            retained_deltas: VecDeque::new(),
+            retained_delta_bytes: 0,
             next_session_id: 1,
             tick: 0,
         })
@@ -125,6 +151,7 @@ impl DedicatedServer {
         self.prune_idle_peers();
         let mut report = NetworkTickReport::default();
         self.receive_batch(&mut report)?;
+        self.process_repairs(&mut report);
         self.simulate_commands(&mut report)?;
         let (physics_packet, physics) = self.authority.advance_physics();
         report.physics = physics;
@@ -158,6 +185,16 @@ impl DedicatedServer {
         self.commands.len()
     }
 
+    #[must_use]
+    pub fn retained_delta_packets(&self) -> usize {
+        self.retained_deltas.len()
+    }
+
+    #[must_use]
+    pub const fn retained_delta_bytes(&self) -> usize {
+        self.retained_delta_bytes
+    }
+
     fn receive_batch(&mut self, report: &mut NetworkTickReport) -> io::Result<()> {
         let mut datagram = [0_u8; APPLICATION_MTU + 1];
         for _ in 0..MAX_RECEIVED_DATAGRAMS_PER_TICK {
@@ -183,6 +220,10 @@ impl DedicatedServer {
                     session_id,
                     command,
                 } => self.enqueue_command(source, session_id, command, report),
+                ClientControlMessage::RepairRequest {
+                    session_id,
+                    missing_sequence,
+                } => self.enqueue_repair(source, session_id, missing_sequence, report),
             }
         }
         Ok(())
@@ -240,6 +281,60 @@ impl DedicatedServer {
         });
     }
 
+    fn enqueue_repair(
+        &mut self,
+        source: SocketAddr,
+        session_id: u64,
+        missing_sequence: u64,
+        report: &mut NetworkTickReport,
+    ) {
+        let Some(peer) = self.peers.get_mut(&source) else {
+            report.rejected_sessions += 1;
+            return;
+        };
+        if peer.session_id != session_id || missing_sequence == 0 {
+            report.rejected_sessions += 1;
+            return;
+        }
+        peer.last_seen_tick = self.tick;
+        if self.repairs.len() >= MAX_QUEUED_REPAIRS {
+            report.repair_queue_drops += 1;
+            return;
+        }
+        self.repairs.push_back(QueuedRepair {
+            source,
+            session_id,
+            missing_sequence,
+        });
+    }
+
+    fn process_repairs(&mut self, report: &mut NetworkTickReport) {
+        for _ in 0..MAX_REPAIRS_PER_TICK {
+            let Some(repair) = self.repairs.pop_front() else {
+                break;
+            };
+            if self
+                .peers
+                .get(&repair.source)
+                .is_none_or(|peer| peer.session_id != repair.session_id)
+            {
+                report.rejected_sessions += 1;
+                continue;
+            }
+            let Some(retained) = self
+                .retained_deltas
+                .iter()
+                .find(|packet| packet.sequence == repair.missing_sequence)
+            else {
+                report.repair_misses += 1;
+                continue;
+            };
+            if send_packet_frames(&self.socket, &retained.frames, repair.source, report) {
+                report.repairs_served += 1;
+            }
+        }
+    }
+
     fn simulate_commands(
         &mut self,
         report: &mut NetworkTickReport,
@@ -263,27 +358,37 @@ impl DedicatedServer {
     }
 
     fn broadcast(
-        &self,
+        &mut self,
         packet: &DeltaPacket,
         report: &mut NetworkTickReport,
     ) -> Result<(), NetworkRuntimeError> {
         let frames = encode_frames(packet, APPLICATION_MTU)?;
         for destination in self.peers.keys() {
-            if frames.len()
-                > MAX_OUTBOUND_DATAGRAMS_PER_TICK.saturating_sub(report.outbound_attempts)
-            {
-                report.outbound_drops = report.outbound_drops.saturating_add(frames.len());
-                continue;
-            }
-            for frame in &frames {
-                report.outbound_attempts += 1;
-                match self.socket.send_to(frame, destination) {
-                    Ok(length) if length == frame.len() => report.outbound_datagrams += 1,
-                    Ok(_) | Err(_) => report.outbound_drops += 1,
-                }
-            }
+            send_packet_frames(&self.socket, &frames, *destination, report);
         }
+        self.retain_delta(packet.sequence, frames);
         Ok(())
+    }
+
+    fn retain_delta(&mut self, sequence: u64, frames: Vec<Vec<u8>>) {
+        let bytes = frames.iter().map(Vec::len).sum::<usize>();
+        if bytes > MAX_RETAINED_DELTA_BYTES {
+            return;
+        }
+        while self.retained_deltas.len() >= MAX_RETAINED_DELTA_PACKETS
+            || self.retained_delta_bytes.saturating_add(bytes) > MAX_RETAINED_DELTA_BYTES
+        {
+            let Some(removed) = self.retained_deltas.pop_front() else {
+                break;
+            };
+            self.retained_delta_bytes = self.retained_delta_bytes.saturating_sub(removed.bytes);
+        }
+        self.retained_delta_bytes = self.retained_delta_bytes.saturating_add(bytes);
+        self.retained_deltas.push_back(RetainedDelta {
+            sequence,
+            frames,
+            bytes,
+        });
     }
 
     fn prune_idle_peers(&mut self) {
@@ -309,6 +414,30 @@ fn send_welcome(
         Ok(length) if length == message.len() => report.outbound_datagrams += 1,
         Ok(_) | Err(_) => report.outbound_drops += 1,
     }
+}
+
+fn send_packet_frames(
+    socket: &UdpSocket,
+    frames: &[Vec<u8>],
+    destination: SocketAddr,
+    report: &mut NetworkTickReport,
+) -> bool {
+    if frames.len() > MAX_OUTBOUND_DATAGRAMS_PER_TICK.saturating_sub(report.outbound_attempts) {
+        report.outbound_drops = report.outbound_drops.saturating_add(frames.len());
+        return false;
+    }
+    let mut complete = true;
+    for frame in frames {
+        report.outbound_attempts += 1;
+        match socket.send_to(frame, destination) {
+            Ok(length) if length == frame.len() => report.outbound_datagrams += 1,
+            Ok(_) | Err(_) => {
+                report.outbound_drops += 1;
+                complete = false;
+            }
+        }
+    }
+    complete
 }
 
 pub struct OrderedDeltaInbox {
@@ -374,6 +503,11 @@ impl OrderedDeltaInbox {
     #[must_use]
     pub const fn buffered_complete_bytes(&self) -> usize {
         self.complete_bytes
+    }
+
+    #[must_use]
+    pub const fn expected_sequence(&self) -> u64 {
+        self.next_sequence
     }
 }
 
@@ -504,5 +638,46 @@ mod tests {
         assert_eq!(report.outbound_attempts, MAX_OUTBOUND_DATAGRAMS_PER_TICK);
         assert_eq!(report.outbound_datagrams, 0);
         assert_eq!(report.outbound_drops, 1);
+    }
+
+    #[test]
+    fn repair_queue_and_retained_history_are_bounded() {
+        let mut server = DedicatedServer::bind("127.0.0.1:0", World::default()).expect("server");
+        let source = SocketAddr::from(([127, 0, 0, 1], 23_001));
+        server.peers.insert(
+            source,
+            Peer {
+                nonce: 1,
+                session_id: 7,
+                last_seen_tick: 0,
+            },
+        );
+        let mut report = NetworkTickReport::default();
+        server.enqueue_repair(source, 6, 1, &mut report);
+        server.enqueue_repair(source, 7, 0, &mut report);
+        for sequence in 1..=MAX_QUEUED_REPAIRS + 1 {
+            server.enqueue_repair(
+                source,
+                7,
+                u64::try_from(sequence).expect("small repair queue"),
+                &mut report,
+            );
+        }
+        for sequence in 1..=MAX_RETAINED_DELTA_PACKETS + 1 {
+            server.retain_delta(
+                u64::try_from(sequence).expect("small retained history"),
+                vec![vec![0]],
+            );
+        }
+
+        assert_eq!(server.repairs.len(), MAX_QUEUED_REPAIRS);
+        assert_eq!(report.rejected_sessions, 2);
+        assert_eq!(report.repair_queue_drops, 1);
+        assert_eq!(server.retained_delta_packets(), MAX_RETAINED_DELTA_PACKETS);
+        assert_eq!(server.retained_delta_bytes(), MAX_RETAINED_DELTA_PACKETS);
+        assert_eq!(
+            server.retained_deltas.front().map(|packet| packet.sequence),
+            Some(2)
+        );
     }
 }

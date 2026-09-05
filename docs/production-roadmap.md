@@ -102,6 +102,8 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - separate nonblocking UDP dedicated-server process, fixed protocol-version handshake,
   source-bound development sessions, hard ingress/queue/simulation/egress budgets, ordered delta
   inbox, and a two-client process integration test (delivered for loopback only);
+- count-and-byte-bounded recent-delta history, bounded repair queue, prioritized exact
+  retransmission, and a process test that deliberately loses one sequence (delivered);
 - authenticated encrypted session negotiation and protocol-version agreement;
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
@@ -189,8 +191,8 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add bounded snapshot/control framing, acknowledgements, retransmission, and deterministic
-   loss/jitter/reorder/duplication tests to the new dedicated process;
+1. add bounded snapshot/control framing as the fallback for repair requests older than retained
+   delta history, then deterministic jitter/reorder/duplication tests;
 2. design authenticated encrypted session negotiation and packet replay protection before any
    non-loopback exposure;
 3. add horizontal velocity, material friction/restitution, and deterministic impulse response,

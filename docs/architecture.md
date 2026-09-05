@@ -37,6 +37,15 @@ fingerprint, and the active-body fingerprint mixes entity ID, geometry, and dyna
 persistent server must durably store the ID high-water mark with its world snapshot before it may
 restore and allocate another body.
 
+The first real transport slice runs the authority in a separate nonblocking UDP process. A fixed
+versioned control codec admits source-bound development sessions, validates bounded explosion
+commands, separates receive and simulation phases, and applies hard per-tick limits to ingress,
+queued work, simulation, and egress. Complete deltas are released to clients only in contiguous
+sequence order, including when UDP delivers later packets first. A process-level integration test
+drives two independent sockets and proves identical world/body state and fingerprints. These
+sessions are deliberately loopback-only and unauthenticated; they provide no confidentiality,
+identity, or packet authenticity and must not be exposed beyond the developer machine.
+
 ## Planned engine layers
 
 ### First playable slice — delivered
@@ -100,6 +109,9 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
 
 ### Milestone 3 — real transport
 
+- separate nonblocking UDP authority, versioned control handshake, source-bound development
+  sessions, bounded queues and per-tick work, ordered client delivery, and a real two-client
+  process test (delivered for unauthenticated loopback only);
 - encrypted client authentication and session negotiation;
 - unreliable sequenced deltas plus reliable snapshot/control channels;
 - loss, duplication, reordering, latency, and bandwidth simulation;

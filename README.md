@@ -14,7 +14,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - replay protection and strict server sequencing;
 - delta fragmentation below a 1,200-byte network MTU;
 - out-of-order frame reassembly;
-- real UDP loopback transport coverage for fragmented deltas;
+- a real nonblocking UDP dedicated-server process, fixed versioned control handshake, and
+  two-client process-level loopback synchronization test;
 - strict caps on incomplete packets, fragments, and retained bytes to prevent
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,
@@ -40,9 +41,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
-game. Horizontal and angular rigid-body response, progressive structural stress, remote sessions,
-audio, asset-quality PBR, temporal anti-aliasing, and large-world residency streaming remain
-explicit later gates.
+game. Horizontal and angular rigid-body response, progressive structural stress, authenticated
+remote sessions, loss repair, audio, asset-quality PBR, temporal anti-aliasing, and large-world
+residency streaming remain explicit later gates.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
@@ -65,10 +66,20 @@ are not claimed yet.
 
 ```bash
 cargo test --all-targets
+cargo test --test network
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
 cargo run --release --bin playable-demo
+```
+
+The current dedicated-server transport milestone is intentionally restricted to loopback because
+session authentication, confidentiality, and packet authenticity are not implemented yet. Its real
+two-client UDP path is exercised by `cargo test --test network`; do not expose it to a LAN or the
+Internet. For local protocol development it can also be started directly:
+
+```bash
+cargo run --release --bin dedicated-server -- --bind 127.0.0.1:40000
 ```
 
 The benchmark includes server-side destruction, encoding, deliberate frame reordering, decoding,

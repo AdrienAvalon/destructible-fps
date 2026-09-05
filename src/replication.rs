@@ -71,6 +71,20 @@ pub struct DeltaPacket {
     pub body_updates: Vec<BodyStateUpdate>,
 }
 
+impl DeltaPacket {
+    #[must_use]
+    pub(crate) const fn retained_bytes(&self) -> usize {
+        HEADER_BYTES
+            .saturating_add(self.changes.len().saturating_mul(CHANGE_BYTES))
+            .saturating_add(
+                self.body_assignments
+                    .len()
+                    .saturating_mul(BODY_ASSIGNMENT_BYTES),
+            )
+            .saturating_add(self.body_updates.len().saturating_mul(BODY_UPDATE_BYTES))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeltaFrame {
     pub sequence: u64,

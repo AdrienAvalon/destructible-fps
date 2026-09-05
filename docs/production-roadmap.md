@@ -99,6 +99,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 
 ### Stage 3 — Internet multiplayer
 
+- separate nonblocking UDP dedicated-server process, fixed protocol-version handshake,
+  source-bound development sessions, hard ingress/queue/simulation/egress budgets, ordered delta
+  inbox, and a two-client process integration test (delivered for loopback only);
 - authenticated encrypted session negotiation and protocol-version agreement;
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
@@ -186,11 +189,12 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add horizontal velocity, material friction/restitution, and deterministic impulse response;
-2. add angular state, inertia-driven impulses, conservative rotated bounds, and replicated
-   orientation;
-3. split the loopback authority into a dedicated server process with a versioned handshake, bounded
-   loss recovery, snapshot repair, and reproducible multi-process tests.
+1. add bounded snapshot/control framing, acknowledgements, retransmission, and deterministic
+   loss/jitter/reorder/duplication tests to the new dedicated process;
+2. design authenticated encrypted session negotiation and packet replay protection before any
+   non-loopback exposure;
+3. add horizontal velocity, material friction/restitution, and deterministic impulse response,
+   followed by angular state and replicated orientation.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

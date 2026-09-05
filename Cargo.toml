@@ -27,6 +27,10 @@ path = "src/bin/structural_benchmark.rs"
 name = "physics-benchmark"
 path = "src/bin/physics_benchmark.rs"
 
+[[bin]]
+name = "dedicated-server"
+path = "src/bin/dedicated_server.rs"
+
 [dependencies]
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 glam = "=0.33.6"

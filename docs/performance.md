@@ -3,6 +3,36 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — dedicated-process transport promotion
+
+Source state: parent `ce27090` plus the dedicated transport change documented in this section.
+
+`cargo test --all-targets` and `cargo test --release --all-targets` each passed 44 library tests,
+three binary tests, and 18 integration tests. The new integration test starts the actual release or
+debug dedicated-server child process, negotiates two independent loopback UDP clients, submits one
+bounded command, drains fragmented deltas in sequence, and verifies identical static world, body
+geometry, dynamic state, ID high-water mark, and fingerprints. Its release execution took 0.19 s;
+that wall time is functional process-level evidence, not a latency or throughput benchmark.
+
+The transport has explicit safety ceilings of 16 peers, 64 received datagrams, 256 queued commands,
+32 simulated commands, and 4,096 attempted outbound datagrams per server tick. Complete out-of-order
+client packets retain at most 16 packets and 8 MiB in addition to the existing bounded fragment
+assembler. These are overload bounds, not the final 256-kbit/s per-player bandwidth policy; interest
+management, acknowledgements, loss repair, and per-client budgets remain required.
+
+The full promotion rerun produced the following point-in-time results:
+
+| Fixture | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|
+| Authoritative destruction event | 0.013 ms | 0.243 ms | 0.389 ms | not reported |
+| Structural analysis plus body promotion | 4.024 ms | 4.195 ms | 4.285 ms | 4.295 ms |
+| 1,024-body physics tick | 0.456 ms | 0.878 ms | 0.905 ms | 0.939 ms |
+| Vulkan CPU frame work | 1.039 ms | 8.561 ms | 11.729 ms | 15.566 ms |
+| Vulkan GPU total | 0.136 ms | 0.145 ms | 0.189 ms | 0.198 ms |
+
+The five-second Vulkan showcase ran at 1,440×900 on the RTX 4050 Laptop GPU, completed 2,616 GPU
+samples with zero drops, rendered 90/128 chunks and one replicated body, and exited cleanly.
+
 ## 2026-09-05 — Stage 1 telemetry baseline
 
 Command:

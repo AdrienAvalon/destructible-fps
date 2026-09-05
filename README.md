@@ -97,19 +97,22 @@ The Linux demo now combines the authoritative core with a real-time first-person
   mass centre;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
-- per-vertex voxel ambient occlusion, a 2,048² directional shadow map, energy-aware Cook-Torrance
-  GGX materials with explicit steel metalness and procedural roughness variation, distance fog,
-  single-transfer tone mapping, and a crosshair;
+- per-vertex voxel ambient occlusion, a 2,048² directional shadow map with 3×3 PCF filtering,
+  energy-aware Cook-Torrance GGX, stable per-material procedural albedo/roughness/metalness and
+  micro-normal synthesis, screen-footprint detail fading, a view-correct atmospheric sky, altitude
+  haze, single-transfer tone mapping, and a crosshair;
 - non-blocking real-GPU timestamp queries and bounded CPU/GPU p50/p95/p99 frame telemetry;
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
-This is a **first playable engineering slice**, not a photorealistic or production multiplayer
-game. Exact convex contact manifolds, gyroscopic response, deeper constraint-island convergence,
-progressive structural stress, remote-authority exposure, automated certificate issuance,
-first-person arms/weapon presentation,
-transport pacing and congestion control, audio,
-asset-quality PBR, temporal anti-aliasing, and
-large-world residency streaming remain explicit later gates.
+This is a **first playable engineering slice**, not yet a photorealistic or production multiplayer
+game. The first realistic-material and atmosphere foundation is live, but smooth hybrid terrain and
+fracture surfaces, layered damage, authored/scanned assets, vegetation, reflections, temporal
+anti-aliasing and post-processing remain visual gates. Exact convex contact manifolds, gyroscopic
+response, deeper constraint-island convergence, progressive structural stress, remote-authority
+exposure, automated certificate issuance, first-person arms/weapon presentation, transport pacing
+and congestion control, audio, and large-world residency streaming also remain explicit later
+gates. See [`docs/visual-direction.md`](docs/visual-direction.md) for the visual target and promotion
+order.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
@@ -142,6 +145,8 @@ constraint-island convergence are not claimed yet.
 ![Server-authoritative explosive breach](docs/screenshots/02-authoritative-destruction.png)
 
 ![Showcase orbit around the multi-material building](docs/screenshots/03-orbit-interior.png)
+
+![First procedural PBR and atmosphere pass](docs/screenshots/04-procedural-pbr-atmosphere.png)
 
 ## Run
 

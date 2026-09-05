@@ -17,9 +17,11 @@ pub struct Vertex {
     pub ambient_occlusion: f32,
     /// Metalness for the renderer's Cook-Torrance material response.
     pub metallic: f32,
+    /// Stable material identifier used only for procedural visual synthesis on the GPU.
+    pub material: u32,
 }
 
-const _: () = assert!(size_of::<Vertex>() == 48);
+const _: () = assert!(size_of::<Vertex>() == 52);
 
 #[derive(Debug, Default)]
 pub struct CpuMesh {
@@ -233,6 +235,7 @@ fn append_voxel(
                     occupied,
                 ),
                 metallic: base_color[4],
+                material: u32::from(voxel.material as u8),
             });
         }
         mesh.indices
@@ -327,6 +330,21 @@ mod tests {
         ] {
             assert!(material_surface(material)[4].abs() < f32::EPSILON);
         }
+    }
+
+    #[test]
+    fn material_identity_survives_cpu_meshing() {
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Brick));
+
+        let mesh = mesh_chunk(&world, IVec3::new(0, 0, 0));
+
+        assert_eq!(mesh.vertices.len(), 24);
+        assert!(
+            mesh.vertices
+                .iter()
+                .all(|vertex| vertex.material == u32::from(Material::Brick as u8))
+        );
     }
 
     #[test]

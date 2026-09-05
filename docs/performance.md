@@ -1430,3 +1430,41 @@ The graphical CPU cadence crossed two presentation intervals at p99 while GPU wo
 0.264 ms at maximum, so the observation is not attributed to the checker-only dependency. Graphify
 reported 2,121 nodes, 5,914 post-build edges, zero unverified code nodes, a fully fresh index, and no
 directed path from `attest_lan_policy_on_current_host` to `SecureDedicatedServer`.
+
+## 2026-09-05 — procedural PBR and atmosphere foundation
+
+Source state: parent `6ab7e2a` plus the first visual-fidelity increment. The authoritative voxel,
+physics and network representations are unchanged. A stable byte-sized material identity now reaches
+the GPU vertex stream, where material-local procedural synthesis supplies albedo, roughness,
+metalness and bounded finite-difference micro-normals. Detached bodies keep local material
+coordinates while moving. Screen-footprint fading limits distant high-frequency detail. A
+view-reconstructed sky and shared altitude haze replace the flat clear color, and the existing
+2,048² sun shadow gains a fixed 3×3 PCF kernel.
+
+The representative five-second `--showcase` run used the release profile at a 1,440×900 logical
+window on the NVIDIA GeForce RTX 4050 Laptop GPU through Vulkan. It rendered 71,295 solid voxels,
+43,924 exposed faces, one detached body and two player instances. The final orbit view submitted 92
+world draws and 130 shadow draws. This is the deliberately heavier visual scene, not a like-for-like
+comparison with an ordinary intact-world smoke.
+
+| Visual evidence | Result |
+|---|---:|
+| Library tests | 178 passed debug; 178 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 70 passed debug; 70 passed release |
+| Destruction p99, 500 events | 0.345 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.589 ms |
+| Physics p99, 1,024 bodies | 1.226 ms |
+| Snapshot encode + decode + install p99 | 9.448 ms |
+| Initial asynchronous streaming | 49.7 ms |
+| CPU frame-work p50 / p95 / p99 | 1.950 / 12.384 / 16.677 ms |
+| GPU shadows p50 / p95 / p99 | 0.060 / 0.088 / 0.089 ms |
+| GPU world + HUD p50 / p95 / p99 | 0.936 / 1.459 / 1.487 ms |
+| Vulkan GPU total p50 / p95 / p99 | 1.007 / 1.561 / 1.588 ms |
+| Vulkan GPU maximum | 1.590 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+This first material and atmosphere pass uses under ten percent of one 60 Hz frame at GPU p99 on
+this machine. It is not photorealistic by itself: smooth hybrid surface extraction, layered
+fracture, calibrated assets, temporal stability and multi-platform image review remain explicit
+gates.

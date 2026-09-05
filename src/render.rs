@@ -32,11 +32,14 @@ const SHADER: &str = include_str!("shaders/world.wgsl");
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     view_projection: [[f32; 4]; 4],
+    inverse_view_projection: [[f32; 4]; 4],
     light_view_projection: [[f32; 4]; 4],
     camera_time: [f32; 4],
     sun_fog: [f32; 4],
     display: [f32; 4],
 }
+
+const _: () = assert!(size_of::<Globals>() == 240);
 
 struct GpuMesh {
     vertex: wgpu::Buffer,
@@ -253,6 +256,7 @@ pub struct Renderer {
     shadow_view: wgpu::TextureView,
     shadow_pipeline: wgpu::RenderPipeline,
     body_shadow_pipeline: wgpu::RenderPipeline,
+    sky_pipeline: wgpu::RenderPipeline,
     world_pipeline: wgpu::RenderPipeline,
     body_world_pipeline: wgpu::RenderPipeline,
     crosshair_pipeline: wgpu::RenderPipeline,
@@ -333,9 +337,10 @@ impl Renderer {
 
         let globals = Globals {
             view_projection: Mat4::IDENTITY.to_cols_array_2d(),
+            inverse_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
             light_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
             camera_time: [0.0; 4],
-            sun_fog: [0.35, -0.90, 0.22, 0.010],
+            sun_fog: [0.35, -0.90, 0.22, 0.0035],
             display: [f32::from(!config.format.is_srgb()), 0.0, 0.0, 0.0],
         };
         let globals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -445,7 +450,8 @@ impl Renderer {
             1 => Float32x3,
             2 => Float32x4,
             3 => Float32,
-            4 => Float32
+            4 => Float32,
+            5 => Uint32
         ];
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: size_of::<Vertex>() as wgpu::BufferAddress,
@@ -453,10 +459,10 @@ impl Renderer {
             attributes: &vertex_attributes,
         };
         let body_instance_attributes = wgpu::vertex_attr_array![
-            5 => Float32x4,
             6 => Float32x4,
             7 => Float32x4,
-            8 => Float32x4
+            8 => Float32x4,
+            9 => Float32x4
         ];
         let body_instance_layout = wgpu::VertexBufferLayout {
             array_stride: size_of::<BodyInstance>() as wgpu::BufferAddress,
@@ -468,6 +474,37 @@ impl Renderer {
             blend: None,
             write_mask: wgpu::ColorWrites::ALL,
         };
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("procedural atmosphere pipeline"),
+            layout: Some(&globals_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("sky_vertex"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("sky_fragment"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(color_target.clone())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let world_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("voxel world pipeline"),
             layout: Some(&world_pipeline_layout),
@@ -645,6 +682,7 @@ impl Renderer {
             shadow_view,
             shadow_pipeline,
             body_shadow_pipeline,
+            sky_pipeline,
             config,
             world_pipeline,
             body_world_pipeline,
@@ -917,6 +955,7 @@ impl Renderer {
         let light_view_projection = light_view_projection();
         let globals = Globals {
             view_projection: view_projection.to_cols_array_2d(),
+            inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
             light_view_projection: light_view_projection.to_cols_array_2d(),
             camera_time: [
                 camera_position.x,
@@ -924,7 +963,7 @@ impl Renderer {
                 camera_position.z,
                 elapsed_seconds,
             ],
-            sun_fog: [0.35, -0.90, 0.22, 0.010],
+            sun_fog: [0.35, -0.90, 0.22, 0.0035],
             display: [f32::from(!self.config.format.is_srgb()), 0.0, 0.0, 0.0],
         };
         self.queue
@@ -1046,6 +1085,9 @@ impl Renderer {
                 timestamp_writes: world_timestamp_writes,
                 ..Default::default()
             });
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.world_pipeline);
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
             pass.set_bind_group(1, &self.shadow_sampling_bind_group, &[]);

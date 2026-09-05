@@ -116,6 +116,43 @@ These figures account application datagrams at the proxy boundary; they exclude 
 headers. They demonstrate bounded deterministic repair on loopback, not throughput, fairness, RTT
 estimation, or congestion behavior on a real network.
 
+## 2026-09-05 — authenticated QUIC session baseline
+
+Source state: commit `2a7d1d7` plus the isolated secure-session change documented here. The transport
+uses released Quinn 0.11 with rustls/ring, TLS 1.3, explicit trust roots, game-specific ALPN, one
+post-TLS reliable admission stream, and encrypted unreliable gameplay datagrams. Production identity
+verification and dedicated-authority integration are intentionally outside this measurement.
+
+Twenty independent sequential loopback connections were measured in the optimized release test.
+Every iteration performed a fresh TLS handshake and one application admission; no resumption or
+0-RTT was used.
+
+| Measurement | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| Server-authenticated TLS handshake | 0.926 ms | 1.077 ms | 1.449 ms |
+| Post-TLS credential admission | 0.176 ms | 0.308 ms | 0.378 ms |
+| Combined connection and admission | 1.066 ms | 1.231 ms | 1.827 ms |
+
+The application credential is bounded to 4 KiB; the application-owned encoded and received buffers
+are securely zeroized on every exit path, without claiming control over caller or transport-library
+memory. Admission has an internal five-second deadline. The QUIC transport caps concurrent streams
+and all configured receive/send/datagram windows; the server admits at most 32 pending connections
+and 512 KiB of pending handshake data. Encrypted gameplay payloads are rejected above 1,100 bytes in
+either direction to leave transport-header margin below the 1,200-byte application-UDP target.
+
+Six real-socket integration tests also reject an untrusted certificate, invalid credential, stalled
+admission, mismatched nonce echo, and oversized send/receive datagrams. The deliberate stalled-peer
+test consumes its full five-second timeout. These measurements establish bounded local session
+setup and negative behavior, not WAN latency, remote denial-of-service resilience, or a production
+authentication deployment.
+
+The complete promotion passed 56 library tests, three binary tests, and 31 integration tests in both
+debug and release. Destruction, structural promotion, 1,024-body physics, and snapshot end-to-end
+p99 were 0.351 ms, 4.227 ms, 0.884 ms, and 9.365 ms respectively. The five-second Vulkan smoke on
+the RTX 4050 Laptop completed 2,549 GPU samples with zero drops: CPU frame-work p99 was 12.633 ms and
+GPU-total p99 was 0.198 ms at 1,440×900. These unchanged fixtures remained within their current
+milestone budgets; the secure-session code is not on their hot paths yet.
+
 ## 2026-09-05 — Stage 1 telemetry baseline
 
 Command:

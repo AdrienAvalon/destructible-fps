@@ -59,9 +59,10 @@ from that peer and their shared encoded buffers enter a per-transfer queue cappe
 A missing or overflowed catch-up delta stalls rather than silently skipping state. Process tests
 cover selective repair of a lost snapshot fragment, explicit install acknowledgement, and a moving
 body with post-snapshot catch-up.
-These sessions are deliberately loopback-only and unauthenticated; the snapshot hash is an integrity
-check, not a MAC, and the transport provides no confidentiality, identity, packet authenticity, or
-congestion control. It must not be exposed beyond the developer machine.
+The dedicated-authority sessions described above are deliberately loopback-only and unauthenticated;
+the snapshot hash is an integrity check, not a MAC, and that legacy transport provides no
+confidentiality, identity, packet authenticity, or congestion control. It must not be exposed beyond
+the developer machine.
 
 A test-only source-bound UDP proxy now injects a fixed 2–6-pump-tick delay pattern, deliberate
 whole-transaction and snapshot-fragment loss, duplication, and reordering between real client and
@@ -71,6 +72,34 @@ unknown channel. One process test repairs a completely lost first delta while la
 buffered; another repairs the lost snapshot fragments and survives a lost first install ACK through
 bounded client retry. This is deterministic fault injection for correctness and byte accounting,
 not an Internet congestion algorithm or a substitute for authenticated transport.
+
+An isolated secure-session boundary now proves the intended replacement transport before it is wired
+into the authority. Quinn and rustls negotiate TLS 1.3 with a server certificate verified against
+explicit client roots and the `destructible-fps/1` ALPN. The first bidirectional stream carries one
+versioned opaque credential after TLS; an injected synchronous verifier maps it to a non-zero
+server-owned principal. The verifier must perform bounded offline work and enforce issuer, audience,
+validity, and revocation policy rather than trusting caller-supplied identity. Client nonce, unique
+server session ID, and server nonce bind the admission result to that connection. The implementation
+does not expose or use 0-RTT because gameplay commands are not replay-safe.
+
+Admission has a five-second internal deadline. Credentials are limited to 4 KiB; the
+application-owned encoded and received buffers are securely zeroized on every exit path, credential
+contents are never included in error text, and the verifier borrows them only for the duration of its
+call. Transport-library and caller-owned memory remain governed by their respective lifecycles. Each
+endpoint permits one bidirectional stream, no unidirectional streams, 16-KiB stream / 32-KiB
+connection receive windows, 128-KiB send and datagram buffers, and at most 32 pending server
+connections with 512 KiB total pending data. Gameplay payloads are limited to 1,100 bytes before send
+and immediately after receive, reserving space below the project's 1,200-byte UDP target for QUIC and
+IP overhead. QUIC supplies transport encryption, integrity, loss recovery for streams, congestion
+control, and connection migration; application command IDs and authoritative sequencing remain
+necessary for semantic replay protection.
+
+Real loopback QUIC tests cover a valid encrypted datagram exchange, an untrusted certificate, an
+invalid application credential, a stalled admission deadline, a mismatched nonce echo, oversized
+payloads in both directions, and 20 independent sequential sessions. This boundary is not yet a
+remote game server: the authority still uses its legacy loopback UDP socket, and production
+OIDC/JWKS verification, unpredictable nonce/session allocation, certificate lifecycle, reliable
+snapshot streams, rate limits, and process integration remain required before non-loopback exposure.
 
 ## Planned engine layers
 
@@ -146,7 +175,8 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
 - bounded deterministic latency/jitter/loss/duplication/reordering injection across real sockets,
   including delta recovery, selective snapshot recovery, ACK retry, and per-channel byte evidence
   (delivered for loopback tests);
-- encrypted client authentication and session negotiation;
+- bounded TLS 1.3 QUIC transport and post-TLS credential admission (delivered as an isolated,
+  loopback-tested boundary; authority integration and production verifier remain);
 - unreliable sequenced deltas plus reliable snapshot/control channels;
 - configurable stochastic and trace-replay network simulation beyond the delivered fixed profile;
 - spatial interest management and per-client bandwidth budgets;

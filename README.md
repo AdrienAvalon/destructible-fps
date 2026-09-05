@@ -22,6 +22,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   windows, atomic install acknowledgement, and retained-delta catch-up before live delivery;
 - a bounded deterministic UDP impairment proxy exercising latency, jitter, loss, duplication,
   reordering, delta repair, fragment repair, and acknowledgement retry against the real process;
+- an isolated TLS 1.3 QUIC session boundary with certificate verification, game-specific ALPN,
+  bounded post-TLS credential admission, connection-bound principals, and 1,100-byte encrypted
+  gameplay datagrams;
 - strict caps on incomplete packets, fragments, and retained bytes to prevent
   reassembly-memory exhaustion;
 - atomic structural separation: detached voxels leave the static world and become bounded,
@@ -48,8 +51,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
 game. Horizontal and angular rigid-body response, progressive structural stress, authenticated
-remote sessions, adaptive retransmission and congestion control, audio, asset-quality PBR, temporal
-anti-aliasing, and large-world residency streaming remain explicit later gates.
+remote-authority integration, production OIDC verification and certificate provisioning, adaptive
+retransmission and congestion control, audio, asset-quality PBR, temporal anti-aliasing, and
+large-world residency streaming remain explicit later gates.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
@@ -73,6 +77,7 @@ are not claimed yet.
 ```bash
 cargo test --all-targets
 cargo test --test network
+cargo test --test secure_transport
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
@@ -80,10 +85,12 @@ cargo run --release --bin snapshot-benchmark -- --iterations 20
 cargo run --release --bin playable-demo
 ```
 
-The current dedicated-server transport milestone is intentionally restricted to loopback because
-session authentication, confidentiality, and packet authenticity are not implemented yet. Its real
-two-client UDP path is exercised by `cargo test --test network`; do not expose it to a LAN or the
-Internet. For local protocol development it can also be started directly:
+The legacy dedicated-server process is intentionally restricted to loopback. Its real two-client UDP
+path is exercised by `cargo test --test network`, but it is not yet connected to the separately tested
+authenticated QUIC boundary; do not expose it to a LAN or the Internet. The secure boundary tests
+cover TLS certificate rejection, application-credential rejection, admission timeout, nonce
+mismatch, and datagram bounds, but production OIDC/JWKS verification and certificate provisioning
+are still required. For local protocol development the legacy authority can be started directly:
 
 ```bash
 cargo run --release --bin dedicated-server -- --bind 127.0.0.1:40000
@@ -122,9 +129,12 @@ are recorded in [`docs/performance.md`](docs/performance.md).
 
 All versions are pinned in `Cargo.toml`. `wgpu` provides a safe Vulkan abstraction, `winit` owns
 Linux window/input integration, `glam` supplies SIMD-friendly camera math, `bytemuck` performs
-checked POD uploads, and `pollster` bridges one-time GPU initialization. They are permissively
-licensed upstream and replace fragile platform-specific boilerplate; game rules, destruction,
-replication, meshing, controller, and shaders remain repository-owned.
+checked POD uploads, and `pollster` bridges one-time GPU initialization. `quinn`, `rustls`, `ring`,
+`tokio`, and `bytes` provide the portable asynchronous QUIC/TLS foundation; `zeroize` protects the
+application-owned temporary credential buffers from compiler-elided clearing. `rcgen` exists only in
+tests to create ephemeral loopback identities. These dependencies are permissively licensed upstream
+and replace fragile platform-specific boilerplate; game rules, destruction, replication, admission
+policy, meshing, controller, and shaders remain repository-owned.
 
 ## Engineering targets
 

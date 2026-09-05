@@ -109,6 +109,10 @@ streaming, with no synchronous world meshing on the presentation thread.
   inverse-mass separation, material restitution, off-centre angular impulse, momentum-preserving
   tangential friction, fail-closed coarse separation on pair-budget exhaustion, sleep wake-up, and
   deterministic short-chain propagation (delivered);
+- bounded six-DOF Timoshenko beam equilibrium, canonical matrix-free iteration slices, explicit
+  convergence/failure, analytical signed-axis and rigid-motion tests, and partial-support-loss
+  benchmarks (offline foundation delivered; complete domain extraction, calibrated strengths,
+  server worker scheduling, stale-result rejection and atomic gameplay failure remain);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
 - incremental stress propagation restricted to affected graph islands;

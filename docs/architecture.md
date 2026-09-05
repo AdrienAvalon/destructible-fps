@@ -16,8 +16,11 @@ The target represents "everything is destructible" at bounded physical resolutio
 5. dust, chips, and non-gameplay fragments are deterministic cosmetic effects.
 
 These are target representations, not a statement that every subsystem is delivered. Current
-structural analysis follows connectivity to foundations/anchors; it does not yet redistribute loads
-or fail an overloaded remaining support. Debris merging and cosmetic dust are also later gates.
+gameplay structural analysis follows connectivity to foundations/anchors; it does not yet
+redistribute loads or fail an overloaded remaining support. The separate bounded six-DOF
+Timoshenko lattice in `elasticity.rs` proves offline load redistribution and equilibrium; its
+ownership, limits and remaining server-integration gates are in `structural-elasticity.md`.
+Debris merging and cosmetic dust are also later gates.
 
 The current compact renderer uses an energy-aware Cook-Torrance direct-light model: GGX normal
 distribution, Smith visibility and Schlick Fresnel share the sun contribution between diffuse and

@@ -127,6 +127,13 @@ transport pacing and congestion control, audio, and large-world residency stream
 explicit later gates. See [`docs/visual-direction.md`](docs/visual-direction.md) for the visual target
 and promotion order.
 
+A separate [structural elasticity foundation](docs/structural-elasticity.md) now solves compression,
+shear-aware bending and torsion, and measures load redistribution after losing supports. Its bounded
+six-DOF solver is validated offline against analytical cases and a 64×32 wall. It is not yet connected
+to gameplay fracture: calibrated strength, complete domain extraction, server scheduling and atomic
+replicated failure remain the next promotion. Run it with
+`cargo run --release --bin structural-load-benchmark -- --iterations 20`.
+
 The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
 canonical detached-island proofs. The server revalidates each proof, derives integer-millimetre mass

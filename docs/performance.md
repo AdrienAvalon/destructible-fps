@@ -1714,3 +1714,76 @@ and GPU orientation tests. Its final review invocation failed (helper exit 75, u
 102 seconds), so there is no successful final independent review for this lot; Codex retained local
 source review and the validation above. Graphify finished fresh with 2,324 nodes, 6,471 post-build
 edges, zero unverified code nodes and zero dangling endpoints. WGSL remains outside its AST coverage.
+
+## 2026-09-05 — bounded structural equilibrium and remaining network startup races
+
+Source state: base `cf8c18a` plus the elastic-load foundation and test-startup consolidation. The new
+six-DOF Timoshenko lattice calculates compression, shear-aware bending, torsion and redistribution
+after partial support loss. It is not connected to `AuthoritativeServer`: voxel damage, significant
+bodies, player state, snapshots and wire contracts are unchanged. Its scope and physical limitations
+are explicit in [`structural-elasticity.md`](structural-elasticity.md). This advances PHYS-01's load
+calculation, not its playable progressive-collapse acceptance gate.
+
+On the Intel Core i7-13700H, Linux x86_64, release profile, the new benchmark ran 20 in-process
+repetitions per fixture without another test/benchmark running concurrently. Clocks were not locked.
+Every iteration rebuilds its model and solver; the first is included, but this is not 20 independent
+cold-process launches. Nodes use explicit synthetic `E=1e9 Pa`, `nu=0.25`, one-metre spacing and
+100 kg where gravity is applied. These are numerical test inputs, not calibrated game materials.
+
+| Fixture | Nodes / bonds | Iterations | Solve + finish p50 / p95 / p99 | Eight-iteration slice p99 / max |
+|---|---:|---:|---:|---:|
+| 64-cell column | 65 / 64 | 64 | 0.250 / 0.258 / 0.268 ms | 0.036 / 0.036 ms |
+| 64-cell cantilever, 1 N tip load | 65 / 64 | 203 | 0.785 / 0.797 / 0.798 ms | 0.035 / 0.040 ms |
+| 64×32 wall, all foundation supports | 2,048 / 4,000 | 253 | 41.900 / 42.228 / 42.979 ms | 1.375 / 1.413 ms |
+| Same wall, two foundation supports left | 1,986 / 3,875 | 340 | 54.428 / 55.102 / 56.115 ms | 1.338 / 1.404 ms |
+
+Model/job preparation p50/p95/p99 was 0.005/0.007/0.030 ms, 0.005/0.007/0.009 ms,
+0.465/0.488/0.597 ms and 0.450/0.481/0.483 ms respectively. The wall's maximum vertical support
+reaction rises from 31,392 N to 974,133 N while the structure remains connected. Force balance is
+checked on every repetition, and the long cantilever must agree with its analytical deflection.
+Both wall residual ratios are below `1e-7`; the cantilever's `7.391e-6` ratio is accepted by the
+separate absolute `1e-5 N` tolerance, not misreported as meeting the tighter relative tolerance.
+
+Full wall solves exceed the 12 ms server target. Small iteration slices permit future scheduling;
+they do not establish a server latency budget or a whole-world solver. Domain extraction,
+bounded worker backlog, calibrated failure laws and atomic integer fracture promotion still need
+implementation. The 4,096-node cap and hard iteration limits prevent unbounded jobs, not failure
+on difficult conditioning; unresolved results cannot be treated as stable support. No allocation
+count, peak RSS, sustained combat latency, multi-OS equivalence or visual improvement is claimed here.
+
+Fifteen dedicated tests cover analytical signed-axis forces/moments, rigid motion, stiffness
+symmetry, heterogeneous 3D global force/moment/work balance, gravity on anchors, support removal,
+damage and material compliance, invalid inputs, exact node bounds, small-deformation refusal and
+batch-independent results. Full debug and release matrices each passed 217 library, 11 binary and
+71 ordinary integration tests. Formatting, Clippy with denied warnings, explicit network,
+secure-transport/authority/process and OIDC checks passed. The ignored GPU projection test was
+executed explicitly and passed in both debug and release on the real Vulkan adapter.
+
+The first release matrix failed when the old snapshot-fallback test child exited before handshake.
+Its stderr was discarded, so that original exit's cause cannot be established retrospectively.
+The concrete released-port reservation race still existed in seven network launch paths. All now
+use the child's owned ephemeral socket, bounded flushed `READY` announcement and visible stderr,
+preserving their original tick/exit conditions. The ownership regression covers multiple launch
+configurations. The entire twelve-test release network suite then passed ten consecutive repeats;
+no convergence, impairment, repair or snapshot assertion was relaxed.
+
+Existing release fixtures also passed: destruction p50/p95/p99 0.012/0.234/0.412 ms for 500 events;
+8,192-voxel topology analysis plus promotion 4.178/4.238/4.281 ms for 100 iterations;
+1,024-body physics 0.583/1.139/1.162 ms over 300 ticks; snapshot encode/decode/install
+11.783/11.920/13.658 ms over 20 iterations, with 1,181 wire frames / 1.351 MiB.
+
+The required five-second graphical smoke completed on the NVIDIA GeForce RTX 4050 Laptop,
+driver 610.57.04, Vulkan, release, in the default 1,440×900 logical window. Its ordinary world
+contained 98,394 solid voxels, 128 streamed chunks and 48,736 faces, with no dynamic bodies or
+players. CPU frame-wall p50/p95/p99 was 2.209/16.648/16.819 ms; GPU shadow times were
+0.095/0.096/0.097 ms, world/HUD 0.985/0.989/0.990 ms and total 1.095/1.100/1.108 ms.
+All 871 GPU samples were retained, with zero drops and 1.112 ms maximum total GPU time.
+Initial streaming took 57.1 ms. The CPU measurement includes acquisition/presentation waits;
+this short startup check neither meets the full 1080p combat gate nor proves a frame-pacing gain.
+
+Claude's initial analysis led to shear-aware bending, rigid-motion/signed-axis checks and explicit
+mixed-force/moment scaling. Its final review failed without a usable response (helper exit 75,
+underlying exit 1, 160 seconds). Codex performed the final source review and added the heterogeneous
+3D balance fixture; there is no successful final external review to claim for this increment.
+Graphify's final index is fresh: 2,388 nodes, 6,622 post-build edges, zero unverified code nodes
+and zero dangling endpoints. It is an AST navigation aid, not evidence of mechanical correctness.

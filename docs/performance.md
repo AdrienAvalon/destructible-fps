@@ -1268,3 +1268,35 @@ configuration.
 Graphify reported 1,989 nodes, 5,623 post-build edges, zero unverified code nodes, and a fully fresh
 index. This proves the TLS outage half of the trust-expiry gate. Automated CA issuance and the
 equivalent OIDC stale-key process outage remain separate blockers to private-network exposure.
+
+## 2026-09-05 — static OIDC trust safety deadline
+
+Source state: parent `970cbd7` plus the static-JWKS trust-window increment. Static configuration now
+requires strictly more than 60 seconds and reserves its final minute from service, matching the TLS
+safety policy. The earlier point is converted to a monotonic deadline at startup and is shared by
+credential admission and process shutdown. Successful online discovery remains intentionally
+different: it atomically replaces the key set and grants the existing bounded horizon of three
+refresh intervals.
+
+A real standalone process receives a 66-second static JWKS horizon, emits `READY`, performs no
+unconfigured refresh activity, then exits unsuccessfully at the resulting safety deadline. The exact
+case passed three consecutive debug and three consecutive release executions. The upper 24-hour
+bound and the now-strict lower boundary are covered independently.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 157 passed debug; 157 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 54 passed debug; 54 passed release |
+| Destruction p99, 500 events | 0.473 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.499 ms |
+| Physics p99, 1,024 bodies | 1.241 ms |
+| Snapshot encode + decode + install p99 | 9.502 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.239 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+The five-second Vulkan smoke was GPU-clean but its presentation/CPU redraw p99 was 33.316 ms, with a
+16.626 ms median, because a small number of frames crossed two display intervals. The GPU maximum
+was only 0.247 ms, so this is recorded as a presentation-cadence observation rather than attributed
+to the trust-deadline change. Graphify reported 1,993 nodes, 5,638 post-build edges, zero unverified
+code nodes, and a fully fresh index.

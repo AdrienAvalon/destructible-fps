@@ -62,9 +62,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let stop_after_commands = launch
         .stop_after_commands()
         .map(std::num::NonZeroUsize::get);
-    let initial_jwks_expiration_deadline = launch
-        .jwks_expiration_deadline()
-        .ok_or("OIDC expiration state unavailable")?;
+    let initial_oidc_trust_deadline = launch
+        .oidc_trust_deadline()
+        .ok_or("OIDC trust state unavailable")?;
     let initial_certificate_safety_deadline = launch
         .certificate_safety_deadline()
         .ok_or("TLS safety state unavailable")?;
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if let Some(error) = trust_deadline_error(
                     oidc_refresh.as_ref(),
                     tls_refresh.as_ref(),
-                    initial_jwks_expiration_deadline,
+                    initial_oidc_trust_deadline,
                     initial_certificate_safety_deadline,
                 ) {
                     terminal_error = Some(error.into());
@@ -256,7 +256,7 @@ fn spawn_tls_refresh(
 fn trust_deadline_error(
     oidc_refresh: Option<&OidcRefreshController>,
     tls_refresh: Option<&TlsIdentityRefreshController>,
-    initial_jwks_deadline: std::time::Instant,
+    initial_oidc_trust_deadline: std::time::Instant,
     initial_certificate_safety_deadline: std::time::Instant,
 ) -> Option<&'static str> {
     let now = std::time::Instant::now();
@@ -270,14 +270,14 @@ fn trust_deadline_error(
     if now >= certificate_safety_deadline {
         return Some("TLS certificate renewal safety deadline expired");
     }
-    let jwks_deadline = oidc_refresh.map_or(
-        Some(initial_jwks_deadline),
-        OidcRefreshController::expiration_deadline,
+    let oidc_trust_deadline = oidc_refresh.map_or(
+        Some(initial_oidc_trust_deadline),
+        OidcRefreshController::trust_deadline,
     );
-    let Some(jwks_deadline) = jwks_deadline else {
-        return Some("OIDC expiration state unavailable");
+    let Some(oidc_trust_deadline) = oidc_trust_deadline else {
+        return Some("OIDC trust state unavailable");
     };
-    (now >= jwks_deadline).then_some("OIDC JWKS validity expired")
+    (now >= oidc_trust_deadline).then_some("OIDC JWKS trust safety deadline expired")
 }
 
 impl RefreshTasks {

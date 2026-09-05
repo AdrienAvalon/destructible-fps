@@ -15,17 +15,17 @@ fields.
 |---|---|
 | `bind` | Loopback socket address. Port zero is allowed only when `max_ticks` bounds the run. |
 | `exposure` | Must be `loopback`. No remote value exists yet. |
-| `certificate_chain_file` | Absolute, regular, non-link PEM file; at most 256 KiB and eight currently valid certificates, each with at least 60 seconds remaining. |
+| `certificate_chain_file` | Absolute, regular, non-link PEM file; at most 256 KiB and eight currently valid certificates, each with more than 60 seconds remaining. |
 | `private_key_file` | Absolute, regular, non-link PEM file; at most 64 KiB and exactly one private key. |
 | `oidc_jwks_file` | Absolute, regular, non-link JWKS file; at most 64 KiB and 32 validated RS256 keys. |
 | `oidc_issuer` | Exact HTTPS token issuer. |
 | `oidc_audience` | Exact game audience. |
-| `jwks_valid_until_unix_seconds` | Absolute expiry with 60 to 86,400 seconds remaining at startup. |
+| `jwks_valid_until_unix_seconds` | Absolute expiry with more than 60 and at most 86,400 seconds remaining at startup; the final minute is reserved. |
 | `oidc_discovery` | Optional object enabling mandatory startup discovery and periodic refresh. |
 | `oidc_discovery.refresh_interval_seconds` | Whole seconds from 60 through 3,600. Refreshed keys remain usable for at most three configured intervals without another successful refresh. |
 | `oidc_discovery.root_certificate_file` | Optional absolute, regular, non-link PEM trust bundle; at most 256 KiB and 16 certificates. Platform roots remain available. |
 | `tls_reload` | Optional object enabling periodic reload of the configured certificate/key paths for future handshakes. |
-| `tls_reload.interval_seconds` | Whole seconds from 5 through 3,600. The installed chain must remain valid for at least this interval plus the 60-second safety margin. |
+| `tls_reload.interval_seconds` | Whole seconds from 5 through 3,600. The installed chain must remain valid beyond this interval plus the 60-second safety margin. |
 | `max_ticks` | Optional positive fixed-tick limit; intended for bounded validation runs. |
 | `stop_after_commands` | Optional positive applied-command limit; intended for bounded validation runs. |
 
@@ -40,10 +40,11 @@ mandatory boundary until an installer-owned service ACL check is implemented.
 
 The PEM buffer holding the private key is zeroized after parsing. Rustls checks that the leaf
 certificate and private key are compatible. Every certificate in the chain is parsed independently,
-must be currently valid, and must have at least 60 seconds remaining. Startup converts both the
-earliest certificate expiry and the absolute JWKS deadline into monotonic deadlines, so a wall-clock
-rollback cannot extend either. The verifier rejects new admissions at JWKS expiry, and the process
-terminates on the first tick at or after either deadline.
+must be currently valid, and must have more than 60 seconds remaining. Startup reserves the final
+minute of both the earliest certificate lifetime and the static JWKS validity window, then converts
+those earlier safety points into monotonic deadlines, so a wall-clock rollback cannot extend either.
+The verifier rejects new admissions at its OIDC trust deadline, and the process terminates on the
+first tick at or after either safety deadline.
 
 The static JWKS remains a bounded bootstrap and rollback input. When `oidc_discovery` is configured,
 the process must fetch and validate discovery metadata plus a complete JWKS before emitting `READY`.
@@ -101,8 +102,8 @@ deliberately unsuitable for LAN or Internet exposure.
 
 Readiness emits only the selected socket, non-secret exposure class, and whether OIDC refresh and TLS
 reload are active. The final line contains bounded gameplay and lifecycle counters, never
-credentials, remote endpoints, or principal identifiers. `Ctrl-C`, certificate/JWKS expiry,
-`max_ticks`, and `stop_after_commands` all converge through endpoint shutdown.
+credentials, remote endpoints, or principal identifiers. `Ctrl-C`, certificate/JWKS safety
+deadlines, `max_ticks`, and `stop_after_commands` all converge through endpoint shutdown.
 
 Do not expose this milestone to a LAN or the Internet. Remote enablement still requires production
 issuer/root provisioning, automated certificate issuance, platform secret-ACL checks, external

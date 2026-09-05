@@ -357,6 +357,35 @@ async fn standalone_process_stops_at_the_tls_safety_deadline_during_a_reload_out
     assert_eq!(stop_counter(&output.stdout, "tls_reload_unchanged"), 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_process_stops_at_the_static_oidc_trust_safety_deadline() {
+    let fixture = Fixture::new(10_000, None);
+    fixture.configure_static_jwks_validity(Duration::from_secs(66));
+    let mut process = RunningServer::spawn(&fixture.config);
+
+    let started = Instant::now();
+    let output = process.finish_within(Duration::from_secs(10)).await;
+    let elapsed = started.elapsed();
+    assert!(
+        !output.status.success(),
+        "process unexpectedly outlived static OIDC trust"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(4),
+        "process stopped before the reserved static OIDC margin"
+    );
+    assert!(
+        output
+            .stderr
+            .contains("OIDC JWKS trust safety deadline expired"),
+        "{}",
+        output.stderr
+    );
+    assert_eq!(stop_counter(&output.stdout, "oidc_refresh_attempts"), 0);
+    assert_eq!(stop_counter(&output.stdout, "oidc_refresh_successes"), 0);
+    assert_eq!(stop_counter(&output.stdout, "oidc_refresh_failures"), 0);
+}
+
 #[test]
 fn standalone_process_distinguishes_an_unchanged_tls_check_from_a_rotation() {
     let fixture = Fixture::new(420, None);
@@ -670,6 +699,13 @@ impl Fixture {
             "refresh_interval_seconds": 60,
             "root_certificate_file": path_string(root),
         });
+        self.write_config(&document);
+    }
+
+    fn configure_static_jwks_validity(&self, remaining: Duration) {
+        let mut document = self.read_config();
+        document["jwks_valid_until_unix_seconds"] =
+            json!(unix_seconds().saturating_add(remaining.as_secs()));
         self.write_config(&document);
     }
 

@@ -246,7 +246,9 @@ JWKS over 64 KiB. It requires exactly one PEM private key, verifies key/certific
 through rustls, and parses the complete X.509 chain before opening the endpoint. Every certificate
 must be currently valid with more than 60 seconds remaining. The final minute is reserved rather
 than served: the earliest expiry minus that margin becomes a monotonic process safety deadline. A
-reload policy also requires one complete watcher interval before that deadline. On Unix the
+reload policy also requires one complete watcher interval before that deadline. The static JWKS
+bootstrap likewise requires more than one minute and reserves that final minute from its declared
+absolute trust horizon. On Unix the
 standalone process refuses UID 0, the private key must belong
 to the service UID, and public trust inputs may belong only to root or that UID; their existing mode
 constraints remain mandatory. The immediate parent of each path must be an equally owned,
@@ -291,6 +293,11 @@ A tenth process case starts from a deliberately short but admissible certificate
 private-key file only after readiness, observes repeated reload failures, and proves that the real
 server exits unsuccessfully at the monotonic safety deadline with no installed or unchanged reload.
 No production clock override or test-only configuration path is involved.
+
+An eleventh process case gives the static JWKS bootstrap a 66-second absolute trust horizon. The
+server reserves the final minute, performs no unconfigured refresh, and exits unsuccessfully at the
+resulting monotonic safety deadline. Live discovery-outage expiry against a disposable production-
+shaped realm remains a separate deployment proof.
 
 ## Planned engine layers
 

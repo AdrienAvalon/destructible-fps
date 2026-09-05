@@ -18,7 +18,7 @@ non-loopback variant. Configuration fields or operator assertions alone do not c
 | Gameplay authorization | Invalid session and malformed or replayed command | Network, transport, and secure authority tests | Pass |
 | Resource abuse | Per-session datagram burst, queue pressure, pending handshake cap, and authority capacity | `pending_admission_saturation_refuses_excess_without_simulation_work`, the secure-authority rate-limit test, and bounded queue/capacity unit tests | Partial: stalled real-QUIC admission saturation passes; add external reconnect, malformed-input, and queue-pressure storms |
 | Loss and reordering | Distinct delay, duplication, and loss traces with bounded repair | Four-client real-process trace replay | Pass for deterministic loopback; add WAN profiles |
-| Trust outage | Discovery or renewal repeatedly fails until its monotonic trust deadline | TLS reload outage is proven by `standalone_process_stops_at_the_tls_safety_deadline_during_a_reload_outage`; OIDC has controller and deadline tests | Partial: add the OIDC process-level stale-key outage |
+| Trust outage | Discovery, static trust, or renewal reaches its monotonic deadline | Real-process TLS outage and static OIDC expiry tests pass; discovery retains failed-refresh controller tests | Pass for local mechanisms; repeat live discovery outage against the disposable realm |
 | Platform ACL | Secret ownership and permissions are installer-owned on every supported server OS | Unix non-root service identity plus file/parent owner, mode, type, and no-follow tests | Partial: Windows service DACL validation missing |
 
 Every executable row is part of the normal test suite; no network namespace, firewall exception, or
@@ -48,7 +48,12 @@ replace the remaining separate-process reconnect, malformed-input, and queue-pre
 The TLS outage rehearsal uses a short-lived but initially admissible identity, then corrupts the
 renewal input after readiness. Every watcher attempt fails, no candidate is installed, and the real
 process exits at the monotonic certificate safety deadline, which reserves the final 60 seconds of
-X.509 validity. Automated CA issuance itself and the equivalent OIDC stale-key process case remain.
+X.509 validity. Automated CA issuance itself remains outside this repository-level rehearsal.
+
+The static OIDC rehearsal gives the bootstrap JWKS 66 seconds of declared validity and proves that
+the real process reserves the final minute, emits no fictitious refresh activity, and exits at the
+resulting monotonic trust deadline. A live failed-discovery expiry still belongs to the disposable
+production-shaped realm campaign rather than this static-file proof.
 
 Only after all five proofs are reproducible may the internal validated binder gain a private-network
 capability. Internet publication remains a separate later gate with capacity protection and incident

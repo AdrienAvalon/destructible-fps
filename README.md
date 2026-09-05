@@ -38,7 +38,7 @@ The Linux demo now combines the authoritative core with a real-time first-person
   readiness, asynchronous rotation, and monotonic stale-key shutdown;
 - a standalone secure authority process with bounded JSON/PEM/JWKS loading, strict Unix key-file
   permissions, complete-chain X.509 lifetime preflight, bounded certificate/key hot reload for future
-  handshakes without disconnecting active players, monotonic TLS/JWKS expiry shutdown, graceful
+  handshakes without disconnecting active players, monotonic TLS/JWKS safety shutdown, graceful
   interruption, and no credential-valued arguments;
 - a reusable secure client bootstrap with bounded PEM/token files, strict Unix token permissions,
   cryptographic client nonces, verified TLS/ALPN, post-TLS credential admission, encrypted bounded
@@ -233,14 +233,15 @@ a newly installed public certificate chain without hashing or logging private-ke
 boundary tests
 cover TLS certificate rejection, application-credential rejection, admission timeout, nonce
 mismatch, datagram bounds, invalid credentials, and per-session rate limiting. A separate offline
-OIDC verifier validates pre-provisioned JWKS. Ten external-process tests additionally prove valid
+OIDC verifier validates pre-provisioned JWKS. Eleven external-process tests additionally prove valid
 OIDC command admission, mandatory trusted discovery before readiness, atomic replacement of a wrong
 bootstrap key, issuer-mismatch refusal, invalid-token rejection without simulation work, remote-bind
 refusal, expired-certificate refusal, Unix private-key permission refusal, and live certificate-file
 rotation without dropping an established session, observable unchanged-certificate checks, and
-autonomous fail-closed shutdown after a real renewal outage reaches the pre-expiry safety deadline.
-Automated certificate issuance, reliable
-control/snapshot streams, and remote deployment policy are still required. The current executable
+autonomous fail-closed shutdown after either a real TLS renewal outage or a short static OIDC trust
+window reaches its pre-expiry safety deadline.
+Automated certificate issuance, reliable control/snapshot streams, and remote deployment policy are
+still required. The current executable
 coverage and every remaining promotion proof are explicit in
 [`docs/remote-exposure-gate.md`](docs/remote-exposure-gate.md).
 For local protocol development the legacy authority can be started directly:

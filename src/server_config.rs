@@ -194,7 +194,7 @@ impl SecureAuthorityLaunchConfig {
     ///
     /// Rejects links, non-regular or oversized files, unsafe Unix permissions, unknown fields,
     /// relative credential paths, non-loopback binds, invalid TLS material, invalid OIDC policy,
-    /// and JWKS validity windows outside one minute to 24 hours.
+    /// and static JWKS validity windows outside more than one minute through 24 hours.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, SecureAuthorityLaunchError> {
         validate_runtime_identity()?;
         let config_bytes = read_bounded_file(
@@ -208,9 +208,8 @@ impl SecureAuthorityLaunchConfig {
         let now = unix_seconds().map_err(|_| SecureAuthorityLaunchError::InvalidJwksLifetime)?;
         let jwks_remaining_validity = validate_raw_config(&raw, now)?;
         let monotonic_now = Instant::now();
-        let jwks_expiration_deadline = monotonic_now
-            .checked_add(std::time::Duration::from_secs(jwks_remaining_validity))
-            .ok_or(SecureAuthorityLaunchError::InvalidJwksLifetime)?;
+        let static_jwks_trust_deadline =
+            static_jwks_trust_deadline(monotonic_now, jwks_remaining_validity)?;
 
         let tls_reload_interval = raw
             .tls_reload
@@ -254,7 +253,7 @@ impl SecureAuthorityLaunchConfig {
             .map_err(SecureAuthorityLaunchError::Oidc)?;
         let verifier = Arc::new(ExpiringOidcVerifier {
             inner: oidc,
-            expiration_deadline: RwLock::new(jwks_expiration_deadline),
+            trust_deadline: RwLock::new(static_jwks_trust_deadline),
         });
         let oidc_refresh = raw
             .oidc_discovery
@@ -324,8 +323,8 @@ impl SecureAuthorityLaunchConfig {
     }
 
     #[must_use]
-    pub fn jwks_expiration_deadline(&self) -> Option<Instant> {
-        self.verifier.expiration_deadline()
+    pub fn oidc_trust_deadline(&self) -> Option<Instant> {
+        self.verifier.trust_deadline()
     }
 
     #[must_use]
@@ -359,13 +358,13 @@ impl SecureAuthorityLaunchConfig {
 
 struct ExpiringOidcVerifier {
     inner: OidcSessionVerifier,
-    expiration_deadline: RwLock<Instant>,
+    trust_deadline: RwLock<Instant>,
 }
 
 impl SessionCredentialVerifier for ExpiringOidcVerifier {
     fn verify(&self, credential: &[u8]) -> Option<crate::AuthenticatedPrincipal> {
         let keys_are_current = self
-            .expiration_deadline
+            .trust_deadline
             .read()
             .ok()
             .is_some_and(|deadline| Instant::now() < *deadline);
@@ -376,11 +375,8 @@ impl SessionCredentialVerifier for ExpiringOidcVerifier {
 }
 
 impl ExpiringOidcVerifier {
-    fn expiration_deadline(&self) -> Option<Instant> {
-        self.expiration_deadline
-            .read()
-            .ok()
-            .map(|deadline| *deadline)
+    fn trust_deadline(&self) -> Option<Instant> {
+        self.trust_deadline.read().ok().map(|deadline| *deadline)
     }
 
     fn replace_jwks(
@@ -396,7 +392,7 @@ impl ExpiringOidcVerifier {
             .replace_jwks(jwks)
             .map_err(SecureAuthorityLaunchError::Oidc)?;
         let mut current = self
-            .expiration_deadline
+            .trust_deadline
             .write()
             .map_err(|_| SecureAuthorityLaunchError::OidcRefreshStateUnavailable)?;
         *current = deadline;
@@ -418,8 +414,8 @@ impl OidcRefreshController {
     }
 
     #[must_use]
-    pub fn expiration_deadline(&self) -> Option<Instant> {
-        self.verifier.expiration_deadline()
+    pub fn trust_deadline(&self) -> Option<Instant> {
+        self.verifier.trust_deadline()
     }
 
     /// Fetches, validates, and atomically installs a complete discovered JWKS.
@@ -713,10 +709,23 @@ fn validate_raw_config(
         .jwks_valid_until_unix_seconds
         .checked_sub(now)
         .ok_or(SecureAuthorityLaunchError::InvalidJwksLifetime)?;
-    if !(MIN_STATIC_JWKS_VALIDITY_SECONDS..=MAX_STATIC_JWKS_VALIDITY_SECONDS).contains(&remaining) {
+    if remaining <= MIN_STATIC_JWKS_VALIDITY_SECONDS || remaining > MAX_STATIC_JWKS_VALIDITY_SECONDS
+    {
         return Err(SecureAuthorityLaunchError::InvalidJwksLifetime);
     }
     Ok(remaining)
+}
+
+fn static_jwks_trust_deadline(
+    monotonic_now: Instant,
+    jwks_remaining_validity: u64,
+) -> Result<Instant, SecureAuthorityLaunchError> {
+    let trusted_remaining = jwks_remaining_validity
+        .checked_sub(MIN_STATIC_JWKS_VALIDITY_SECONDS)
+        .ok_or(SecureAuthorityLaunchError::InvalidJwksLifetime)?;
+    monotonic_now
+        .checked_add(Duration::from_secs(trusted_remaining))
+        .ok_or(SecureAuthorityLaunchError::InvalidJwksLifetime)
 }
 
 fn validate_tls_reload_interval(seconds: u64) -> Result<Duration, SecureAuthorityLaunchError> {
@@ -917,7 +926,7 @@ mod tests {
             .oidc_refresh_controller()
             .expect("configured refresh controller");
         assert_eq!(refresh.refresh_interval(), Duration::from_mins(1));
-        assert!(refresh.expiration_deadline().is_some());
+        assert!(refresh.trust_deadline().is_some());
     }
 
     #[test]
@@ -1064,7 +1073,7 @@ mod tests {
                 &valid_jwks(),
             )
             .expect("initial refresh verifier"),
-            expiration_deadline: RwLock::new(initial_deadline),
+            trust_deadline: RwLock::new(initial_deadline),
         };
 
         assert!(
@@ -1072,7 +1081,7 @@ mod tests {
                 .replace_jwks(br#"{"keys":[]}"#, Duration::from_mins(3))
                 .is_err()
         );
-        assert_eq!(verifier.expiration_deadline(), Some(initial_deadline));
+        assert_eq!(verifier.trust_deadline(), Some(initial_deadline));
 
         let before = Instant::now()
             .checked_add(Duration::from_mins(3))
@@ -1085,7 +1094,7 @@ mod tests {
         );
         assert!(
             verifier
-                .expiration_deadline()
+                .trust_deadline()
                 .is_some_and(|deadline| deadline >= before)
         );
     }
@@ -1226,6 +1235,7 @@ mod tests {
         let now = unix_seconds().expect("test clock");
         for deadline in [
             now.saturating_sub(1),
+            now + MIN_STATIC_JWKS_VALIDITY_SECONDS,
             now + MAX_STATIC_JWKS_VALIDITY_SECONDS + 3_600,
         ] {
             document["jwks_valid_until_unix_seconds"] = serde_json::Value::from(deadline);
@@ -1239,6 +1249,20 @@ mod tests {
                 Err(SecureAuthorityLaunchError::InvalidJwksLifetime)
             ));
         }
+    }
+
+    #[test]
+    fn static_jwks_trust_deadline_reserves_the_full_safety_margin() {
+        let now = Instant::now();
+        assert_eq!(
+            static_jwks_trust_deadline(now, MIN_STATIC_JWKS_VALIDITY_SECONDS + 6)
+                .expect("bounded static JWKS trust deadline"),
+            now + Duration::from_secs(6)
+        );
+        assert!(matches!(
+            static_jwks_trust_deadline(now, MIN_STATIC_JWKS_VALIDITY_SECONDS - 1),
+            Err(SecureAuthorityLaunchError::InvalidJwksLifetime)
+        ));
     }
 
     #[test]

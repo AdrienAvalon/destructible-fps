@@ -7,7 +7,7 @@ use destructible_fps::{
     encode_snapshot_request, is_delta_datagram, is_player_state_datagram, is_snapshot_datagram,
 };
 use std::{
-    io,
+    io::{self, BufRead, BufReader, Read},
     net::{SocketAddr, UdpSocket},
     process::{Child, Command, Stdio},
     thread,
@@ -1256,17 +1256,7 @@ fn retained_delta_converges_through_deterministic_network_impairments() {
 
 #[test]
 fn four_trace_replay_clients_converge_with_adaptive_fair_repair() {
-    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
-    let server_address = reservation.local_addr().expect("reserved address");
-    drop(reservation);
-    let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
-            .args(["--bind", &server_address.to_string(), "--max-ticks", "1200"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start four-client trace server"),
-    );
+    let (mut child, server_address) = spawn_ready_ephemeral_server();
     let mut endpoints = Vec::with_capacity(4);
     for index in 0..4 {
         let mut proxy =
@@ -1631,6 +1621,73 @@ fn client_socket() -> UdpSocket {
         .set_read_timeout(Some(Duration::from_millis(40)))
         .expect("client read timeout");
     socket
+}
+
+fn spawn_ready_ephemeral_server() -> (ChildGuard, SocketAddr) {
+    // A released reservation is not ownership: concurrent client/proxy binds can take that port
+    // before the child. Let the child own an ephemeral socket and announce its actual address.
+    let mut child = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
+            .args(["--bind", "127.0.0.1:0", "--max-ticks", "1200"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("start ephemeral trace server"),
+    );
+    let stdout = child.0.stdout.take().expect("server readiness pipe");
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let mut line = String::new();
+        let mut input = BufReader::new(stdout.take(128));
+        let result = input.read_line(&mut line).map(|_| line);
+        let _ = sender.send((result, input.into_inner().into_inner()));
+    });
+    let ready = receiver.recv_timeout(Duration::from_secs(3));
+    if ready.is_err() {
+        let _ = child.0.kill();
+        let _ = child.0.wait();
+    }
+    reader.join().expect("readiness reader completed");
+    let (line, stdout) = ready.expect("bounded server readiness deadline");
+    // Keep the pipe alive for the bounded STOP record; do not induce a later broken-pipe exit.
+    child.0.stdout = Some(stdout);
+    let line = line.expect("read server readiness");
+    assert!(line.ends_with('\n'), "truncated server readiness record");
+    let address: SocketAddr = line
+        .trim_end()
+        .strip_prefix("READY ")
+        .expect("server announced readiness")
+        .parse()
+        .expect("valid bound address");
+    assert!(address.ip().is_loopback() && address.port() != 0);
+    assert!(
+        child
+            .0
+            .try_wait()
+            .expect("readiness process state")
+            .is_none()
+    );
+    (child, address)
+}
+
+#[test]
+fn ephemeral_test_servers_retain_distinct_owned_ready_sockets() {
+    let servers = (0..3)
+        .map(|_| spawn_ready_ephemeral_server())
+        .collect::<Vec<_>>();
+    for (_, address) in &servers {
+        assert_eq!(
+            UdpSocket::bind(address)
+                .expect_err("ready server owns its port")
+                .kind(),
+            io::ErrorKind::AddrInUse
+        );
+    }
+    let addresses = servers
+        .iter()
+        .map(|(_, address)| address)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(addresses.len(), servers.len());
 }
 
 fn handshake_through_proxy(

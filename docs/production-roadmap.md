@@ -114,6 +114,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - offline RS256 access-token verification with strict JWKS key policy, exact issuer/audience and time
   validation, bounded one-use `jti` cache, atomic rotation, and issuer/subject-derived 256-bit
   principal (delivered; trusted discovery/refresh and dedicated-authority wiring remain);
+- transport-independent authority state keyed by opaque peer IDs, authenticated principal binding,
+  bounded core-owned ingress and egress, transport-sized delta/snapshot framing, and legacy UDP
+  behavior preserved by process tests (delivered);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
@@ -202,9 +205,9 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. refactor the authority into a transport-independent bounded core, wire the tested QUIC/OIDC
-   boundary into the dedicated process, and add trusted configuration loading plus a process-level
-   negative-test matrix before any non-loopback exposure;
+1. wire the tested QUIC/OIDC boundary into the transport-independent authority core, add trusted
+   configuration loading, and pass a process-level negative-test matrix before any non-loopback
+   exposure;
 2. add horizontal velocity, material friction/restitution, and deterministic impulse response,
    followed by angular state and replicated orientation.
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at

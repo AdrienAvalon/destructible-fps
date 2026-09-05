@@ -39,9 +39,11 @@ fingerprint, and the active-body fingerprint mixes entity ID, geometry, and dyna
 persistent server must durably store the ID high-water mark with its world snapshot before it may
 restore and allocate another body.
 
-The first real transport slice runs the authority in a separate nonblocking UDP process. A fixed
-versioned control codec admits source-bound development sessions, validates bounded explosion
-commands, separates receive and simulation phases, and applies hard per-tick limits to ingress,
+The first real transport slice now separates a generic `AuthorityCore<PeerId>` from its thin
+nonblocking UDP process adapter. The core owns the world, sessions, commands, repairs, snapshots,
+simulation, and retained replication state; it never owns or calls a socket. A fixed versioned
+control codec admits source-bound development sessions, validates bounded explosion commands,
+separates receive and simulation phases, and applies hard per-tick limits to ingress,
 queued work, simulation, and egress. Complete deltas are released to clients only in contiguous
 sequence order, including when UDP delivers later packets first. A process-level integration test
 drives two independent sockets and proves identical world/body state and fingerprints. A second
@@ -59,6 +61,16 @@ from that peer and their shared encoded buffers enter a per-transfer queue cappe
 A missing or overflowed catch-up delta stalls rather than silently skipping state. Process tests
 cover selective repair of a lost snapshot fragment, explicit install acknowledgement, and a moving
 body with post-snapshot catch-up.
+
+The core takes a transport-specific application payload ceiling from 256 through 1,200 bytes and
+encodes every delta and snapshot against it. Its ingress counter independently rejects work beyond
+64 datagrams per tick even if an adapter drains too aggressively. Outbound delivery is a
+nonblocking callback over an opaque ordered peer key, so UDP addresses are adapter state while QUIC
+can use immutable connection IDs. An already-authenticated connection is admitted with a non-zero
+unique session ID and an opaque 256-bit principal; a wire `Hello` cannot replace it. Disconnect,
+legacy re-handshake, and idle expiry remove queued commands, recovery work, and snapshot state for
+the old session before its peer key may be reused.
+
 The dedicated-authority sessions described above are deliberately loopback-only and unauthenticated;
 the snapshot hash is an integrity check, not a MAC, and that legacy transport provides no
 confidentiality, identity, packet authenticity, or congestion control. It must not be exposed beyond
@@ -113,10 +125,11 @@ the last accepted set expires.
 
 Real loopback QUIC tests cover a valid encrypted datagram exchange, an untrusted certificate, an
 invalid application credential, a stalled admission deadline, a mismatched nonce echo, oversized
-payloads in both directions, and 20 independent sequential sessions. This boundary is not yet a
-remote game server: the authority still uses its legacy loopback UDP socket, and production
-OIDC discovery/JWKS refresh, unpredictable nonce/session allocation, certificate lifecycle, reliable
-snapshot streams, rate limits, and process integration remain required before non-loopback exposure.
+payloads in both directions, and 20 independent sequential sessions. The authority core is now
+transport-independent and accepts connection-bound principals at a 1,100-byte payload ceiling, but
+the executable still instantiates only the legacy loopback UDP adapter. Production OIDC
+discovery/JWKS refresh, unpredictable nonce allocation, certificate lifecycle, reliable snapshot
+streams, rate limits, and QUIC process integration remain required before non-loopback exposure.
 
 ## Planned engine layers
 
@@ -196,6 +209,8 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
   loopback-tested boundary);
 - bounded offline RS256/JWKS OIDC validation, atomic rotation, replay cache, and stable principal
   mapping (delivered as an isolated verifier; trusted refresh and authority integration remain);
+- transport-independent bounded authority core, opaque peer IDs, authenticated principal binding,
+  transport-sized framing, and a regression-preserving loopback UDP adapter (delivered);
 - unreliable sequenced deltas plus reliable snapshot/control channels;
 - configurable stochastic and trace-replay network simulation beyond the delivered fixed profile;
 - spatial interest management and per-client bandwidth budgets;

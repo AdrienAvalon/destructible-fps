@@ -1,4 +1,5 @@
 /target/
+/graphify-out/
 *.profraw
 *.profdata
 perf.data*

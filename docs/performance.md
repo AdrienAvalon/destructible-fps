@@ -183,6 +183,27 @@ collected 2,245 samples (CPU-work p99 13.258 ms, GPU-total p99 0.194 ms). The ve
 render hot path, so the presentation/clock variance must still be characterized by a sustained
 capture before it can be attributed to this change.
 
+## 2026-09-05 — transport-independent authority baseline
+
+Source state: commit `2e8231f` plus the authority-core refactor documented here. The generic core is
+monomorphized over an opaque peer key and emits through a nonblocking callback; it no longer owns a
+socket. Its protocol framing ceiling is selected once at construction and its own counter rejects
+ingress beyond 64 datagrams per simulation tick. A focused test drove a real destructive command
+through an authenticated peer at the QUIC-sized 1,100-byte ceiling and verified every emitted frame.
+
+The promotion passed 65 library tests, three binary tests, and 31 integration tests in both debug and
+release profiles. A deliberately parallel benchmark pass was discarded as comparative evidence due
+to CPU/build-cache contention. The subsequent sequential release pass measured destruction p99 at
+0.384 ms for 500 events, structural combined p99 at 4.235 ms over 100 iterations, 1,024-body physics
+p99 at 0.842 ms over 300 ticks, and snapshot round-trip p99 at 9.401 ms over 20 iterations. Replica
+fingerprints remained identical and all 1,024 bodies slept.
+
+The five-second Vulkan smoke on the NVIDIA RTX 4050 Laptop initialized in 299.9 ms and streamed all
+128 chunks in 35.9 ms. It collected 2,019 GPU samples with zero drops at 1,440×900: CPU frame-work
+p99 was 14.014 ms, GPU shadow p99 0.090 ms, GPU world/HUD p99 0.103 ms, and GPU-total p99 0.210 ms.
+The renderer does not call the authority-core transport adapter; this smoke is a regression gate, not
+evidence that the networking refactor improved rendering.
+
 ## 2026-09-05 — Stage 1 telemetry baseline
 
 Command:

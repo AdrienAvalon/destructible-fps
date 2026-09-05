@@ -1,9 +1,9 @@
-//! Bounded real-UDP dedicated-server runtime and ordered client delta inbox.
+//! Transport-independent bounded authority core, loopback UDP adapter, and client delta inbox.
 
 use crate::{
-    AuthoritativeServer, ClientControlMessage, CodecError, DeltaPacket, ExplosionCommand,
-    FrameAssembler, PhysicsTickReport, World, decode_client_control, decode_frame, encode_frames,
-    encode_server_welcome, encode_snapshot_frames,
+    AuthenticatedPrincipal, AuthoritativeServer, ClientControlMessage, CodecError, DeltaPacket,
+    ExplosionCommand, FrameAssembler, PhysicsTickReport, World, decode_client_control,
+    decode_frame, encode_frames, encode_server_welcome, encode_snapshot_frames,
 };
 use core::fmt;
 use std::{
@@ -29,11 +29,14 @@ const MAX_PEER_IDLE_TICKS: u64 = 3_600;
 const SNAPSHOT_RETRY_COOLDOWN_TICKS: u64 = 60;
 const MAX_COMPLETE_PACKETS: usize = 16;
 const MAX_COMPLETE_PACKET_BYTES: usize = 8 * 1_024 * 1_024;
-const APPLICATION_MTU: usize = 1_200;
+pub const MAX_APPLICATION_DATAGRAM_BYTES: usize = 1_200;
+pub const MIN_APPLICATION_DATAGRAM_BYTES: usize = 256;
+pub const LEGACY_UDP_APPLICATION_DATAGRAM_BYTES: usize = MAX_APPLICATION_DATAGRAM_BYTES;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NetworkTickReport {
     pub received_datagrams: usize,
+    pub receive_limit_drops: usize,
     pub malformed_datagrams: usize,
     pub rejected_sessions: usize,
     pub peer_limit_drops: usize,
@@ -62,6 +65,7 @@ pub struct NetworkTickReport {
 pub enum NetworkRuntimeError {
     Io(io::Error),
     Codec(CodecError),
+    InvalidApplicationDatagramBytes(usize),
 }
 
 impl fmt::Display for NetworkRuntimeError {
@@ -69,6 +73,9 @@ impl fmt::Display for NetworkRuntimeError {
         match self {
             Self::Io(error) => error.fmt(formatter),
             Self::Codec(error) => error.fmt(formatter),
+            Self::InvalidApplicationDatagramBytes(bytes) => {
+                write!(formatter, "invalid application datagram bound {bytes}")
+            }
         }
     }
 }
@@ -91,6 +98,7 @@ impl From<CodecError> for NetworkRuntimeError {
 struct Peer {
     nonce: u64,
     session_id: u64,
+    principal: Option<AuthenticatedPrincipal>,
     last_seen_tick: u64,
     last_snapshot_tick: Option<u64>,
 }
@@ -116,8 +124,8 @@ enum RecoveryRequest {
 }
 
 #[derive(Clone, Copy)]
-struct QueuedRepair {
-    source: SocketAddr,
+struct QueuedRepair<PeerId> {
+    source: PeerId,
     session_id: u64,
     request: RecoveryRequest,
 }
@@ -156,38 +164,44 @@ struct CachedSnapshot {
     frames: Arc<[Vec<u8>]>,
 }
 
-pub struct DedicatedServer {
-    socket: UdpSocket,
+/// Bounded deterministic authority state independent from any concrete network transport.
+pub struct AuthorityCore<PeerId> {
     authority: AuthoritativeServer,
-    peers: BTreeMap<SocketAddr, Peer>,
+    peers: BTreeMap<PeerId, Peer>,
     commands: VecDeque<QueuedCommand>,
-    repairs: VecDeque<QueuedRepair>,
+    repairs: VecDeque<QueuedRepair<PeerId>>,
     retained_deltas: VecDeque<RetainedDelta>,
     retained_delta_bytes: usize,
-    snapshot_transfers: BTreeMap<SocketAddr, SnapshotTransfer>,
+    snapshot_transfers: BTreeMap<PeerId, SnapshotTransfer>,
     next_session_id: u64,
     next_snapshot_id: u64,
     tick: u64,
+    application_datagram_bytes: usize,
+    received_datagrams_this_tick: usize,
 }
 
-impl DedicatedServer {
-    /// Binds a nonblocking UDP authority. Use an explicit loopback address until authenticated
-    /// remote transport is implemented.
+impl<PeerId> AuthorityCore<PeerId>
+where
+    PeerId: Copy + Ord,
+{
+    /// Creates a bounded authority core for a transport's application payload limit.
     ///
     /// # Errors
     ///
-    /// Returns socket resolution, bind, or nonblocking-configuration failures.
-    pub fn bind(address: impl ToSocketAddrs, world: World) -> io::Result<Self> {
-        let socket = UdpSocket::bind(address)?;
-        if !socket.local_addr()?.ip().is_loopback() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "unauthenticated dedicated transport is restricted to loopback",
+    /// Rejects limits too small for useful protocol frames or larger than the repository-wide
+    /// datagram ceiling.
+    pub fn new(
+        world: World,
+        application_datagram_bytes: usize,
+    ) -> Result<Self, NetworkRuntimeError> {
+        if !(MIN_APPLICATION_DATAGRAM_BYTES..=MAX_APPLICATION_DATAGRAM_BYTES)
+            .contains(&application_datagram_bytes)
+        {
+            return Err(NetworkRuntimeError::InvalidApplicationDatagramBytes(
+                application_datagram_bytes,
             ));
         }
-        socket.set_nonblocking(true)?;
         Ok(Self {
-            socket,
             authority: AuthoritativeServer::new(world),
             peers: BTreeMap::new(),
             commands: VecDeque::new(),
@@ -198,27 +212,161 @@ impl DedicatedServer {
             next_session_id: 1,
             next_snapshot_id: 1,
             tick: 0,
+            application_datagram_bytes,
+            received_datagrams_this_tick: 0,
         })
     }
 
-    /// Receives a bounded batch, enqueues validated commands, then performs simulation outside the
-    /// receive phase and broadcasts canonical authority deltas.
+    /// Starts one deterministic simulation tick and expires idle transport peers.
+    #[must_use]
+    pub fn begin_tick(&mut self) -> NetworkTickReport {
+        self.tick = self.tick.saturating_add(1);
+        self.received_datagrams_this_tick = 0;
+        self.prune_idle_peers();
+        NetworkTickReport::default()
+    }
+
+    /// Admits one already-authenticated transport connection without trusting wire identity fields.
+    ///
+    /// Session IDs are allocated by the secure transport supervisor and must be unique and non-zero.
+    pub fn admit_authenticated(
+        &mut self,
+        source: PeerId,
+        client_nonce: u64,
+        session_id: u64,
+        principal: AuthenticatedPrincipal,
+        report: &mut NetworkTickReport,
+    ) -> bool {
+        if session_id == 0
+            || self.peers.contains_key(&source)
+            || self
+                .peers
+                .values()
+                .any(|peer| peer.session_id == session_id)
+        {
+            report.rejected_sessions += 1;
+            return false;
+        }
+        if self.peers.len() >= MAX_SERVER_PEERS {
+            report.peer_limit_drops += 1;
+            return false;
+        }
+        self.peers.insert(
+            source,
+            Peer {
+                nonce: client_nonce,
+                session_id,
+                principal: Some(principal),
+                last_seen_tick: self.tick,
+                last_snapshot_tick: None,
+            },
+        );
+        true
+    }
+
+    /// Removes exactly one authenticated session and any queued work owned by it.
+    pub fn disconnect_authenticated(&mut self, source: PeerId, session_id: u64) -> bool {
+        let matches = self
+            .peers
+            .get(&source)
+            .is_some_and(|peer| peer.principal.is_some() && peer.session_id == session_id);
+        if !matches {
+            return false;
+        }
+        self.remove_peer_state(source, session_id);
+        true
+    }
+
+    /// Ingests one bounded transport payload. The supplied sender is invoked only for a legacy
+    /// loopback welcome; authenticated peers cannot renegotiate through a wire `Hello`.
+    pub fn ingest_datagram(
+        &mut self,
+        source: PeerId,
+        bytes: &[u8],
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
+        report: &mut NetworkTickReport,
+    ) {
+        if self.received_datagrams_this_tick >= MAX_RECEIVED_DATAGRAMS_PER_TICK {
+            report.receive_limit_drops += 1;
+            return;
+        }
+        self.received_datagrams_this_tick += 1;
+        report.received_datagrams += 1;
+        if bytes.len() > self.application_datagram_bytes {
+            report.malformed_datagrams += 1;
+            return;
+        }
+        let Ok(message) = decode_client_control(bytes) else {
+            report.malformed_datagrams += 1;
+            return;
+        };
+        match message {
+            ClientControlMessage::Hello { nonce } => {
+                if self
+                    .peers
+                    .get(&source)
+                    .is_some_and(|peer| peer.principal.is_some())
+                {
+                    report.rejected_sessions += 1;
+                } else {
+                    self.accept_hello(source, nonce, sender, report);
+                }
+            }
+            ClientControlMessage::Explosion {
+                session_id,
+                command,
+            } => self.enqueue_command(source, session_id, command, report),
+            ClientControlMessage::RepairRequest {
+                session_id,
+                missing_sequence,
+            } => self.enqueue_repair(source, session_id, missing_sequence, report),
+            ClientControlMessage::SnapshotRequest { session_id } => {
+                self.enqueue_snapshot(source, session_id, report);
+            }
+            ClientControlMessage::SnapshotFragmentsRequest {
+                session_id,
+                snapshot_id,
+                base_fragment,
+                missing_mask,
+            } => self.enqueue_recovery(
+                source,
+                session_id,
+                RecoveryRequest::SnapshotFragments {
+                    snapshot_id,
+                    base_fragment,
+                    missing_mask,
+                },
+                report,
+            ),
+            ClientControlMessage::SnapshotAck {
+                session_id,
+                snapshot_id,
+            } => self.enqueue_recovery(
+                source,
+                session_id,
+                RecoveryRequest::SnapshotAck { snapshot_id },
+                report,
+            ),
+        }
+    }
+
+    /// Applies bounded repair, command, physics, and replication work for the current tick.
     ///
     /// # Errors
     ///
-    /// Returns non-transient socket failures or an impossible authoritative frame-encoding error.
-    pub fn tick(&mut self) -> Result<NetworkTickReport, NetworkRuntimeError> {
-        self.tick = self.tick.wrapping_add(1);
-        self.prune_idle_peers();
-        let mut report = NetworkTickReport::default();
-        self.receive_batch(&mut report)?;
-        self.process_repairs(&mut report);
-        self.service_snapshot_transfers(&mut report);
-        self.simulate_commands(&mut report)?;
+    /// Returns an impossible authoritative frame-encoding failure.
+    pub fn complete_tick(
+        &mut self,
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
+        mut report: NetworkTickReport,
+    ) -> Result<NetworkTickReport, NetworkRuntimeError> {
+        self.process_repairs(sender, &mut report);
+        self.service_snapshot_transfers(sender, &mut report);
+        self.simulate_commands(sender, &mut report)?;
         let (physics_packet, physics) = self.authority.advance_physics();
         report.physics = physics;
         if let Some(packet) = physics_packet {
-            self.broadcast(&packet, &mut report)?;
+            self.broadcast(&packet, sender, &mut report)?;
         }
         Ok(report)
     }
@@ -226,15 +374,6 @@ impl DedicatedServer {
     #[must_use]
     pub const fn authority(&self) -> &AuthoritativeServer {
         &self.authority
-    }
-
-    /// Returns the actual bound address, including an ephemeral port selected for port zero.
-    ///
-    /// # Errors
-    ///
-    /// Returns the underlying socket address query error.
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.socket.local_addr()
     }
 
     #[must_use]
@@ -257,98 +396,78 @@ impl DedicatedServer {
         self.retained_delta_bytes
     }
 
-    fn receive_batch(&mut self, report: &mut NetworkTickReport) -> io::Result<()> {
-        let mut datagram = [0_u8; APPLICATION_MTU + 1];
-        for _ in 0..MAX_RECEIVED_DATAGRAMS_PER_TICK {
-            let (length, source) = match self.socket.recv_from(&mut datagram) {
-                Ok(received) => received,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) => return Err(error),
-            };
-            report.received_datagrams += 1;
-            if length > APPLICATION_MTU {
-                report.malformed_datagrams += 1;
-                continue;
-            }
-            let Ok(message) = decode_client_control(&datagram[..length]) else {
-                report.malformed_datagrams += 1;
-                continue;
-            };
-            match message {
-                ClientControlMessage::Hello { nonce } => {
-                    self.accept_hello(source, nonce, report);
-                }
-                ClientControlMessage::Explosion {
-                    session_id,
-                    command,
-                } => self.enqueue_command(source, session_id, command, report),
-                ClientControlMessage::RepairRequest {
-                    session_id,
-                    missing_sequence,
-                } => self.enqueue_repair(source, session_id, missing_sequence, report),
-                ClientControlMessage::SnapshotRequest { session_id } => {
-                    self.enqueue_snapshot(source, session_id, report);
-                }
-                ClientControlMessage::SnapshotFragmentsRequest {
-                    session_id,
-                    snapshot_id,
-                    base_fragment,
-                    missing_mask,
-                } => self.enqueue_recovery(
-                    source,
-                    session_id,
-                    RecoveryRequest::SnapshotFragments {
-                        snapshot_id,
-                        base_fragment,
-                        missing_mask,
-                    },
-                    report,
-                ),
-                ClientControlMessage::SnapshotAck {
-                    session_id,
-                    snapshot_id,
-                } => self.enqueue_recovery(
-                    source,
-                    session_id,
-                    RecoveryRequest::SnapshotAck { snapshot_id },
-                    report,
-                ),
-            }
-        }
-        Ok(())
+    #[must_use]
+    pub fn principal(&self, source: PeerId) -> Option<AuthenticatedPrincipal> {
+        self.peers.get(&source).and_then(|peer| peer.principal)
     }
 
-    fn accept_hello(&mut self, source: SocketAddr, nonce: u64, report: &mut NetworkTickReport) {
+    #[must_use]
+    pub const fn application_datagram_bytes(&self) -> usize {
+        self.application_datagram_bytes
+    }
+
+    fn remove_peer_state(&mut self, source: PeerId, session_id: u64) {
+        self.peers.remove(&source);
+        self.snapshot_transfers.remove(&source);
+        self.repairs
+            .retain(|repair| repair.source != source && repair.session_id != session_id);
+        self.commands
+            .retain(|command| command.session_id != session_id);
+    }
+
+    fn accept_hello(
+        &mut self,
+        source: PeerId,
+        nonce: u64,
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
+        report: &mut NetworkTickReport,
+    ) {
         if let Some(peer) = self.peers.get_mut(&source)
             && peer.nonce == nonce
         {
             peer.last_seen_tick = self.tick;
-            send_welcome(&self.socket, source, *peer, report);
+            send_welcome(sender, source, *peer, report);
             return;
+        }
+        if let Some(replaced_session) = self.peers.get(&source).map(|peer| peer.session_id) {
+            self.remove_peer_state(source, replaced_session);
         }
         if !self.peers.contains_key(&source) && self.peers.len() >= MAX_SERVER_PEERS {
             report.peer_limit_drops += 1;
             return;
         }
-        let Some(next_session_id) = self.next_session_id.checked_add(1) else {
+        while self
+            .peers
+            .values()
+            .any(|peer| peer.session_id == self.next_session_id)
+        {
+            let Some(next) = self.next_session_id.checked_add(1) else {
+                report.peer_limit_drops += 1;
+                return;
+            };
+            self.next_session_id = next;
+        }
+        let session_id = self.next_session_id;
+        let Some(next_session_id) = session_id.checked_add(1) else {
             report.peer_limit_drops += 1;
             return;
         };
         let peer = Peer {
             nonce,
-            session_id: self.next_session_id,
+            session_id,
+            principal: None,
             last_seen_tick: self.tick,
             last_snapshot_tick: None,
         };
         self.next_session_id = next_session_id;
         self.snapshot_transfers.remove(&source);
         self.peers.insert(source, peer);
-        send_welcome(&self.socket, source, peer, report);
+        send_welcome(sender, source, peer, report);
     }
 
     fn enqueue_command(
         &mut self,
-        source: SocketAddr,
+        source: PeerId,
         session_id: u64,
         command: ExplosionCommand,
         report: &mut NetworkTickReport,
@@ -374,7 +493,7 @@ impl DedicatedServer {
 
     fn enqueue_repair(
         &mut self,
-        source: SocketAddr,
+        source: PeerId,
         session_id: u64,
         missing_sequence: u64,
         report: &mut NetworkTickReport,
@@ -393,7 +512,7 @@ impl DedicatedServer {
 
     fn enqueue_snapshot(
         &mut self,
-        source: SocketAddr,
+        source: PeerId,
         session_id: u64,
         report: &mut NetworkTickReport,
     ) {
@@ -402,7 +521,7 @@ impl DedicatedServer {
 
     fn enqueue_recovery(
         &mut self,
-        source: SocketAddr,
+        source: PeerId,
         session_id: u64,
         request: RecoveryRequest,
         report: &mut NetworkTickReport,
@@ -427,7 +546,11 @@ impl DedicatedServer {
         });
     }
 
-    fn process_repairs(&mut self, report: &mut NetworkTickReport) {
+    fn process_repairs(
+        &mut self,
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
+        report: &mut NetworkTickReport,
+    ) {
         let mut snapshot_attempted = false;
         let mut snapshot_cache = None;
         for _ in 0..MAX_REPAIRS_PER_TICK {
@@ -453,6 +576,7 @@ impl DedicatedServer {
                         snapshot_id,
                         base_fragment,
                         missing_mask,
+                        sender,
                         report,
                     );
                     continue;
@@ -467,8 +591,7 @@ impl DedicatedServer {
                         .iter()
                         .find(|packet| packet.sequence == missing_sequence)
                     {
-                        if send_packet_frames(&self.socket, &retained.frames, repair.source, report)
-                        {
+                        if send_packet_frames(sender, &retained.frames, repair.source, report) {
                             report.repairs_served += 1;
                         }
                         continue;
@@ -527,14 +650,17 @@ impl DedicatedServer {
             report.snapshot_build_failures += 1;
             return None;
         };
-        let frames =
-            match encode_snapshot_frames(self.next_snapshot_id, &self.authority, APPLICATION_MTU) {
-                Ok(frames) => frames,
-                Err(_error) => {
-                    report.snapshot_build_failures += 1;
-                    return None;
-                }
-            };
+        let frames = match encode_snapshot_frames(
+            self.next_snapshot_id,
+            &self.authority,
+            self.application_datagram_bytes,
+        ) {
+            Ok(frames) => frames,
+            Err(_error) => {
+                report.snapshot_build_failures += 1;
+                return None;
+            }
+        };
         let snapshot = CachedSnapshot {
             snapshot_id: self.next_snapshot_id,
             next_sequence: self.authority.next_sequence(),
@@ -546,10 +672,11 @@ impl DedicatedServer {
 
     fn process_snapshot_fragments(
         &self,
-        source: SocketAddr,
+        source: PeerId,
         snapshot_id: u64,
         base_fragment: u16,
         missing_mask: u64,
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
         report: &mut NetworkTickReport,
     ) {
         let Some(transfer) = self.snapshot_transfers.get(&source) else {
@@ -574,7 +701,7 @@ impl DedicatedServer {
             return;
         }
         if send_selected_snapshot_frames(
-            &self.socket,
+            sender,
             &transfer.frames,
             source,
             base,
@@ -590,7 +717,7 @@ impl DedicatedServer {
 
     fn process_snapshot_ack(
         &mut self,
-        source: SocketAddr,
+        source: PeerId,
         snapshot_id: u64,
         report: &mut NetworkTickReport,
     ) {
@@ -618,7 +745,11 @@ impl DedicatedServer {
         }
     }
 
-    fn service_snapshot_transfers(&mut self, report: &mut NetworkTickReport) {
+    fn service_snapshot_transfers(
+        &mut self,
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
+        report: &mut NetworkTickReport,
+    ) {
         let sources = self.snapshot_transfers.keys().copied().collect::<Vec<_>>();
         for source in sources {
             let Some(mut transfer) = self.snapshot_transfers.remove(&source) else {
@@ -629,12 +760,8 @@ impl DedicatedServer {
                     let end = next_frame
                         .saturating_add(MAX_SNAPSHOT_FRAMES_PER_PEER_PER_TICK)
                         .min(transfer.frames.len());
-                    if send_packet_frames(
-                        &self.socket,
-                        &transfer.frames[next_frame..end],
-                        source,
-                        report,
-                    ) {
+                    if send_packet_frames(sender, &transfer.frames[next_frame..end], source, report)
+                    {
                         if end == transfer.frames.len() {
                             transfer.stage = SnapshotTransferStage::AwaitingAck;
                             report.snapshot_fallbacks_served += 1;
@@ -651,8 +778,7 @@ impl DedicatedServer {
                             transfer.catchup.clear();
                             transfer.catchup_bytes = 0;
                             report.snapshot_catchup_stalls += 1;
-                        } else if send_packet_frames(&self.socket, &catchup.frames, source, report)
-                        {
+                        } else if send_packet_frames(sender, &catchup.frames, source, report) {
                             if let Some(sent) = transfer.catchup.pop_front() {
                                 transfer.catchup_bytes =
                                     transfer.catchup_bytes.saturating_sub(sent.bytes);
@@ -686,6 +812,7 @@ impl DedicatedServer {
 
     fn simulate_commands(
         &mut self,
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
         report: &mut NetworkTickReport,
     ) -> Result<(), NetworkRuntimeError> {
         for _ in 0..MAX_SIMULATED_COMMANDS_PER_TICK {
@@ -698,7 +825,7 @@ impl DedicatedServer {
             {
                 Ok((packet, _destruction)) => {
                     report.commands_applied += 1;
-                    self.broadcast(&packet, report)?;
+                    self.broadcast(&packet, sender, report)?;
                 }
                 Err(_error) => report.commands_rejected += 1,
             }
@@ -709,15 +836,16 @@ impl DedicatedServer {
     fn broadcast(
         &mut self,
         packet: &DeltaPacket,
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
         report: &mut NetworkTickReport,
     ) -> Result<(), NetworkRuntimeError> {
-        let frames: Arc<[Vec<u8>]> = encode_frames(packet, APPLICATION_MTU)?.into();
+        let frames: Arc<[Vec<u8>]> = encode_frames(packet, self.application_datagram_bytes)?.into();
         for destination in self
             .peers
             .keys()
             .filter(|destination| !self.snapshot_transfers.contains_key(destination))
         {
-            send_packet_frames(&self.socket, &frames, *destination, report);
+            send_packet_frames(sender, &frames, *destination, report);
         }
         self.queue_snapshot_catchup(packet.sequence, &frames, report);
         self.retain_delta(packet.sequence, frames);
@@ -795,16 +923,111 @@ impl DedicatedServer {
 
     fn prune_idle_peers(&mut self) {
         let earliest = self.tick.saturating_sub(MAX_PEER_IDLE_TICKS);
-        self.peers
-            .retain(|_address, peer| peer.last_seen_tick >= earliest);
+        let mut expired = Vec::with_capacity(self.peers.len());
+        self.peers.retain(|address, peer| {
+            let keep = peer.last_seen_tick >= earliest;
+            if !keep {
+                expired.push((*address, peer.session_id));
+            }
+            keep
+        });
+        for (source, session_id) in expired {
+            self.snapshot_transfers.remove(&source);
+            self.repairs
+                .retain(|repair| repair.source != source && repair.session_id != session_id);
+            self.commands
+                .retain(|command| command.session_id != session_id);
+        }
         self.snapshot_transfers
             .retain(|address, _transfer| self.peers.contains_key(address));
     }
 }
 
-fn send_welcome(
-    socket: &UdpSocket,
-    destination: SocketAddr,
+/// Legacy real-UDP adapter retained for loopback protocol and impairment testing.
+pub struct DedicatedServer {
+    socket: UdpSocket,
+    core: AuthorityCore<SocketAddr>,
+}
+
+impl DedicatedServer {
+    /// Binds a nonblocking UDP authority. This unauthenticated adapter is always loopback-only.
+    ///
+    /// # Errors
+    ///
+    /// Returns socket resolution, bind, nonblocking-configuration, or core-configuration failures.
+    pub fn bind(address: impl ToSocketAddrs, world: World) -> io::Result<Self> {
+        let socket = UdpSocket::bind(address)?;
+        if !socket.local_addr()?.ip().is_loopback() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "unauthenticated dedicated transport is restricted to loopback",
+            ));
+        }
+        socket.set_nonblocking(true)?;
+        let core = AuthorityCore::new(world, LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+        Ok(Self { socket, core })
+    }
+
+    /// Receives a bounded batch, then advances the transport-independent authority core once.
+    ///
+    /// # Errors
+    ///
+    /// Returns non-transient socket failures or authoritative frame-encoding failures.
+    pub fn tick(&mut self) -> Result<NetworkTickReport, NetworkRuntimeError> {
+        let Self { socket, core } = self;
+        let mut report = core.begin_tick();
+        let mut sender = |destination: SocketAddr, payload: &[u8]| matches!(socket.send_to(payload, destination), Ok(length) if length == payload.len());
+        let mut datagram = [0_u8; MAX_APPLICATION_DATAGRAM_BYTES + 1];
+        for _ in 0..MAX_RECEIVED_DATAGRAMS_PER_TICK {
+            let (length, source) = match socket.recv_from(&mut datagram) {
+                Ok(received) => received,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(NetworkRuntimeError::Io(error)),
+            };
+            core.ingest_datagram(source, &datagram[..length], &mut sender, &mut report);
+        }
+        core.complete_tick(&mut sender, report)
+    }
+
+    #[must_use]
+    pub const fn authority(&self) -> &AuthoritativeServer {
+        self.core.authority()
+    }
+
+    /// Returns the actual bound address, including an ephemeral port selected for port zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying socket address query error.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    #[must_use]
+    pub fn peer_count(&self) -> usize {
+        self.core.peer_count()
+    }
+
+    #[must_use]
+    pub fn queued_commands(&self) -> usize {
+        self.core.queued_commands()
+    }
+
+    #[must_use]
+    pub fn retained_delta_packets(&self) -> usize {
+        self.core.retained_delta_packets()
+    }
+
+    #[must_use]
+    pub const fn retained_delta_bytes(&self) -> usize {
+        self.core.retained_delta_bytes()
+    }
+}
+
+fn send_welcome<PeerId: Copy>(
+    sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
+    destination: PeerId,
     peer: Peer,
     report: &mut NetworkTickReport,
 ) {
@@ -814,16 +1037,17 @@ fn send_welcome(
         return;
     }
     report.outbound_attempts += 1;
-    match socket.send_to(&message, destination) {
-        Ok(length) if length == message.len() => report.outbound_datagrams += 1,
-        Ok(_) | Err(_) => report.outbound_drops += 1,
+    if sender(destination, &message) {
+        report.outbound_datagrams += 1;
+    } else {
+        report.outbound_drops += 1;
     }
 }
 
-fn send_packet_frames(
-    socket: &UdpSocket,
+fn send_packet_frames<PeerId: Copy>(
+    sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
     frames: &[Vec<u8>],
-    destination: SocketAddr,
+    destination: PeerId,
     report: &mut NetworkTickReport,
 ) -> bool {
     if frames.len() > MAX_OUTBOUND_DATAGRAMS_PER_TICK.saturating_sub(report.outbound_attempts) {
@@ -833,21 +1057,20 @@ fn send_packet_frames(
     let mut complete = true;
     for frame in frames {
         report.outbound_attempts += 1;
-        match socket.send_to(frame, destination) {
-            Ok(length) if length == frame.len() => report.outbound_datagrams += 1,
-            Ok(_) | Err(_) => {
-                report.outbound_drops += 1;
-                complete = false;
-            }
+        if sender(destination, frame) {
+            report.outbound_datagrams += 1;
+        } else {
+            report.outbound_drops += 1;
+            complete = false;
         }
     }
     complete
 }
 
-fn send_selected_snapshot_frames(
-    socket: &UdpSocket,
+fn send_selected_snapshot_frames<PeerId: Copy>(
+    sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
     frames: &[Vec<u8>],
-    destination: SocketAddr,
+    destination: PeerId,
     base: usize,
     missing_mask: u64,
     report: &mut NetworkTickReport,
@@ -866,12 +1089,11 @@ fn send_selected_snapshot_frames(
             return false;
         };
         report.outbound_attempts += 1;
-        match socket.send_to(frame, destination) {
-            Ok(length) if length == frame.len() => report.outbound_datagrams += 1,
-            Ok(_) | Err(_) => {
-                report.outbound_drops += 1;
-                complete = false;
-            }
+        if sender(destination, frame) {
+            report.outbound_datagrams += 1;
+        } else {
+            report.outbound_drops += 1;
+            complete = false;
         }
     }
     complete
@@ -981,10 +1203,10 @@ mod tests {
 
     #[test]
     fn ordered_inbox_holds_a_complete_future_packet() {
-        let first = encode_frames(&empty_packet(1), APPLICATION_MTU)
+        let first = encode_frames(&empty_packet(1), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
             .expect("first packet")
             .remove(0);
-        let second = encode_frames(&empty_packet(2), APPLICATION_MTU)
+        let second = encode_frames(&empty_packet(2), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
             .expect("second packet")
             .remove(0);
         let mut inbox = OrderedDeltaInbox::default();
@@ -1004,14 +1226,104 @@ mod tests {
     }
 
     #[test]
+    fn authority_core_rejects_invalid_payload_bounds() {
+        for bound in [
+            MIN_APPLICATION_DATAGRAM_BYTES - 1,
+            MAX_APPLICATION_DATAGRAM_BYTES + 1,
+        ] {
+            assert!(matches!(
+                AuthorityCore::<u8>::new(World::default(), bound),
+                Err(NetworkRuntimeError::InvalidApplicationDatagramBytes(bytes)) if bytes == bound
+            ));
+        }
+    }
+
+    #[test]
+    fn authenticated_peer_is_bound_and_wire_hello_cannot_replace_it() {
+        let mut server = AuthorityCore::new(World::default(), 1_100).expect("authority core");
+        let principal = AuthenticatedPrincipal::new(
+            std::num::NonZeroU64::new(77).expect("non-zero test principal"),
+        );
+        let mut report = server.begin_tick();
+        assert!(server.admit_authenticated(5_u64, 11, 13, principal, &mut report));
+        assert_eq!(server.principal(5), Some(principal));
+        assert!(!server.admit_authenticated(5, 12, 14, principal, &mut report));
+        assert!(!server.admit_authenticated(6, 12, 13, principal, &mut report));
+
+        let mut sent = Vec::new();
+        server.ingest_datagram(
+            5,
+            &crate::encode_client_hello(99),
+            &mut |destination, payload| {
+                sent.push((destination, payload.to_vec()));
+                true
+            },
+            &mut report,
+        );
+        server.ingest_datagram(
+            5,
+            &crate::encode_explosion_request(13, TEST_COMMAND),
+            &mut |_destination, _payload| true,
+            &mut report,
+        );
+
+        assert!(sent.is_empty());
+        assert_eq!(report.rejected_sessions, 3);
+        assert_eq!(server.queued_commands(), 1);
+        assert!(!server.disconnect_authenticated(5, 14));
+        assert!(server.disconnect_authenticated(5, 13));
+        assert_eq!(server.principal(5), None);
+        assert_eq!(server.queued_commands(), 0);
+    }
+
+    #[test]
+    fn core_receive_work_and_secure_sized_output_are_bounded() {
+        let mut server = AuthorityCore::new(crate::demo_world(), 1_100).expect("authority core");
+        let principal = AuthenticatedPrincipal::new(
+            std::num::NonZeroU64::new(91).expect("non-zero test principal"),
+        );
+        let mut report = server.begin_tick();
+        assert!(server.admit_authenticated(1_u8, 17, 19, principal, &mut report));
+        server.ingest_datagram(
+            1,
+            &crate::encode_explosion_request(19, TEST_COMMAND),
+            &mut |_destination, _payload| true,
+            &mut report,
+        );
+        for _ in 1..MAX_RECEIVED_DATAGRAMS_PER_TICK + 2 {
+            server.ingest_datagram(1, &[], &mut |_destination, _payload| true, &mut report);
+        }
+        let mut output_lengths = Vec::new();
+        let report = server
+            .complete_tick(
+                &mut |destination, payload| {
+                    assert_eq!(destination, 1);
+                    output_lengths.push(payload.len());
+                    true
+                },
+                report,
+            )
+            .expect("bounded authority tick");
+
+        assert_eq!(report.received_datagrams, MAX_RECEIVED_DATAGRAMS_PER_TICK);
+        assert_eq!(report.receive_limit_drops, 2);
+        assert_eq!(report.commands_applied, 1);
+        assert!(!output_lengths.is_empty());
+        assert!(output_lengths.into_iter().all(|bytes| bytes <= 1_100));
+    }
+
+    #[test]
     fn command_queue_and_session_validation_are_bounded() {
-        let mut server = DedicatedServer::bind("127.0.0.1:0", World::default()).expect("server");
+        let mut server =
+            AuthorityCore::new(World::default(), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
+                .expect("server");
         let source = SocketAddr::from(([127, 0, 0, 1], 20_001));
         server.peers.insert(
             source,
             Peer {
                 nonce: 1,
                 session_id: 7,
+                principal: None,
                 last_seen_tick: 0,
                 last_snapshot_tick: None,
             },
@@ -1030,13 +1342,16 @@ mod tests {
 
     #[test]
     fn peer_admission_stops_at_the_fixed_limit() {
-        let mut server = DedicatedServer::bind("127.0.0.1:0", World::default()).expect("server");
+        let mut server =
+            AuthorityCore::new(World::default(), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
+                .expect("server");
         let mut report = NetworkTickReport::default();
+        let mut sender = |_destination, _payload: &[u8]| true;
 
         for index in 0..=MAX_SERVER_PEERS {
             let index = u16::try_from(index).expect("small peer limit");
             let source = SocketAddr::from(([127, 0, 0, 1], 21_000 + index));
-            server.accept_hello(source, u64::from(index), &mut report);
+            server.accept_hello(source, u64::from(index), &mut sender, &mut report);
         }
 
         assert_eq!(server.peer_count(), MAX_SERVER_PEERS);
@@ -1054,13 +1369,16 @@ mod tests {
 
     #[test]
     fn broadcast_does_not_attempt_a_partial_packet_past_the_tick_budget() {
-        let mut server = DedicatedServer::bind("127.0.0.1:0", World::default()).expect("server");
+        let mut server =
+            AuthorityCore::new(World::default(), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
+                .expect("server");
         let destination = SocketAddr::from(([127, 0, 0, 1], 22_001));
         server.peers.insert(
             destination,
             Peer {
                 nonce: 1,
                 session_id: 1,
+                principal: None,
                 last_seen_tick: 0,
                 last_snapshot_tick: None,
             },
@@ -1071,7 +1389,11 @@ mod tests {
         };
 
         server
-            .broadcast(&empty_packet(1), &mut report)
+            .broadcast(
+                &empty_packet(1),
+                &mut |_destination, _payload: &[u8]| true,
+                &mut report,
+            )
             .expect("valid packet encoding");
 
         assert_eq!(report.outbound_attempts, MAX_OUTBOUND_DATAGRAMS_PER_TICK);
@@ -1081,13 +1403,16 @@ mod tests {
 
     #[test]
     fn repair_queue_and_retained_history_are_bounded() {
-        let mut server = DedicatedServer::bind("127.0.0.1:0", World::default()).expect("server");
+        let mut server =
+            AuthorityCore::new(World::default(), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
+                .expect("server");
         let source = SocketAddr::from(([127, 0, 0, 1], 23_001));
         server.peers.insert(
             source,
             Peer {
                 nonce: 1,
                 session_id: 7,
+                principal: None,
                 last_seen_tick: 0,
                 last_snapshot_tick: None,
             },
@@ -1123,7 +1448,9 @@ mod tests {
 
     #[test]
     fn snapshot_catchup_queue_fails_closed_at_its_packet_limit() {
-        let mut server = DedicatedServer::bind("127.0.0.1:0", World::default()).expect("server");
+        let mut server =
+            AuthorityCore::new(World::default(), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
+                .expect("server");
         let source = SocketAddr::from(([127, 0, 0, 1], 24_001));
         server.snapshot_transfers.insert(
             source,
@@ -1156,7 +1483,9 @@ mod tests {
 
     #[test]
     fn snapshot_controls_require_matching_bounded_transfer_state() {
-        let mut server = DedicatedServer::bind("127.0.0.1:0", World::default()).expect("server");
+        let mut server =
+            AuthorityCore::new(World::default(), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
+                .expect("server");
         let source = SocketAddr::from(([127, 0, 0, 1], 24_002));
         server.snapshot_transfers.insert(
             source,
@@ -1171,8 +1500,9 @@ mod tests {
         );
         let mut report = NetworkTickReport::default();
 
-        server.process_snapshot_fragments(source, 5, 0, 1, &mut report);
-        server.process_snapshot_fragments(source, 5, 1, 1, &mut report);
+        let mut sender = |_destination, _payload: &[u8]| true;
+        server.process_snapshot_fragments(source, 5, 0, 1, &mut sender, &mut report);
+        server.process_snapshot_fragments(source, 5, 1, 1, &mut sender, &mut report);
         server.process_snapshot_ack(source, 4, &mut report);
         server.process_snapshot_ack(source, 5, &mut report);
 
@@ -1189,13 +1519,16 @@ mod tests {
 
     #[test]
     fn future_repair_sequence_cannot_force_a_snapshot() {
-        let mut server = DedicatedServer::bind("127.0.0.1:0", World::default()).expect("server");
+        let mut server =
+            AuthorityCore::new(World::default(), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES)
+                .expect("server");
         let source = SocketAddr::from(([127, 0, 0, 1], 25_001));
         server.peers.insert(
             source,
             Peer {
                 nonce: 1,
                 session_id: 7,
+                principal: None,
                 last_seen_tick: 0,
                 last_snapshot_tick: None,
             },
@@ -1203,7 +1536,7 @@ mod tests {
         let mut report = NetworkTickReport::default();
 
         server.enqueue_repair(source, 7, 2, &mut report);
-        server.process_repairs(&mut report);
+        server.process_repairs(&mut |_destination, _payload: &[u8]| true, &mut report);
 
         assert_eq!(report.repair_misses, 1);
         assert_eq!(report.snapshot_request_drops, 1);

@@ -16,6 +16,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - out-of-order frame reassembly;
 - a real nonblocking UDP dedicated-server process, fixed versioned control handshake, and
   two-client process-level loopback synchronization test;
+- a transport-independent bounded authority core keyed by opaque peer IDs, with authenticated
+  principal binding, stale-session cleanup, configurable application payload ceilings, and a thin
+  legacy UDP adapter;
 - bounded recent-delta retention and prioritized exact retransmission: a process test deliberately
   drops a complete sequence, buffers later deltas, requests repair, and proves convergence;
 - canonical four-MiB-bounded world/body snapshots, paced transfer, selective 64-bit fragment repair
@@ -89,8 +92,9 @@ cargo run --release --bin snapshot-benchmark -- --iterations 20
 cargo run --release --bin playable-demo
 ```
 
-The legacy dedicated-server process is intentionally restricted to loopback. Its real two-client UDP
-path is exercised by `cargo test --test network`, but it is not yet connected to the separately tested
+The legacy dedicated-server process is intentionally restricted to loopback. Its socket has been
+separated from the reusable authority core and its real two-client path is exercised by
+`cargo test --test network`, but the process is not yet connected to the separately tested
 authenticated QUIC boundary; do not expose it to a LAN or the Internet. The secure boundary tests
 cover TLS certificate rejection, application-credential rejection, admission timeout, nonce
 mismatch, and datagram bounds. A separate offline OIDC verifier now validates pre-provisioned JWKS,

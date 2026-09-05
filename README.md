@@ -224,15 +224,17 @@ seconds remaining, then maps the earliest expiry to a monotonic shutdown deadlin
 trust file is opened with kernel `O_NOFOLLOW` protection before the opened descriptor is validated,
 closing final-component link-swap races. An optional
 bounded file watcher atomically validates replacement certificate/key pairs and changes only future
-QUIC handshakes; existing sessions are not disrupted. The secure
+QUIC handshakes; existing sessions are not disrupted. It distinguishes an unchanged valid check from
+a newly installed public certificate chain without hashing or logging private-key material. The secure
 boundary tests
 cover TLS certificate rejection, application-credential rejection, admission timeout, nonce
 mismatch, datagram bounds, invalid credentials, and per-session rate limiting. A separate offline
-OIDC verifier validates pre-provisioned JWKS. Eight external-process tests additionally prove valid
+OIDC verifier validates pre-provisioned JWKS. Nine external-process tests additionally prove valid
 OIDC command admission, mandatory trusted discovery before readiness, atomic replacement of a wrong
 bootstrap key, issuer-mismatch refusal, invalid-token rejection without simulation work, remote-bind
 refusal, expired-certificate refusal, Unix private-key permission refusal, and live certificate-file
-rotation without dropping an established session. Automated certificate issuance, reliable
+rotation without dropping an established session, and observable unchanged-certificate checks.
+Automated certificate issuance, reliable
 control/snapshot streams, and remote deployment policy are still required. The current executable
 coverage and every remaining promotion proof are explicit in
 [`docs/remote-exposure-gate.md`](docs/remote-exposure-gate.md).

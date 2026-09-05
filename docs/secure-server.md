@@ -56,8 +56,11 @@ When `tls_reload` is configured, an off-tick worker rereads the same fixed certi
 paths. It repeats type, permission, size, chain-lifetime, cardinality, and key-pair validation before
 installing the complete replacement for future QUIC handshakes. A partial or incoherent external
 file update leaves the previous endpoint configuration and monotonic deadline in force. Existing
-connections retain their negotiated identity and are not interrupted. The worker records non-secret
-attempt/success/failure counters; repeated failure cannot extend the old certificate deadline. Its
+connections retain their negotiated identity and are not interrupted. A SHA-256 fingerprint is
+computed incrementally from the public DER chain only; private-key bytes are never hashed or logged.
+An unchanged validated chain retains the exact previous deadline and does not update the endpoint.
+The worker records non-secret attempt/success/failure plus installed/unchanged counters, so a stalled
+external provisioner is observable; repeated failure cannot extend the old certificate deadline. Its
 wall-clock input is floored by elapsed monotonic time from startup, so rereading an unchanged file
 after a system-clock rollback cannot manufacture extra validity. An external ACME or internal-PKI
 provisioner must still renew and atomically replace the files.

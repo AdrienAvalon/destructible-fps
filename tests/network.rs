@@ -1330,6 +1330,7 @@ fn four_trace_replay_clients_converge_with_adaptive_fair_repair() {
             .all(|endpoint| endpoint.applied >= 2 && endpoint.inbox.expected_sequence() >= 3),
         "four traced clients did not converge"
     );
+    settle_traced_endpoints(&mut endpoints, &mut child);
     let mut expected = AuthoritativeServer::new(demo_world());
     for command in commands {
         expected
@@ -1337,6 +1338,24 @@ fn four_trace_replay_clients_converge_with_adaptive_fair_repair() {
             .expect("replay traced authoritative command");
     }
     assert_four_trace_results(&endpoints, expected.world().fingerprint());
+}
+
+fn settle_traced_endpoints(endpoints: &mut [TracedEndpoint], child: &mut ChildGuard) {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < deadline {
+        assert!(
+            child
+                .0
+                .try_wait()
+                .expect("query settling trace server")
+                .is_none(),
+            "trace server exited before four-client egress settled"
+        );
+        for endpoint in &mut *endpoints {
+            endpoint.proxy.pump().expect("settle traced client");
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn assert_four_trace_results(endpoints: &[TracedEndpoint], expected_world: u128) {

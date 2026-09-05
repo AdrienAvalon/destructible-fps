@@ -10,6 +10,7 @@ use quinn::{
     ServerConfig,
     rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
 };
+use ring::digest::{Context, SHA256};
 use serde::Deserialize;
 use std::{
     fs::{self, File, Metadata},
@@ -87,7 +88,7 @@ pub struct SecureAuthorityLaunchConfig {
     verifier: Arc<ExpiringOidcVerifier>,
     oidc_refresh: Option<OidcRefreshController>,
     tls_refresh: Option<TlsIdentityRefreshController>,
-    certificate_expiration_deadline: Arc<RwLock<Instant>>,
+    tls_identity_state: Arc<RwLock<TlsIdentityState>>,
     max_ticks: Option<NonZeroU64>,
     stop_after_commands: Option<std::num::NonZeroUsize>,
 }
@@ -206,13 +207,14 @@ impl SecureAuthorityLaunchConfig {
                     .as_secs()
                     .saturating_add(MIN_TLS_CERTIFICATE_REMAINING_SECONDS)
             });
-        let (server_config, certificate_expiration_deadline) = load_tls_identity(
-            &raw.certificate_chain_file,
-            &raw.private_key_file,
-            now,
-            monotonic_now,
-            minimum_certificate_remaining,
-        )?;
+        let (server_config, certificate_expiration_deadline, certificate_fingerprint) =
+            load_tls_identity(
+                &raw.certificate_chain_file,
+                &raw.private_key_file,
+                now,
+                monotonic_now,
+                minimum_certificate_remaining,
+            )?;
         let jwks = read_bounded_file(
             &raw.oidc_jwks_file,
             "OIDC JWKS",
@@ -220,13 +222,15 @@ impl SecureAuthorityLaunchConfig {
             FilePermissionPolicy::Integrity,
         )?;
 
-        let certificate_expiration_deadline =
-            Arc::new(RwLock::new(certificate_expiration_deadline));
+        let tls_identity_state = Arc::new(RwLock::new(TlsIdentityState {
+            expiration_deadline: certificate_expiration_deadline,
+            certificate_fingerprint,
+        }));
         let tls_refresh = tls_reload_interval.map(|interval| TlsIdentityRefreshController {
             certificate_chain_file: raw.certificate_chain_file.clone(),
             private_key_file: raw.private_key_file.clone(),
             interval,
-            expiration_deadline: Arc::clone(&certificate_expiration_deadline),
+            identity_state: Arc::clone(&tls_identity_state),
             wall_clock_anchor: now,
             monotonic_clock_anchor: monotonic_now,
         });
@@ -271,7 +275,7 @@ impl SecureAuthorityLaunchConfig {
             verifier,
             oidc_refresh,
             tls_refresh,
-            certificate_expiration_deadline,
+            tls_identity_state,
             max_ticks: raw.max_ticks,
             stop_after_commands: raw.stop_after_commands,
         })
@@ -320,10 +324,10 @@ impl SecureAuthorityLaunchConfig {
 
     #[must_use]
     pub fn certificate_expiration_deadline(&self) -> Option<Instant> {
-        self.certificate_expiration_deadline
+        self.tls_identity_state
             .read()
             .ok()
-            .map(|deadline| *deadline)
+            .map(|state| state.expiration_deadline)
     }
 
     #[must_use]
@@ -427,9 +431,21 @@ pub struct TlsIdentityRefreshController {
     certificate_chain_file: PathBuf,
     private_key_file: PathBuf,
     interval: Duration,
-    expiration_deadline: Arc<RwLock<Instant>>,
+    identity_state: Arc<RwLock<TlsIdentityState>>,
     wall_clock_anchor: u64,
     monotonic_clock_anchor: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TlsIdentityRefreshOutcome {
+    Unchanged,
+    Installed,
+}
+
+#[derive(Clone, Copy)]
+struct TlsIdentityState {
+    expiration_deadline: Instant,
+    certificate_fingerprint: [u8; 32],
 }
 
 impl TlsIdentityRefreshController {
@@ -440,10 +456,10 @@ impl TlsIdentityRefreshController {
 
     #[must_use]
     pub fn expiration_deadline(&self) -> Option<Instant> {
-        self.expiration_deadline
+        self.identity_state
             .read()
             .ok()
-            .map(|deadline| *deadline)
+            .map(|state| state.expiration_deadline)
     }
 
     /// Validates the complete current file pair and installs it for future QUIC handshakes.
@@ -455,7 +471,7 @@ impl TlsIdentityRefreshController {
     pub fn refresh_once(
         &self,
         updater: &SecureTlsConfigUpdater,
-    ) -> Result<(), SecureAuthorityLaunchError> {
+    ) -> Result<TlsIdentityRefreshOutcome, SecureAuthorityLaunchError> {
         let observed_now =
             unix_seconds().map_err(|_| SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
         let monotonic_now = Instant::now();
@@ -469,7 +485,7 @@ impl TlsIdentityRefreshController {
             .interval
             .as_secs()
             .saturating_add(MIN_TLS_CERTIFICATE_REMAINING_SECONDS);
-        let (server_config, expiration_deadline) = load_tls_identity(
+        let (server_config, expiration_deadline, certificate_fingerprint) = load_tls_identity(
             &self.certificate_chain_file,
             &self.private_key_file,
             now,
@@ -477,13 +493,19 @@ impl TlsIdentityRefreshController {
             minimum_remaining,
         )?;
         let mut current = self
-            .expiration_deadline
+            .identity_state
             .write()
             .map_err(|_| SecureAuthorityLaunchError::TlsRefreshStateUnavailable)?;
+        if current.certificate_fingerprint == certificate_fingerprint {
+            return Ok(TlsIdentityRefreshOutcome::Unchanged);
+        }
         updater.replace_for_new_connections(server_config);
-        *current = expiration_deadline;
+        *current = TlsIdentityState {
+            expiration_deadline,
+            certificate_fingerprint,
+        };
         drop(current);
-        Ok(())
+        Ok(TlsIdentityRefreshOutcome::Installed)
     }
 }
 
@@ -639,7 +661,7 @@ fn load_tls_identity(
     now: u64,
     monotonic_now: Instant,
     minimum_remaining: u64,
-) -> Result<(ServerConfig, Instant), SecureAuthorityLaunchError> {
+) -> Result<(ServerConfig, Instant, [u8; 32]), SecureAuthorityLaunchError> {
     let certificate_bytes = read_bounded_file(
         certificate_chain_file,
         "TLS certificate chain",
@@ -653,6 +675,7 @@ fn load_tls_identity(
         FilePermissionPolicy::Private,
     )?);
     let certificates = parse_certificates(&certificate_bytes)?;
+    let certificate_fingerprint = certificate_chain_fingerprint(&certificates);
     let certificate_remaining_validity =
         validate_certificate_lifetimes(&certificates, now, minimum_remaining)?;
     let expiration_deadline = monotonic_now
@@ -661,7 +684,24 @@ fn load_tls_identity(
     let private_key = parse_private_key(&private_key_bytes)?;
     let server_config = secure_server_config(certificates, private_key)
         .map_err(SecureAuthorityLaunchError::Transport)?;
-    Ok((server_config, expiration_deadline))
+    Ok((server_config, expiration_deadline, certificate_fingerprint))
+}
+
+fn certificate_chain_fingerprint(certificates: &[CertificateDer<'_>]) -> [u8; 32] {
+    let mut canonical_der = Context::new(&SHA256);
+    for certificate in certificates {
+        canonical_der.update(
+            &u64::try_from(certificate.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        canonical_der.update(certificate.as_ref());
+    }
+    canonical_der
+        .finish()
+        .as_ref()
+        .try_into()
+        .expect("SHA-256 has a fixed 32-byte output")
 }
 
 fn validate_certificate_lifetimes(
@@ -846,6 +886,14 @@ mod tests {
         let server = launch.start(World::default()).expect("TLS reload server");
         let updater = server.tls_config_updater();
 
+        assert_eq!(
+            controller
+                .refresh_once(&updater)
+                .expect("unchanged TLS identity check"),
+            TlsIdentityRefreshOutcome::Unchanged
+        );
+        assert_eq!(controller.expiration_deadline(), Some(initial_deadline));
+
         let replacement_key = rcgen::KeyPair::generate().expect("replacement TLS key");
         fs::write(&fixture.key, replacement_key.serialize_pem()).expect("mismatched TLS key");
         secure_private_key(&fixture.key);
@@ -859,9 +907,12 @@ mod tests {
             .self_signed(&replacement_key)
             .expect("replacement TLS certificate");
         fs::write(&fixture.certificate, replacement.pem()).expect("replacement TLS certificate");
-        controller
-            .refresh_once(&updater)
-            .expect("valid TLS identity reload");
+        assert_eq!(
+            controller
+                .refresh_once(&updater)
+                .expect("valid TLS identity reload"),
+            TlsIdentityRefreshOutcome::Installed
+        );
         assert_ne!(controller.expiration_deadline(), Some(initial_deadline));
         server.shutdown().await;
     }

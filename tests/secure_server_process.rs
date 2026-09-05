@@ -301,8 +301,39 @@ async fn standalone_process_reloads_tls_files_without_dropping_the_active_sessio
         "{}",
         output.stdout
     );
+    assert!(
+        output.stdout.contains("tls_reload_installed=1"),
+        "{}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("tls_reload_unchanged=0"),
+        "{}",
+        output.stdout
+    );
     old_client.wait_idle().await;
     new_client.wait_idle().await;
+}
+
+#[test]
+fn standalone_process_distinguishes_an_unchanged_tls_check_from_a_rotation() {
+    let fixture = Fixture::new(420, None);
+    fixture.configure_tls_reload(5);
+
+    let output = process_command(&fixture.config)
+        .output()
+        .expect("unchanged TLS process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("tls_reload_attempts=1"), "{stdout}");
+    assert!(stdout.contains("tls_reload_successes=1"), "{stdout}");
+    assert!(stdout.contains("tls_reload_failures=0"), "{stdout}");
+    assert!(stdout.contains("tls_reload_installed=0"), "{stdout}");
+    assert!(stdout.contains("tls_reload_unchanged=1"), "{stdout}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

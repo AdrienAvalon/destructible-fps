@@ -116,6 +116,7 @@ pub use server_config::{
     MIN_STATIC_JWKS_VALIDITY_SECONDS, MIN_TLS_CERTIFICATE_REMAINING_SECONDS,
     MIN_TLS_RELOAD_INTERVAL_SECONDS, OidcRefreshController, SecureAuthorityLaunchConfig,
     SecureAuthorityLaunchError, SecureNetworkExposure, TlsIdentityRefreshController,
+    TlsIdentityRefreshOutcome,
 };
 pub use session::{BuildResult, DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
 pub use snapshot::{

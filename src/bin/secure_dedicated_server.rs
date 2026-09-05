@@ -1,7 +1,8 @@
 use destructible_fps::{
     OidcRefreshController, SERVER_PHYSICS_HZ, SecureAuthorityLaunchConfig,
     SecureAuthorityLaunchError, SecureDedicatedServer, SecureNetworkExposure,
-    SecureNetworkTickReport, SecureTlsConfigUpdater, TlsIdentityRefreshController, demo_world,
+    SecureNetworkTickReport, SecureTlsConfigUpdater, TlsIdentityRefreshController,
+    TlsIdentityRefreshOutcome, demo_world,
 };
 use std::{
     error::Error,
@@ -39,6 +40,8 @@ struct RefreshCounters {
     attempts: AtomicU64,
     successes: AtomicU64,
     failures: AtomicU64,
+    installed: AtomicU64,
+    unchanged: AtomicU64,
 }
 
 struct RefreshTasks {
@@ -127,7 +130,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     refresh_tasks.stop().await;
     server.shutdown().await;
     println!(
-        "STOP ticks={} commands={} admitted={} disconnected={} admission_failures={} rate_limited={} active={} inbound={} outbound={} oidc_refresh_attempts={} oidc_refresh_successes={} oidc_refresh_failures={} tls_reload_attempts={} tls_reload_successes={} tls_reload_failures={}",
+        "STOP ticks={} commands={} admitted={} disconnected={} admission_failures={} rate_limited={} active={} inbound={} outbound={} oidc_refresh_attempts={} oidc_refresh_successes={} oidc_refresh_failures={} tls_reload_attempts={} tls_reload_successes={} tls_reload_failures={} tls_reload_installed={} tls_reload_unchanged={}",
         totals.ticks,
         totals.commands,
         totals.admitted,
@@ -143,6 +146,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tls_counters.attempts.load(Ordering::Relaxed),
         tls_counters.successes.load(Ordering::Relaxed),
         tls_counters.failures.load(Ordering::Relaxed),
+        tls_counters.installed.load(Ordering::Relaxed),
+        tls_counters.unchanged.load(Ordering::Relaxed),
     );
     terminal_error.map_or(Ok(()), Err)
 }
@@ -227,11 +232,22 @@ fn spawn_tls_refresh(
         loop {
             ticker.tick().await;
             counters.attempts.fetch_add(1, Ordering::Relaxed);
-            if controller.refresh_once(&updater).is_ok() {
-                counters.successes.fetch_add(1, Ordering::Relaxed);
-            } else {
-                let failures = counters.failures.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!("TLS_RELOAD_FAILED failures={failures}");
+            match controller.refresh_once(&updater) {
+                Ok(outcome) => {
+                    counters.successes.fetch_add(1, Ordering::Relaxed);
+                    match outcome {
+                        TlsIdentityRefreshOutcome::Installed => {
+                            counters.installed.fetch_add(1, Ordering::Relaxed);
+                        }
+                        TlsIdentityRefreshOutcome::Unchanged => {
+                            counters.unchanged.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                Err(_error) => {
+                    let failures = counters.failures.fetch_add(1, Ordering::Relaxed) + 1;
+                    eprintln!("TLS_RELOAD_FAILED failures={failures}");
+                }
             }
         }
     })

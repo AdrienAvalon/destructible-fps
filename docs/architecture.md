@@ -280,6 +280,10 @@ session is active, waits for the bounded worker, then connects and applies a com
 certificate. The pre-rotation connection remains established and the final lifecycle counters prove
 one attempted and successful reload with no failure.
 
+A ninth process case leaves the valid chain unchanged across one watcher interval. The public-chain
+fingerprint matches, the endpoint and exact monotonic deadline remain untouched, and distinct
+installed/unchanged counters expose whether an external provisioner actually rotated the identity.
+
 ## Planned engine layers
 
 ### First playable slice — delivered

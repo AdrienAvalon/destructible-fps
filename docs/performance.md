@@ -1122,3 +1122,37 @@ The remaining blockers are automated certificate issuance with expiry-outage pro
 production-shaped OIDC provisioning, handle-level Linux/Windows service ACL checks, concurrent
 hostile external load, and a reviewed exact-interface deployment policy. This increment therefore
 improves the future LAN gate without opening a socket beyond loopback.
+
+## 2026-09-05 — observable TLS renewal progress
+
+Source state: parent `5636d3f` plus the TLS outcome and asynchronous-test stabilization increment.
+The reload controller fingerprints only the bounded public DER chain with incremental SHA-256. A
+validated unchanged chain now returns `Unchanged`, leaves both the endpoint and exact monotonic
+deadline untouched, and increments a dedicated process counter. A coherent new chain returns
+`Installed`; an invalid pair still changes no state. The private key is parsed only for rustls
+compatibility validation and is neither fingerprinted nor logged.
+
+The new standalone-process case observed exactly one unchanged check and zero installations. The
+live-rotation process case observed exactly one installation and zero unchanged checks while its old
+session remained connected. During promotion, two unrelated asynchronous tests exposed premature
+measurement barriers. The secure-authority driver now yields after queuing a player-state broadcast,
+and the four-client trace test drains server egress for 250 ms after replica convergence before
+asserting byte fairness. Each corrected case passed ten debug and ten release repetitions before the
+complete suites.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 153 passed debug; 153 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 51 passed debug; 51 passed release |
+| Destruction p99, 500 events | 0.385 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.280 ms |
+| Physics p99, 1,024 bodies | 1.213 ms |
+| Snapshot encode + decode + install p99 | 9.291 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.234 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+This makes stalled certificate automation distinguishable from effective renewal, but it does not
+pretend to issue certificates. The authority remains loopback-only until the external provisioner,
+expiry-outage rehearsal, platform ACLs, hostile-load matrix, and reviewed private-network policy are
+all proven.

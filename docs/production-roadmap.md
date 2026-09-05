@@ -167,10 +167,11 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   bounded correction smoothing are delivered for loopback;
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
   Unix permission checks, complete-chain X.509 lifetime preflight, monotonic TLS/static-JWKS expiry,
-  signal-aware shutdown, and an eight-case external-process matrix including trusted discovery and
-  hostile issuer mismatch; bounded certificate/key hot reload changes future handshakes without
-  disrupting current sessions (delivered for loopback; automated issuance, platform ACLs, production
-  issuer/root provisioning, and remote policy remain);
+  a reserved 60-second TLS shutdown margin, signal-aware shutdown, and a ten-case external-process
+  matrix including trusted discovery, hostile issuer mismatch, and real reload-outage shutdown;
+  bounded certificate/key hot reload changes future handshakes without disrupting current sessions
+  (delivered for loopback; automated issuance, platform ACLs, production issuer/root provisioning,
+  and remote policy remain);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - broader entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;

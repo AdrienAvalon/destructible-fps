@@ -223,7 +223,7 @@ impl SecureAuthorityLaunchConfig {
                     .as_secs()
                     .saturating_add(MIN_TLS_CERTIFICATE_REMAINING_SECONDS)
             });
-        let (server_config, certificate_expiration_deadline, certificate_fingerprint) =
+        let (server_config, certificate_safety_deadline, certificate_fingerprint) =
             load_tls_identity(
                 &raw.certificate_chain_file,
                 &raw.private_key_file,
@@ -239,7 +239,7 @@ impl SecureAuthorityLaunchConfig {
         )?;
 
         let tls_identity_state = Arc::new(RwLock::new(TlsIdentityState {
-            expiration_deadline: certificate_expiration_deadline,
+            safety_deadline: certificate_safety_deadline,
             certificate_fingerprint,
         }));
         let tls_refresh = tls_reload_interval.map(|interval| TlsIdentityRefreshController {
@@ -339,11 +339,11 @@ impl SecureAuthorityLaunchConfig {
     }
 
     #[must_use]
-    pub fn certificate_expiration_deadline(&self) -> Option<Instant> {
+    pub fn certificate_safety_deadline(&self) -> Option<Instant> {
         self.tls_identity_state
             .read()
             .ok()
-            .map(|state| state.expiration_deadline)
+            .map(|state| state.safety_deadline)
     }
 
     #[must_use]
@@ -460,7 +460,7 @@ pub enum TlsIdentityRefreshOutcome {
 
 #[derive(Clone, Copy)]
 struct TlsIdentityState {
-    expiration_deadline: Instant,
+    safety_deadline: Instant,
     certificate_fingerprint: [u8; 32],
 }
 
@@ -471,11 +471,11 @@ impl TlsIdentityRefreshController {
     }
 
     #[must_use]
-    pub fn expiration_deadline(&self) -> Option<Instant> {
+    pub fn safety_deadline(&self) -> Option<Instant> {
         self.identity_state
             .read()
             .ok()
-            .map(|state| state.expiration_deadline)
+            .map(|state| state.safety_deadline)
     }
 
     /// Validates the complete current file pair and installs it for future QUIC handshakes.
@@ -501,7 +501,7 @@ impl TlsIdentityRefreshController {
             .interval
             .as_secs()
             .saturating_add(MIN_TLS_CERTIFICATE_REMAINING_SECONDS);
-        let (server_config, expiration_deadline, certificate_fingerprint) = load_tls_identity(
+        let (server_config, safety_deadline, certificate_fingerprint) = load_tls_identity(
             &self.certificate_chain_file,
             &self.private_key_file,
             now,
@@ -517,7 +517,7 @@ impl TlsIdentityRefreshController {
         }
         updater.replace_for_new_connections(server_config);
         *current = TlsIdentityState {
-            expiration_deadline,
+            safety_deadline,
             certificate_fingerprint,
         };
         drop(current);
@@ -764,13 +764,24 @@ fn load_tls_identity(
     let certificate_fingerprint = certificate_chain_fingerprint(&certificates);
     let certificate_remaining_validity =
         validate_certificate_lifetimes(&certificates, now, minimum_remaining)?;
-    let expiration_deadline = monotonic_now
-        .checked_add(Duration::from_secs(certificate_remaining_validity))
-        .ok_or(SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
+    let safety_deadline =
+        certificate_safety_deadline(monotonic_now, certificate_remaining_validity)?;
     let private_key = parse_private_key(&private_key_bytes)?;
     let server_config = secure_server_config(certificates, private_key)
         .map_err(SecureAuthorityLaunchError::Transport)?;
-    Ok((server_config, expiration_deadline, certificate_fingerprint))
+    Ok((server_config, safety_deadline, certificate_fingerprint))
+}
+
+fn certificate_safety_deadline(
+    monotonic_now: Instant,
+    certificate_remaining_validity: u64,
+) -> Result<Instant, SecureAuthorityLaunchError> {
+    let trusted_remaining = certificate_remaining_validity
+        .checked_sub(MIN_TLS_CERTIFICATE_REMAINING_SECONDS)
+        .ok_or(SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
+    monotonic_now
+        .checked_add(Duration::from_secs(trusted_remaining))
+        .ok_or(SecureAuthorityLaunchError::InvalidCertificateLifetime)
 }
 
 fn certificate_chain_fingerprint(certificates: &[CertificateDer<'_>]) -> [u8; 32] {
@@ -810,7 +821,7 @@ fn validate_certificate_lifetimes(
         }
         let remaining = u64::try_from(validity.not_after.timestamp().saturating_sub(now))
             .map_err(|_| SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
-        if remaining < required_remaining {
+        if remaining <= required_remaining {
             return Err(SecureAuthorityLaunchError::InvalidCertificateLifetime);
         }
         minimum_remaining = minimum_remaining.min(remaining);
@@ -928,7 +939,7 @@ mod tests {
             .tls_refresh_controller()
             .expect("configured TLS refresh controller");
         assert_eq!(refresh.refresh_interval(), Duration::from_secs(5));
-        assert!(refresh.expiration_deadline().is_some());
+        assert!(refresh.safety_deadline().is_some());
     }
 
     #[test]
@@ -967,7 +978,7 @@ mod tests {
             .tls_refresh_controller()
             .expect("TLS refresh controller");
         let initial_deadline = controller
-            .expiration_deadline()
+            .safety_deadline()
             .expect("initial certificate deadline");
         let server = launch.start(World::default()).expect("TLS reload server");
         let updater = server.tls_config_updater();
@@ -978,13 +989,13 @@ mod tests {
                 .expect("unchanged TLS identity check"),
             TlsIdentityRefreshOutcome::Unchanged
         );
-        assert_eq!(controller.expiration_deadline(), Some(initial_deadline));
+        assert_eq!(controller.safety_deadline(), Some(initial_deadline));
 
         let replacement_key = rcgen::KeyPair::generate().expect("replacement TLS key");
         fs::write(&fixture.key, replacement_key.serialize_pem()).expect("mismatched TLS key");
         secure_private_key(&fixture.key);
         assert!(controller.refresh_once(&updater).is_err());
-        assert_eq!(controller.expiration_deadline(), Some(initial_deadline));
+        assert_eq!(controller.safety_deadline(), Some(initial_deadline));
 
         let mut parameters = rcgen::CertificateParams::new(vec!["localhost".into()])
             .expect("replacement TLS parameters");
@@ -999,7 +1010,7 @@ mod tests {
                 .expect("valid TLS identity reload"),
             TlsIdentityRefreshOutcome::Installed
         );
-        assert_ne!(controller.expiration_deadline(), Some(initial_deadline));
+        assert_ne!(controller.safety_deadline(), Some(initial_deadline));
         server.shutdown().await;
     }
 
@@ -1255,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn tls_reload_requires_one_interval_plus_the_expiry_margin() {
+    fn tls_reload_requires_a_complete_interval_beyond_the_expiry_margin() {
         let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()])
             .expect("reload margin identity");
         let certificate = identity.cert.der().clone();
@@ -1268,17 +1279,31 @@ mod tests {
             .checked_sub(required)
             .expect("reload margin test clock");
 
-        assert_eq!(
-            validate_certificate_lifetimes(std::slice::from_ref(&certificate), exact_now, required)
-                .expect("exact reload margin"),
-            required
-        );
         assert!(matches!(
+            validate_certificate_lifetimes(std::slice::from_ref(&certificate), exact_now, required,),
+            Err(SecureAuthorityLaunchError::InvalidCertificateLifetime)
+        ));
+        assert_eq!(
             validate_certificate_lifetimes(
                 std::slice::from_ref(&certificate),
-                exact_now + 1,
+                exact_now.checked_sub(1).expect("one extra second"),
                 required,
-            ),
+            )
+            .expect("complete reload interval beyond margin"),
+            required + 1
+        );
+    }
+
+    #[test]
+    fn certificate_safety_deadline_reserves_the_full_expiry_margin() {
+        let now = Instant::now();
+        assert_eq!(
+            certificate_safety_deadline(now, MIN_TLS_CERTIFICATE_REMAINING_SECONDS + 12)
+                .expect("bounded certificate safety deadline"),
+            now + Duration::from_secs(12)
+        );
+        assert!(matches!(
+            certificate_safety_deadline(now, MIN_TLS_CERTIFICATE_REMAINING_SECONDS - 1),
             Err(SecureAuthorityLaunchError::InvalidCertificateLifetime)
         ));
     }

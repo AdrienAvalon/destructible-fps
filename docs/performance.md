@@ -1236,3 +1236,35 @@ exposure.
 
 Graphify was refreshed after the new test path and reported 1,982 nodes, 5,601 post-build edges,
 zero unverified code nodes, and zero modified, added, deleted, or excluded freshness entries.
+
+## 2026-09-05 — fail-closed TLS renewal outage
+
+Source state: parent `78e9dae` plus the certificate safety-deadline increment. The final 60 seconds
+of the earliest certificate's X.509 lifetime are no longer served. Startup requires strictly more
+than that margin, or more than one complete reload interval plus the margin when the watcher is
+active. Both initial load and coherent rotation convert the remaining wall-clock validity into a
+monotonic safety deadline. Unchanged or invalid reloads retain the exact existing deadline.
+
+A real standalone process starts with a 72-second certificate and five-second reload interval. Only
+after its `READY` line, the test replaces the private-key input with invalid provisioner output.
+Every watcher attempt fails; no identity is installed or classified as unchanged. The process emits
+its bounded final counters, closes the authority, and exits unsuccessfully at the safety deadline,
+before the certificate enters its reserved final minute. The exact case passed three consecutive
+debug and three consecutive release runs without a production clock override or test-only server
+configuration.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 156 passed debug; 156 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 53 passed debug; 53 passed release |
+| Destruction p99, 500 events | 0.358 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.293 ms |
+| Physics p99, 1,024 bodies | 1.170 ms |
+| Snapshot encode + decode + install p99 | 9.427 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.247 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+Graphify reported 1,989 nodes, 5,623 post-build edges, zero unverified code nodes, and a fully fresh
+index. This proves the TLS outage half of the trust-expiry gate. Automated CA issuance and the
+equivalent OIDC stale-key process outage remain separate blockers to private-network exposure.

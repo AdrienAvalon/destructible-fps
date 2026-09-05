@@ -315,6 +315,48 @@ async fn standalone_process_reloads_tls_files_without_dropping_the_active_sessio
     new_client.wait_idle().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_process_stops_at_the_tls_safety_deadline_during_a_reload_outage() {
+    let fixture = Fixture::new(10_000, None);
+    fixture.replace_with_short_lived_tls_identity(Duration::from_secs(72));
+    fixture.configure_tls_reload(5);
+    let mut process = RunningServer::spawn(&fixture.config);
+    fs::write(&fixture.key, b"renewal provisioner unavailable")
+        .expect("invalidate process renewal key");
+    secure_private_key(&fixture.key);
+
+    let started = Instant::now();
+    let output = process.finish_within(Duration::from_secs(15)).await;
+    let elapsed = started.elapsed();
+    assert!(
+        !output.status.success(),
+        "process unexpectedly survived outage"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(5),
+        "stopped before one reload"
+    );
+    assert!(
+        output
+            .stderr
+            .contains("TLS certificate renewal safety deadline expired"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("TLS_RELOAD_FAILED failures=1"),
+        "{}",
+        output.stderr
+    );
+    let attempts = stop_counter(&output.stdout, "tls_reload_attempts");
+    let failures = stop_counter(&output.stdout, "tls_reload_failures");
+    assert!(attempts >= 1, "{}", output.stdout);
+    assert_eq!(failures, attempts, "{}", output.stdout);
+    assert_eq!(stop_counter(&output.stdout, "tls_reload_successes"), 0);
+    assert_eq!(stop_counter(&output.stdout, "tls_reload_installed"), 0);
+    assert_eq!(stop_counter(&output.stdout, "tls_reload_unchanged"), 0);
+}
+
 #[test]
 fn standalone_process_distinguishes_an_unchanged_tls_check_from_a_rotation() {
     let fixture = Fixture::new(420, None);
@@ -469,7 +511,11 @@ impl RunningServer {
     }
 
     async fn finish(&mut self) -> ProcessOutput {
-        let deadline = Instant::now() + Duration::from_secs(6);
+        self.finish_within(Duration::from_secs(6)).await
+    }
+
+    async fn finish_within(&mut self, maximum_duration: Duration) -> ProcessOutput {
+        let deadline = Instant::now() + maximum_duration;
         let status = loop {
             if let Some(status) = self.child.try_wait().expect("poll process") {
                 break status;
@@ -592,6 +638,28 @@ impl Fixture {
             .expect("expired process certificate");
         fs::write(&self.certificate_path, certificate.pem()).expect("replace process certificate");
         fs::write(&self.key, signing_key.serialize_pem()).expect("replace process key");
+        secure_private_key(&self.key);
+    }
+
+    fn replace_with_short_lived_tls_identity(&self, remaining: Duration) {
+        let signing_key = rcgen::KeyPair::generate().expect("short-lived process signing key");
+        let mut parameters =
+            rcgen::CertificateParams::new(vec!["localhost".into()]).expect("certificate params");
+        let now = SystemTime::now();
+        parameters.not_before = now
+            .checked_sub(Duration::from_mins(1))
+            .expect("short-lived not-before")
+            .into();
+        parameters.not_after = now
+            .checked_add(remaining)
+            .expect("short-lived not-after")
+            .into();
+        let certificate = parameters
+            .self_signed(&signing_key)
+            .expect("short-lived process certificate");
+        fs::write(&self.certificate_path, certificate.pem())
+            .expect("replace short-lived process certificate");
+        fs::write(&self.key, signing_key.serialize_pem()).expect("replace short-lived process key");
         secure_private_key(&self.key);
     }
 
@@ -747,6 +815,19 @@ fn unix_seconds() -> u64 {
 
 fn path_string(path: &Path) -> &str {
     path.to_str().expect("UTF-8 process fixture path")
+}
+
+fn stop_counter(stdout: &str, name: &str) -> u64 {
+    let prefix = format!("{name}=");
+    stdout
+        .lines()
+        .find(|line| line.starts_with("STOP "))
+        .and_then(|line| {
+            line.split_ascii_whitespace()
+                .find_map(|field| field.strip_prefix(&prefix))
+        })
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("missing {name} in process output: {stdout}"))
 }
 
 fn process_command(config: &Path) -> Command {

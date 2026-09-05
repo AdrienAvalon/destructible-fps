@@ -65,9 +65,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let initial_jwks_expiration_deadline = launch
         .jwks_expiration_deadline()
         .ok_or("OIDC expiration state unavailable")?;
-    let initial_certificate_expiration_deadline = launch
-        .certificate_expiration_deadline()
-        .ok_or("TLS expiration state unavailable")?;
+    let initial_certificate_safety_deadline = launch
+        .certificate_safety_deadline()
+        .ok_or("TLS safety state unavailable")?;
     let exposure = launch.exposure();
     let mut server = launch.start(demo_world())?;
     let refresh_tasks = spawn_refresh_tasks(
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     oidc_refresh.as_ref(),
                     tls_refresh.as_ref(),
                     initial_jwks_expiration_deadline,
-                    initial_certificate_expiration_deadline,
+                    initial_certificate_safety_deadline,
                 ) {
                     terminal_error = Some(error.into());
                     break;
@@ -257,18 +257,18 @@ fn trust_deadline_error(
     oidc_refresh: Option<&OidcRefreshController>,
     tls_refresh: Option<&TlsIdentityRefreshController>,
     initial_jwks_deadline: std::time::Instant,
-    initial_certificate_deadline: std::time::Instant,
+    initial_certificate_safety_deadline: std::time::Instant,
 ) -> Option<&'static str> {
     let now = std::time::Instant::now();
-    let certificate_deadline = tls_refresh.map_or(
-        Some(initial_certificate_deadline),
-        TlsIdentityRefreshController::expiration_deadline,
+    let certificate_safety_deadline = tls_refresh.map_or(
+        Some(initial_certificate_safety_deadline),
+        TlsIdentityRefreshController::safety_deadline,
     );
-    let Some(certificate_deadline) = certificate_deadline else {
-        return Some("TLS expiration state unavailable");
+    let Some(certificate_safety_deadline) = certificate_safety_deadline else {
+        return Some("TLS safety state unavailable");
     };
-    if now >= certificate_deadline {
-        return Some("TLS certificate validity expired");
+    if now >= certificate_safety_deadline {
+        return Some("TLS certificate renewal safety deadline expired");
     }
     let jwks_deadline = oidc_refresh.map_or(
         Some(initial_jwks_deadline),

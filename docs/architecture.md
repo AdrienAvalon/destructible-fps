@@ -244,8 +244,10 @@ The process configuration is bounded to 16 KiB and rejects unknown fields, links
 paths, non-regular files, certificates over 256 KiB or eight entries, private keys over 64 KiB, and
 JWKS over 64 KiB. It requires exactly one PEM private key, verifies key/certificate compatibility
 through rustls, and parses the complete X.509 chain before opening the endpoint. Every certificate
-must be currently valid with at least 60 seconds remaining; the earliest expiry becomes a monotonic
-process shutdown deadline. On Unix the standalone process refuses UID 0, the private key must belong
+must be currently valid with more than 60 seconds remaining. The final minute is reserved rather
+than served: the earliest expiry minus that margin becomes a monotonic process safety deadline. A
+reload policy also requires one complete watcher interval before that deadline. On Unix the
+standalone process refuses UID 0, the private key must belong
 to the service UID, and public trust inputs may belong only to root or that UID; their existing mode
 constraints remain mandatory. The immediate parent of each path must be an equally owned,
 non-writable, non-link directory. Credential content is never accepted through argv or printed.
@@ -284,6 +286,11 @@ one attempted and successful reload with no failure.
 A ninth process case leaves the valid chain unchanged across one watcher interval. The public-chain
 fingerprint matches, the endpoint and exact monotonic deadline remain untouched, and distinct
 installed/unchanged counters expose whether an external provisioner actually rotated the identity.
+
+A tenth process case starts from a deliberately short but admissible certificate, corrupts the
+private-key file only after readiness, observes repeated reload failures, and proves that the real
+server exits unsuccessfully at the monotonic safety deadline with no installed or unchanged reload.
+No production clock override or test-only configuration path is involved.
 
 ## Planned engine layers
 

@@ -69,6 +69,9 @@ winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", 
 x509-parser = { version = "=0.18.1", default-features = false }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs"] }
+
 [dev-dependencies]
 aws-lc-rs = "=1.17.3"
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }

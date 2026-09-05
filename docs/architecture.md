@@ -271,7 +271,8 @@ before readiness. Two additional process cases prove that trusted HTTPS discover
 intentionally wrong bootstrap key before accepting a real OIDC command, while mismatched metadata
 exits before readiness without disclosing the endpoint. Production issuer/root provisioning,
 automated certificate issuance, reliable snapshot/control streams, OS-specific secret ACL validation,
-and a non-loopback attack matrix remain required before remote exposure. Both
+and completion of the partially executable
+[`non-loopback attack matrix`](remote-exposure-gate.md) remain required before remote exposure. Both
 the direct runtime API and the validated file policy remain fail-closed to loopback.
 
 An eighth standalone process case replaces the certificate and key files while one authenticated

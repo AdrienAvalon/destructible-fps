@@ -265,7 +265,9 @@ are resolved, and launch/rollback ownership is documented.
 The next three bounded increments are:
 
 1. add automated certificate issuance, Windows service DACL checks, production OIDC issuer/root
-   provisioning, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
+   provisioning, and complete the partially executable
+   [`remote attack/failure matrix`](remote-exposure-gate.md) before enabling an explicit
+   non-loopback policy;
 2. extend the delivered oriented per-voxel dynamic contact and rotated vertical support with
    continuous multi-contact manifolds, full vertical impulse exchange, gyroscopic response, and
    deeper collision-island convergence;

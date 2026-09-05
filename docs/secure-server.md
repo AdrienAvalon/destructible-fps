@@ -101,4 +101,5 @@ credentials, remote endpoints, or principal identifiers. `Ctrl-C`, certificate/J
 
 Do not expose this milestone to a LAN or the Internet. Remote enablement still requires production
 issuer/root provisioning, automated certificate issuance, platform secret-ACL checks, external
-loss/abuse tests, and an explicit reviewed exposure policy.
+loss/abuse tests, and an explicit reviewed exposure policy. The executable cases, remaining proofs,
+and promotion rule are tracked in [`remote-exposure-gate.md`](remote-exposure-gate.md).

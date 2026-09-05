@@ -220,7 +220,9 @@ runtime now connects QUIC admissions and encrypted datagrams to the same authori
 fail-closed file configuration. It still rejects non-loopback binds pending trusted online key
 provisioning, automated certificate issuance, platform ACL checks, and the remote-exposure test gate.
 Startup parses every certificate in the bounded chain, requires its current validity and at least 60
-seconds remaining, then maps the earliest expiry to a monotonic shutdown deadline. An optional
+seconds remaining, then maps the earliest expiry to a monotonic shutdown deadline. On Unix every
+trust file is opened with kernel `O_NOFOLLOW` protection before the opened descriptor is validated,
+closing final-component link-swap races. An optional
 bounded file watcher atomically validates replacement certificate/key pairs and changes only future
 QUIC handshakes; existing sessions are not disrupted. The secure
 boundary tests
@@ -231,7 +233,9 @@ OIDC command admission, mandatory trusted discovery before readiness, atomic rep
 bootstrap key, issuer-mismatch refusal, invalid-token rejection without simulation work, remote-bind
 refusal, expired-certificate refusal, Unix private-key permission refusal, and live certificate-file
 rotation without dropping an established session. Automated certificate issuance, reliable
-control/snapshot streams, and remote deployment policy are still required.
+control/snapshot streams, and remote deployment policy are still required. The current executable
+coverage and every remaining promotion proof are explicit in
+[`docs/remote-exposure-gate.md`](docs/remote-exposure-gate.md).
 For local protocol development the legacy authority can be started directly:
 
 ```bash

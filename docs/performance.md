@@ -1089,3 +1089,36 @@ result was comfortably below the 12 ms server-work target. At this earlier solve
 excluded horizontal impulses, friction, restitution, rotation, interest filtering, serialization,
 socket I/O, and other gameplay systems; the newer protocol-v5 promotion near the top of this file
 supersedes the first three exclusions.
+
+## 2026-09-05 — remote-exposure gate rehearsal
+
+Source state: parent `1cc749e` plus the file-policy and test-stability increment documented here.
+The authority remains deliberately loopback-only. Its remote promotion criteria are now a named
+attack/failure matrix rather than an implicit checklist. IPv4 wildcard, private IPv4, IPv6 wildcard,
+and IPv4-mapped IPv6 configurations all fail before trust material is used. Enabling both OIDC
+discovery and TLS reload cannot implicitly grant a remote bind. On Unix, trust inputs are opened with
+kernel `O_NOFOLLOW` and `CLOEXEC` before the opened regular-file descriptor, size, and permissions are
+validated; this removes the final-component symbolic-link replacement window between path inspection
+and open.
+
+The first optimized full-suite run exposed a timing-only test flake: a player-state datagram could be
+queued to QUIC immediately before the test blocked its sole runtime thread waiting for receipt. The
+test driver now yields after the authoritative broadcast. The exact release case then passed ten
+consecutive repetitions, followed by the complete debug and release suites.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 153 passed debug; 153 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 50 passed debug; 50 passed release |
+| Destruction p99, 500 events | 0.373 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.268 ms |
+| Physics p99, 1,024 bodies | 1.180 ms |
+| Snapshot encode + decode + install p99 | 9.496 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.231 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+The remaining blockers are automated certificate issuance with expiry-outage proof, disposable
+production-shaped OIDC provisioning, handle-level Linux/Windows service ACL checks, concurrent
+hostile external load, and a reviewed exact-interface deployment policy. This increment therefore
+improves the future LAN gate without opening a socket beyond loopback.

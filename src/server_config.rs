@@ -507,8 +507,8 @@ fn read_bounded_file(
     if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
         return Err(SecureAuthorityLaunchError::InvalidFileType(purpose));
     }
-    let mut file =
-        File::open(path).map_err(|source| SecureAuthorityLaunchError::File { purpose, source })?;
+    let mut file = open_no_follow(path)
+        .map_err(|source| SecureAuthorityLaunchError::File { purpose, source })?;
     let metadata = file
         .metadata()
         .map_err(|source| SecureAuthorityLaunchError::File { purpose, source })?;
@@ -536,6 +536,24 @@ fn read_bounded_file(
         });
     }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags, open};
+
+    open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 #[cfg(unix)]
@@ -925,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fields_and_remote_binds_fail_closed() {
+    fn unknown_fields_and_every_remote_bind_class_fail_closed() {
         let fixture = Fixture::new();
         let original = fs::read_to_string(&fixture.config).expect("config text");
         let unknown = original.replacen('{', "{\"surprise\":true,", 1);
@@ -935,11 +953,39 @@ mod tests {
             Err(SecureAuthorityLaunchError::InvalidConfiguration)
         ));
 
+        for remote in [
+            "0.0.0.0:40000",
+            "192.168.1.50:40000",
+            "[::]:40000",
+            "[::ffff:127.0.0.1]:40000",
+        ] {
+            fs::write(&fixture.config, original.replace("127.0.0.1:0", remote))
+                .expect("remote-bind config");
+            assert!(matches!(
+                SecureAuthorityLaunchConfig::load(&fixture.config),
+                Err(SecureAuthorityLaunchError::InvalidConfiguration)
+            ));
+        }
+    }
+
+    #[test]
+    fn lifecycle_workers_cannot_implicitly_unlock_remote_exposure() {
+        let fixture = Fixture::new();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture.config).expect("read remote fixture"))
+                .expect("parse remote fixture");
+        document["bind"] = serde_json::json!("192.168.1.50:40000");
+        document["oidc_discovery"] = serde_json::json!({
+            "refresh_interval_seconds": 60,
+            "root_certificate_file": fixture.certificate,
+        });
+        document["tls_reload"] = serde_json::json!({"interval_seconds": 5});
         fs::write(
             &fixture.config,
-            original.replace("127.0.0.1:0", "0.0.0.0:40000"),
+            serde_json::to_vec(&document).expect("remote lifecycle config JSON"),
         )
-        .expect("remote-bind config");
+        .expect("remote lifecycle config");
+
         assert!(matches!(
             SecureAuthorityLaunchConfig::load(&fixture.config),
             Err(SecureAuthorityLaunchError::InvalidConfiguration)
@@ -960,6 +1006,18 @@ mod tests {
                 "TLS private key"
             ))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kernel_no_follow_open_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let link = fixture.directory.join("server-key-link.pem");
+        symlink(&fixture.key, &link).expect("private-key symlink");
+
+        assert!(open_no_follow(&link).is_err());
     }
 
     #[test]

@@ -446,7 +446,7 @@ async fn predict_and_reconcile_movement(
     session_id: u64,
     world: &World,
 ) -> ReplicatedPlayerState {
-    drive_until_player_broadcast(server);
+    drive_until_player_broadcast(server).await;
     let (initial_tick, initial_player) = receive_player_sample(connection, session_id, 0).await;
     let mut prediction =
         ClientPrediction::new(initial_tick, initial_player).expect("initial local prediction");
@@ -466,7 +466,7 @@ async fn predict_and_reconcile_movement(
             break;
         }
     }
-    drive_until_player_broadcast(server);
+    drive_until_player_broadcast(server).await;
     let (movement_tick, replicated) = receive_player_sample(connection, session_id, 1).await;
     let reconciliation = prediction
         .reconcile(movement_tick, replicated, world)
@@ -477,10 +477,11 @@ async fn predict_and_reconcile_movement(
     replicated
 }
 
-fn drive_until_player_broadcast(server: &mut SecureDedicatedServer) {
+async fn drive_until_player_broadcast(server: &mut SecureDedicatedServer) {
     for _ in 0..=destructible_fps::PLAYER_STATE_BROADCAST_INTERVAL_TICKS {
         let report = server.tick().expect("player-state broadcast tick");
         if report.authority.player_state_broadcasts > 0 {
+            tokio::task::yield_now().await;
             return;
         }
     }

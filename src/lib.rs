@@ -11,6 +11,7 @@ pub mod mesh;
 pub mod mesh_scheduler;
 pub mod network;
 pub mod oidc;
+pub mod oidc_discovery;
 pub mod physics;
 pub mod player;
 pub mod player_replication;
@@ -51,6 +52,11 @@ pub use oidc::{
     MAX_OIDC_JWKS_BYTES, MAX_OIDC_JWKS_KEYS, MAX_OIDC_REPLAY_ENTRIES,
     MAX_OIDC_TOKEN_LIFETIME_SECONDS, OIDC_CLOCK_SKEW_SECONDS, OIDC_MINIMUM_REMAINING_SECONDS,
     OidcSessionVerifier, OidcVerificationError,
+};
+pub use oidc_discovery::{
+    MAX_OIDC_DISCOVERY_BYTES, MAX_OIDC_DISCOVERY_ISSUER_BYTES, MAX_OIDC_DISCOVERY_ROOT_BYTES,
+    MAX_OIDC_DISCOVERY_ROOTS, MAX_OIDC_REFRESH_INTERVAL_SECONDS, MIN_OIDC_REFRESH_INTERVAL_SECONDS,
+    OidcDiscoveryClient, OidcDiscoveryError,
 };
 pub use physics::{
     BodyError, BodyId, BodyLimits, BodySimulationReport, BodyStateTransition, BodyStepResult,

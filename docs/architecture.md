@@ -222,8 +222,15 @@ JWKS replacement validates the complete candidate before one write-lock swap, so
 the last accepted keys. Verification performs no DNS, HTTP, or file access and holds the key lock only
 long enough to clone the selected immutable key. The standalone process loads a bounded static set
 whose declared remaining validity must be between one minute and 24 hours. The verifier rejects new
-admissions at expiry and the process stops rather than running on stale identity data. A trusted
-supervisor still needs to validate OIDC discovery over TLS and atomically deliver refreshed sets.
+admissions at expiry and the process stops rather than running on stale identity data.
+
+The staged discovery client derives the standard well-known path from one parsed issuer, requires
+TLS 1.2 or later with platform or explicitly bounded private roots, disables redirects and ambient
+proxies, and uses three-second connection plus five-second total deadlines. Discovery metadata is
+limited to 16 KiB, must repeat the exact issuer, and may point only to an HTTPS JWKS endpoint on the
+same scheme/host/port. JWKS is limited to 64 KiB. Both known and chunked bodies are counted before
+growth, and only JSON/JWK Set media types are accepted. This client is not yet connected to the
+authority lifecycle; until the atomic refresh controller lands, static expiry remains authoritative.
 
 The process configuration is bounded to 16 KiB and rejects unknown fields, links, relative credential
 paths, non-regular files, certificates over 256 KiB or eight entries, private keys over 64 KiB, and

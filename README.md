@@ -31,6 +31,10 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - a bounded offline Keycloak-compatible OIDC verifier with RS256/JWKS key policy, exact
   issuer/audience and time validation, atomic key rotation, one-use `jti` replay defense, and stable
   issuer/subject-derived principals;
+- a staged bounded OIDC discovery client using TLS-verified HTTPS only, no ambient proxy or redirect,
+  exact issuer metadata, same-origin JWKS policy, fixed connection/request deadlines, optional
+  bounded private roots, and chunk-accounted JSON response ceilings; authority refresh wiring remains
+  gated;
 - a standalone secure authority process with bounded JSON/PEM/JWKS loading, strict Unix key-file
   permissions, complete-chain X.509 lifetime preflight, monotonic TLS/JWKS expiry shutdown, graceful
   interruption, and no credential-valued arguments;

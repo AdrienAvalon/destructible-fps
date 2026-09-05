@@ -147,7 +147,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   delivered, while graphical event-loop wiring remains;
 - offline RS256 access-token verification with strict JWKS key policy, exact issuer/audience and time
   validation, bounded one-use `jti` cache, atomic rotation, and issuer/subject-derived 256-bit
-  principal (delivered; trusted discovery/refresh and process configuration remain);
+  principal (delivered); a TLS-only, no-redirect/no-proxy discovery client with bounded private
+  roots, exact issuer, same-origin JWKS, deadlines and response ceilings is also delivered, while
+  atomic process refresh wiring remains;
 - transport-independent authority state keyed by opaque peer IDs, authenticated principal binding,
   bounded core-owned ingress and egress, transport-sized delta/snapshot framing, and legacy UDP
   behavior preserved by process tests (delivered);
@@ -256,8 +258,9 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add trusted OIDC discovery/JWKS refresh, automated certificate renewal, Windows service DACL
-   checks, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
+1. connect the delivered trusted OIDC discovery client to bounded atomic JWKS refresh, then add
+   automated certificate renewal, Windows service DACL checks, and a remote attack/failure matrix
+   before enabling an explicit non-loopback policy;
 2. extend the delivered oriented per-voxel dynamic contact with rotated vertical support, continuous
    multi-contact manifolds, gyroscopic response, and deeper collision-island convergence;
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at

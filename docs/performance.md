@@ -3,6 +3,27 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — bounded trusted OIDC discovery client
+
+Source state: parent `a53fb98` plus the isolated discovery-client increment documented here. The
+client accepts one exact parsed HTTPS issuer of at most 512 bytes, derives its standard well-known
+path, requires TLS 1.2 or later, disables redirects and ambient proxies, and limits refresh intervals
+to 60–3,600 seconds. Optional private roots are capped at 256 KiB and 16 certificates. Connection and
+complete-request deadlines are three and five seconds. Discovery metadata is capped at 16 KiB, must
+repeat the issuer byte-for-byte, and can select only a same-origin HTTPS JWKS endpoint; that response
+is capped at 64 KiB. Streaming chunks are accounted before vector growth, so a missing or dishonest
+`Content-Length` cannot bypass either ceiling. Public errors contain categories but no response body
+or endpoint URL.
+
+Three focused tests cover hostile issuer/metadata endpoints, a real local TLS exchange trusted by an
+explicit root, and a chunked body one byte over the limit. `reqwest` 0.13.4 and `tokio-rustls` 0.26.5
+are exactly pinned with default features disabled; the selected no-provider path preserves the
+already current `rustls-webpki` 0.103.15 and the project's single rustls provider. The complete
+promotion passed 138 library tests, ten binary tests and 44 integration tests in debug and release
+with strict Clippy clean. A real five-second Vulkan smoke on the RTX 4050 completed with GPU-total
+p99 0.946 ms, maximum 0.949 ms and zero abandoned samples. This client is deliberately not wired to
+authority trust yet, and non-loopback exposure remains impossible.
+
 ## 2026-09-05 — complete-chain TLS lifetime gate
 
 Source state: parent `7a1009b` plus the certificate-lifecycle increment documented here. Startup

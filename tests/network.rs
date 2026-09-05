@@ -681,24 +681,8 @@ fn impairment_queue_fails_closed_at_its_byte_and_count_limits() {
 
 #[test]
 fn dedicated_process_synchronizes_two_real_udp_clients() {
-    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
-    let server_address = reservation.local_addr().expect("reserved address");
-    drop(reservation);
-    let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
-            .args([
-                "--bind",
-                &server_address.to_string(),
-                "--max-ticks",
-                "300",
-                "--exit-after-commands",
-                "1",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start dedicated server process"),
-    );
+    let (mut child, server_address) =
+        spawn_ready_ephemeral_server(300, Some("--exit-after-commands"));
 
     let first_socket = client_socket();
     let second_socket = client_socket();
@@ -769,17 +753,7 @@ fn dedicated_process_synchronizes_two_real_udp_clients() {
 
 #[test]
 fn dedicated_process_replicates_moving_players_to_two_real_udp_clients() {
-    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
-    let server_address = reservation.local_addr().expect("reserved address");
-    drop(reservation);
-    let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
-            .args(["--bind", &server_address.to_string(), "--max-ticks", "300"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start dedicated server process"),
-    );
+    let (mut child, server_address) = spawn_ready_ephemeral_server(300, None);
     let sockets = [client_socket(), client_socket()];
     let first_session = handshake(&sockets[0], server_address, 0x3333, &mut child);
     let second_session = handshake(&sockets[1], server_address, 0x4444, &mut child);
@@ -837,24 +811,8 @@ fn dedicated_process_replicates_moving_players_to_two_real_udp_clients() {
 
 #[test]
 fn retained_delta_repairs_a_deliberate_process_client_gap() {
-    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
-    let server_address = reservation.local_addr().expect("reserved address");
-    drop(reservation);
-    let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
-            .args([
-                "--bind",
-                &server_address.to_string(),
-                "--max-ticks",
-                "300",
-                "--exit-after-repairs",
-                "1",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start repair server process"),
-    );
+    let (mut child, server_address) =
+        spawn_ready_ephemeral_server(300, Some("--exit-after-repairs"));
 
     let good_socket = client_socket();
     let lossy_socket = client_socket();
@@ -932,24 +890,8 @@ fn retained_delta_repairs_a_deliberate_process_client_gap() {
 
 #[test]
 fn missing_retained_delta_falls_back_to_a_process_snapshot() {
-    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
-    let server_address = reservation.local_addr().expect("reserved address");
-    drop(reservation);
-    let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
-            .args([
-                "--bind",
-                &server_address.to_string(),
-                "--max-ticks",
-                "300",
-                "--exit-after-catchups",
-                "1",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start snapshot server process"),
-    );
+    let (mut child, server_address) =
+        spawn_ready_ephemeral_server(300, Some("--exit-after-catchups"));
     let socket = client_socket();
     let session = handshake(&socket, server_address, 0x5555, &mut child);
     socket
@@ -1043,10 +985,8 @@ fn exactly_one_snapshot_fragment_is_missing(assembler: &SnapshotAssembler) -> bo
 
 #[test]
 fn process_snapshot_catches_up_motion_before_returning_to_live_deltas() {
-    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
-    let server_address = reservation.local_addr().expect("reserved address");
-    drop(reservation);
-    let mut child = spawn_test_server(server_address, 600, "--exit-after-catchups");
+    let (mut child, server_address) =
+        spawn_ready_ephemeral_server(600, Some("--exit-after-catchups"));
     let good_socket = client_socket();
     let joining_socket = client_socket();
     let good_session = handshake(&good_socket, server_address, 0x6666, &mut child);
@@ -1149,10 +1089,8 @@ fn process_snapshot_catches_up_motion_before_returning_to_live_deltas() {
 
 #[test]
 fn retained_delta_converges_through_deterministic_network_impairments() {
-    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
-    let server_address = reservation.local_addr().expect("reserved address");
-    drop(reservation);
-    let mut child = spawn_test_server(server_address, 300, "--exit-after-repairs");
+    let (mut child, server_address) =
+        spawn_ready_ephemeral_server(300, Some("--exit-after-repairs"));
     let mut proxy = DeterministicUdpProxy::bind(server_address).expect("bind deterministic proxy");
     let proxy_address = proxy.client_address().expect("proxy client address");
     let socket = client_socket();
@@ -1256,7 +1194,7 @@ fn retained_delta_converges_through_deterministic_network_impairments() {
 
 #[test]
 fn four_trace_replay_clients_converge_with_adaptive_fair_repair() {
-    let (mut child, server_address) = spawn_ready_ephemeral_server();
+    let (mut child, server_address) = spawn_ready_ephemeral_server(1_200, None);
     let mut endpoints = Vec::with_capacity(4);
     for index in 0..4 {
         let mut proxy =
@@ -1405,10 +1343,8 @@ fn assert_four_trace_results(endpoints: &[TracedEndpoint], expected_world: u128)
 
 #[test]
 fn process_snapshot_converges_through_deterministic_network_impairments() {
-    let reservation = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback port");
-    let server_address = reservation.local_addr().expect("reserved address");
-    drop(reservation);
-    let mut child = spawn_test_server(server_address, 600, "--exit-after-catchups");
+    let (mut child, server_address) =
+        spawn_ready_ephemeral_server(600, Some("--exit-after-catchups"));
     let mut proxy = DeterministicUdpProxy::bind(server_address).expect("bind deterministic proxy");
     let proxy_address = proxy.client_address().expect("proxy client address");
     let socket = client_socket();
@@ -1623,16 +1559,25 @@ fn client_socket() -> UdpSocket {
     socket
 }
 
-fn spawn_ready_ephemeral_server() -> (ChildGuard, SocketAddr) {
+fn spawn_ready_ephemeral_server(
+    max_ticks: u64,
+    exit_flag: Option<&str>,
+) -> (ChildGuard, SocketAddr) {
     // A released reservation is not ownership: concurrent client/proxy binds can take that port
     // before the child. Let the child own an ephemeral socket and announce its actual address.
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dedicated-server"));
+    command
+        .args(["--bind", "127.0.0.1:0", "--max-ticks"])
+        .arg(max_ticks.to_string());
+    if let Some(flag) = exit_flag {
+        command.args([flag, "1"]);
+    }
     let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
-            .args(["--bind", "127.0.0.1:0", "--max-ticks", "1200"])
+        command
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("start ephemeral trace server"),
+            .expect("start ephemeral test server"),
     );
     let stdout = child.0.stdout.take().expect("server readiness pipe");
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -1672,9 +1617,14 @@ fn spawn_ready_ephemeral_server() -> (ChildGuard, SocketAddr) {
 
 #[test]
 fn ephemeral_test_servers_retain_distinct_owned_ready_sockets() {
-    let servers = (0..3)
-        .map(|_| spawn_ready_ephemeral_server())
-        .collect::<Vec<_>>();
+    let servers = [
+        (300, None),
+        (300, Some("--exit-after-commands")),
+        (600, Some("--exit-after-catchups")),
+    ]
+    .into_iter()
+    .map(|(max_ticks, flag)| spawn_ready_ephemeral_server(max_ticks, flag))
+    .collect::<Vec<_>>();
     for (_, address) in &servers {
         assert_eq!(
             UdpSocket::bind(address)
@@ -1766,22 +1716,6 @@ fn request_missing_snapshot_fragments(
             )
             .expect("request impaired missing fragments");
     }
-}
-
-fn spawn_test_server(address: SocketAddr, max_ticks: u64, exit_flag: &str) -> ChildGuard {
-    ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_dedicated-server"))
-            .arg("--bind")
-            .arg(address.to_string())
-            .arg("--max-ticks")
-            .arg(max_ticks.to_string())
-            .arg(exit_flag)
-            .arg("1")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start dedicated test server process"),
-    )
 }
 
 fn discard_available(socket: &UdpSocket) {

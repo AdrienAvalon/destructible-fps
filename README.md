@@ -15,7 +15,12 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - delta fragmentation below a 1,200-byte network MTU;
 - out-of-order frame reassembly;
 - real UDP loopback transport coverage for fragmented deltas;
-- a strict cap on incomplete packets to prevent reassembly-memory exhaustion;
+- strict caps on incomplete packets, fragments, and retained bytes to prevent
+  reassembly-memory exhaustion;
+- atomic structural separation: detached voxels leave the static world and become bounded,
+  server-owned body descriptors in the same transaction;
+- protocol-v2 body assignments with independent pre/post body fingerprints and full client-side
+  connectivity, material, mass, and identity revalidation;
 - immediate detection of packet gaps and replica divergence;
 - a repeatable end-to-end benchmark using a multi-material test building;
 - a safe Vulkan renderer on `wgpu`, selecting the high-performance adapter;
@@ -29,15 +34,15 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
-game. Structural collapse, detached rigid bodies, remote sessions, audio, asset-quality PBR,
-temporal anti-aliasing, and large-world residency streaming remain explicit later gates.
+game. Rigid-body motion/collision, progressive structural stress, remote sessions, audio,
+asset-quality PBR, temporal anti-aliasing, and large-world residency streaming remain explicit
+later gates.
 
-The first server-side structural primitive is also available: a deterministic bounded topology
+The first server-side structural pipeline is now integrated. A deterministic bounded topology
 analyzer finds components adjacent to voxel edits, follows foundation or authored anchors, and emits
-read-only canonical detached-island proofs. A second bounded step revalidates each proof and produces
-an authoritative body descriptor with integer-millimetre centre of mass, integer inertia, mass,
-bounds, canonical voxels, and a 128-bit identity. These primitives are benchmarked but not yet wired
-into the playable explosion transaction or rigid-body integration.
+canonical detached-island proofs. The server revalidates each proof, derives integer-millimetre mass
+properties, removes its voxels from the static world, and replicates the new body atomically. The
+body still remains at its spawn transform until the fixed-step solver is added.
 
 ## Screenshots
 

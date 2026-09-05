@@ -25,6 +25,8 @@ pub struct ShotResult {
     pub datagrams: usize,
     pub encoded_bytes: usize,
     pub dirty_chunks: Vec<IVec3>,
+    pub spawned_bodies: usize,
+    pub active_bodies: usize,
 }
 
 #[derive(Debug)]
@@ -142,7 +144,9 @@ impl DemoSession {
         }
         let assembled = assembled.ok_or(SessionError::MissingCompletePacket)?;
         self.client.receive(&assembled)?;
-        if self.client.world().fingerprint() != self.server.world().fingerprint() {
+        if self.client.world().fingerprint() != self.server.world().fingerprint()
+            || self.client.body_fingerprint() != self.server.body_fingerprint()
+        {
             return Err(SessionError::DivergedReplica);
         }
 
@@ -150,6 +154,13 @@ impl DemoSession {
             target: hit.voxel,
             dirty_chunks: dirty_chunks(&packet.changes),
             report,
+            spawned_bodies: packet
+                .body_assignments
+                .iter()
+                .map(|assignment| assignment.body_id)
+                .collect::<HashSet<_>>()
+                .len(),
+            active_bodies: self.client.bodies().len(),
             datagrams,
             encoded_bytes,
         }))

@@ -21,11 +21,12 @@ pub use destruction::{DestructionReport, Explosion};
 pub use generator::demo_world;
 pub use material::{Material, MaterialProperties, Voxel};
 pub use physics::{
-    BodyError, BodyLimits, FixedMillimeters3, InertiaDiagonalKgMm2, RigidBodyDescriptor,
+    BodyError, BodyLimits, BodyVoxel, FixedMillimeters3, InertiaDiagonalKgMm2, RigidBodyDescriptor,
 };
 pub use replication::{
-    AuthoritativeServer, ClientReplica, ClientStatus, CodecError, CommandError, DeltaFrame,
-    DeltaPacket, ExplosionCommand, FrameAssembler, ReplicationError, decode_frame, encode_frames,
+    AuthoritativeServer, BodyVoxelAssignment, ClientReplica, ClientStatus, CodecError,
+    CommandError, DeltaFrame, DeltaPacket, ExplosionCommand, FrameAssembler, ReplicationError,
+    decode_frame, encode_frames,
 };
 pub use session::{DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
 pub use structural::{

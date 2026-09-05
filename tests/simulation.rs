@@ -1,10 +1,32 @@
 use destructible_fps::{
-    AuthoritativeServer, ClientReplica, ClientStatus, CodecError, DeltaPacket, Explosion,
-    ExplosionCommand, FrameAssembler, IVec3, Material, ReplicationError, Voxel, VoxelChange, World,
-    WorldError, decode_frame, encode_frames,
+    AuthoritativeServer, BodyError, BodyLimits, ClientReplica, ClientStatus, CodecError,
+    CommandError, DeltaPacket, Explosion, ExplosionCommand, FrameAssembler, IVec3, Material,
+    ReplicationError, StructuralAnchors, StructuralLimits, Voxel, VoxelChange, World, WorldError,
+    decode_frame, encode_frames,
 };
 use std::net::UdpSocket;
 use std::time::Duration;
+
+fn fragile_column() -> World {
+    let mut world = World::default();
+    world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Steel));
+    world.set_voxel(IVec3::new(0, 1, 0), Voxel::new(Material::Glass));
+    world.fill_box(
+        IVec3::new(0, 2, 0),
+        IVec3::new(0, 3, 0),
+        Voxel::new(Material::Wood),
+    );
+    world
+}
+
+const fn sever_column_command() -> ExplosionCommand {
+    ExplosionCommand {
+        command_id: 1,
+        center: IVec3::new(0, 1, 0),
+        radius_voxels: 1,
+        peak_energy: 600,
+    }
+}
 
 #[test]
 fn blast_response_depends_on_material_properties() {
@@ -77,10 +99,104 @@ fn fragmented_out_of_order_delta_keeps_replicas_identical() {
     let complete = complete.expect("all fragments were supplied");
     assert_eq!(client.receive(&complete), Ok(ClientStatus::Applied));
     assert_eq!(client.world().fingerprint(), server.world().fingerprint());
+    assert_eq!(client.body_fingerprint(), server.body_fingerprint());
+    assert_eq!(client.bodies(), server.bodies());
     assert_eq!(
         client.world().stats().solid_voxels,
         server.world().stats().solid_voxels
     );
+}
+
+#[test]
+fn structural_detachment_is_one_replicated_authoritative_transaction() {
+    let initial = fragile_column();
+    let mut server = AuthoritativeServer::new(initial.clone());
+    let mut client = ClientReplica::new(initial);
+
+    let (packet, report) = server
+        .execute_explosion(7, sever_column_command())
+        .expect("connector blast must detach the upper column");
+    assert_eq!(report.detached_voxels, 2);
+    assert_eq!(packet.body_assignments.len(), 2);
+    assert_eq!(server.bodies().len(), 1);
+    assert_eq!(server.world().voxel(IVec3::new(0, 2, 0)), Voxel::AIR);
+    assert_eq!(server.world().voxel(IVec3::new(0, 3, 0)), Voxel::AIR);
+    assert!(packet.body_assignments[0].voxel.integrity < u8::MAX);
+
+    let mut assembler = FrameAssembler::default();
+    let mut complete = None;
+    for bytes in encode_frames(&packet, 124)
+        .expect("minimum body-assignment MTU")
+        .into_iter()
+        .rev()
+    {
+        if let Some(delta) = assembler
+            .push(decode_frame(&bytes).expect("valid body frame"))
+            .expect("consistent body transaction")
+        {
+            complete = Some(delta);
+        }
+    }
+    assert_eq!(
+        client.receive(&complete.expect("all body fragments arrived")),
+        Ok(ClientStatus::Applied)
+    );
+    assert_eq!(client.world().fingerprint(), server.world().fingerprint());
+    assert_eq!(client.body_fingerprint(), server.body_fingerprint());
+    assert_eq!(client.bodies(), server.bodies());
+}
+
+#[test]
+fn failed_body_promotion_rolls_back_the_complete_server_transaction() {
+    let initial = fragile_column();
+    let initial_fingerprint = initial.fingerprint();
+    let mut server = AuthoritativeServer::new(initial.clone()).with_structural_config(
+        StructuralAnchors::foundation_plane(0),
+        StructuralLimits::default(),
+        BodyLimits { max_voxels: 1 },
+    );
+
+    let error = server
+        .execute_explosion(7, sever_column_command())
+        .expect_err("two-voxel body exceeds the configured promotion limit");
+    assert_eq!(error, CommandError::Body(BodyError::TooManyVoxels(2)));
+    assert_eq!(server.world().fingerprint(), initial_fingerprint);
+    assert_eq!(
+        server.world().voxel(IVec3::new(0, 1, 0)),
+        initial.voxel(IVec3::new(0, 1, 0))
+    );
+    assert_eq!(
+        server.world().voxel(IVec3::new(0, 2, 0)),
+        initial.voxel(IVec3::new(0, 2, 0))
+    );
+    assert!(server.bodies().is_empty());
+    assert_eq!(server.body_fingerprint(), 0);
+    assert_eq!(server.world().tick(), 0);
+    assert_eq!(
+        server.execute_explosion(7, sever_column_command()),
+        Err(CommandError::Body(BodyError::TooManyVoxels(2)))
+    );
+}
+
+#[test]
+fn corrupted_body_assignment_is_rejected_before_client_mutation() {
+    let initial = fragile_column();
+    let initial_fingerprint = initial.fingerprint();
+    let mut server = AuthoritativeServer::new(initial.clone());
+    let mut client = ClientReplica::new(initial);
+    let (mut packet, _) = server
+        .execute_explosion(7, sever_column_command())
+        .expect("valid body transaction");
+    packet.body_assignments[0].voxel.integrity =
+        packet.body_assignments[0].voxel.integrity.saturating_sub(1);
+
+    assert!(matches!(
+        client.receive(&packet),
+        Err(ReplicationError::Body(BodyError::IdentifierMismatch { .. }))
+    ));
+    assert_eq!(client.world().fingerprint(), initial_fingerprint);
+    assert!(client.bodies().is_empty());
+    assert_eq!(client.body_fingerprint(), 0);
 }
 
 #[test]
@@ -129,7 +245,10 @@ fn codec_rejects_truncated_and_corrupted_frames() {
         tick: 1,
         base_fingerprint: 0,
         final_fingerprint: 0,
+        base_body_fingerprint: 0,
+        final_body_fingerprint: 0,
         changes: Vec::new(),
+        body_assignments: Vec::new(),
     };
     let frames = encode_frames(&packet, 1_200).expect("empty delta still has one frame");
     assert!(decode_frame(&frames[0][..10]).is_err());
@@ -174,9 +293,12 @@ fn incomplete_packet_flood_is_bounded() {
             tick: sequence,
             base_fingerprint: 0,
             final_fingerprint: 1,
+            base_body_fingerprint: 0,
+            final_body_fingerprint: 0,
             changes: changes.clone(),
+            body_assignments: Vec::new(),
         };
-        let first = encode_frames(&packet, 76)
+        let first = encode_frames(&packet, 110)
             .expect("one change per frame")
             .remove(0);
         assert!(
@@ -191,15 +313,82 @@ fn incomplete_packet_flood_is_bounded() {
         tick: 65,
         base_fingerprint: 0,
         final_fingerprint: 1,
+        base_body_fingerprint: 0,
+        final_body_fingerprint: 0,
         changes,
+        body_assignments: Vec::new(),
     };
-    let first = encode_frames(&packet, 76)
+    let first = encode_frames(&packet, 110)
         .expect("one change per frame")
         .remove(0);
     assert_eq!(
         assembler.push(decode_frame(&first).expect("valid frame")),
         Err(CodecError::TooManyPendingPackets)
     );
+}
+
+#[test]
+fn fragment_memory_accounting_is_stable_and_released() {
+    let changes = vec![
+        VoxelChange {
+            position: IVec3::new(0, 0, 0),
+            before: Voxel::AIR,
+            after: Voxel::new(Material::Wood),
+        },
+        VoxelChange {
+            position: IVec3::new(1, 0, 0),
+            before: Voxel::AIR,
+            after: Voxel::new(Material::Wood),
+        },
+    ];
+    let packet = DeltaPacket {
+        sequence: 1,
+        tick: 1,
+        base_fingerprint: 0,
+        final_fingerprint: 1,
+        base_body_fingerprint: 0,
+        final_body_fingerprint: 0,
+        changes,
+        body_assignments: Vec::new(),
+    };
+    let frames = encode_frames(&packet, 110).expect("one change per frame");
+    let first = decode_frame(&frames[0]).expect("valid first frame");
+    let second = decode_frame(&frames[1]).expect("valid second frame");
+    let mut assembler = FrameAssembler::default();
+
+    assert!(
+        assembler
+            .push(first.clone())
+            .expect("new fragment")
+            .is_none()
+    );
+    let retained = assembler.pending_bytes();
+    assert_eq!(retained, frames[0].len());
+    assert!(
+        assembler
+            .push(first)
+            .expect("identical duplicate")
+            .is_none()
+    );
+    assert_eq!(assembler.pending_bytes(), retained);
+    assert!(assembler.push(second).expect("complete packet").is_some());
+    assert_eq!(assembler.pending_bytes(), 0);
+    assert_eq!(assembler.pending_packets(), 0);
+
+    let mut inconsistent = decode_frame(&frames[0]).expect("valid first frame");
+    assert!(
+        assembler
+            .push(inconsistent.clone())
+            .expect("new packet")
+            .is_none()
+    );
+    inconsistent.tick += 1;
+    assert_eq!(
+        assembler.push(inconsistent),
+        Err(CodecError::InconsistentFragment)
+    );
+    assert_eq!(assembler.pending_bytes(), 0);
+    assert_eq!(assembler.pending_packets(), 0);
 }
 
 #[test]
@@ -235,6 +424,8 @@ fn long_authoritative_session_never_diverges() {
     }
 
     assert_eq!(client.world().fingerprint(), server.world().fingerprint());
+    assert_eq!(client.body_fingerprint(), server.body_fingerprint());
+    assert_eq!(client.bodies(), server.bodies());
     assert_eq!(
         server.world().fingerprint(),
         server.world().recompute_fingerprint()
@@ -292,4 +483,6 @@ fn udp_loopback_carries_a_fragmented_authoritative_delta() {
         .receive(&complete.expect("every datagram arrived"))
         .expect("authoritative delta applies");
     assert_eq!(client.world().fingerprint(), server.world().fingerprint());
+    assert_eq!(client.body_fingerprint(), server.body_fingerprint());
+    assert_eq!(client.bodies(), server.bodies());
 }

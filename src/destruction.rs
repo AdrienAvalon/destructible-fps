@@ -13,6 +13,7 @@ pub struct DestructionReport {
     pub changes: Vec<VoxelChange>,
     pub fractured_voxels: usize,
     pub damaged_voxels: usize,
+    pub detached_voxels: usize,
     pub released_mass_kg: u64,
     pub fragment_energy: u64,
 }

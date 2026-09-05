@@ -5,6 +5,7 @@ use core::fmt;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 const MAX_EXPLICIT_ANCHORS: usize = 4_096;
+pub(crate) const ISLAND_FINGERPRINT_SEED: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d_u128;
 const NEIGHBORS: [IVec3; 6] = [
     IVec3::new(0, -1, 0),
     IVec3::new(-1, 0, 0),
@@ -29,7 +30,7 @@ impl Default for StructuralLimits {
             max_changes: 65_536,
             max_affected_seeds: 4_096,
             max_visited_voxels: 131_072,
-            max_component_voxels: 65_536,
+            max_component_voxels: 16_384,
             max_detached_islands: 256,
         }
     }
@@ -378,7 +379,7 @@ pub(crate) fn describe_island(world: &World, mut voxels: Vec<IVec3>) -> Detached
         },
     );
     let mut mass_kg = 0_u64;
-    let mut fingerprint = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d_u128;
+    let mut fingerprint = ISLAND_FINGERPRINT_SEED;
     for &position in &voxels {
         let voxel = world.voxel(position);
         mass_kg = mass_kg.saturating_add(u64::from(voxel.material.properties().density_kg_m3));
@@ -405,7 +406,7 @@ const fn saturating_add(position: IVec3, offset: IVec3) -> IVec3 {
     )
 }
 
-const fn mix_island_fingerprint(state: u128, position: IVec3, voxel: Voxel) -> u128 {
+pub(crate) const fn mix_island_fingerprint(state: u128, position: IVec3, voxel: Voxel) -> u128 {
     let coordinates = (position.x.cast_unsigned() as u128)
         | ((position.y.cast_unsigned() as u128) << 32)
         | ((position.z.cast_unsigned() as u128) << 64);

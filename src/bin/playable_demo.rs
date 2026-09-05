@@ -221,10 +221,12 @@ impl Game {
                 self.mesh_snapshot = Arc::new(self.session.world().clone());
                 self.queue_dirty_chunks(result.dirty_chunks);
                 self.last_action = format!(
-                    "{:?}: {} fractures + {} endommages, {} datagrammes/{:.1} KiB, autorite {:.2} ms, {} chunks planifies",
+                    "{:?}: {} fractures + {} endommages + {} voxels detaches/{} corps actifs, {} datagrammes/{:.1} KiB, autorite {:.2} ms, {} chunks planifies",
                     mode,
                     result.report.fractured_voxels,
                     result.report.damaged_voxels,
+                    result.report.detached_voxels,
+                    result.active_bodies,
                     result.datagrams,
                     result.encoded_bytes as f64 / 1_024.0,
                     before.elapsed().as_secs_f64() * 1_000.0,

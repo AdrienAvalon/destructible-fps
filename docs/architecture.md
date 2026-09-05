@@ -23,8 +23,10 @@ The dedicated server owns commands, damage, fracture, structural separation, rig
 and persistent world state. Clients predict only reversible player and weapon motion. A client never
 announces that a wall was destroyed; it requests an action and receives the resulting transaction.
 
-The initial delta protocol uses monotonically increasing sequences, 128-bit pre/post fingerprints,
-bounded fragments, and before-state validation. Missing data stops application and requests a
+Delta protocol v2 uses monotonically increasing sequences, independent 128-bit pre/post
+fingerprints for the static world and active body set, bounded fragments, and before-state
+validation. Detached body membership travels in canonical assignment frames and is reconstructed
+and validated before any static-world write. Missing data stops application and requests a
 snapshot. Corrupt or stale data cannot partially mutate a replica.
 
 ## Planned engine layers
@@ -68,11 +70,13 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - bounded incremental topology analysis around changed voxels, foundation/authored anchors, and
   canonical detached-island descriptors (delivered as an isolated server-side primitive);
 - revalidated rigid-body descriptors with fixed integer centre of mass, diagonal inertia, mass,
-  bounds, canonical geometry, and stable identity (delivered without integration yet);
+  bounds, canonical geometry, and stable identity (delivered);
+- atomic static-world detachment and protocol-v2 body replication with independent fingerprints,
+  hostile-input limits, and replica reconstruction (delivered);
 - persistent foundation and material constraint graph integrated into authoritative transactions;
 - compression, tension, shear, and connection limits by material;
 - local stress propagation after damage;
-- unsupported island extraction;
+- unsupported island extraction (delivered for topology-changing voxel edits);
 - rigid-body mass, centre of mass, and inertia derived from geometry;
 - sleep, clustering, and distance-based solver budgets.
 

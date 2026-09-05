@@ -1,10 +1,22 @@
 //! Fixed-unit authoritative rigid-body descriptors derived from detached voxel islands.
 
-use crate::{DetachedIsland, IVec3, World, structural::describe_island};
+use crate::{
+    DetachedIsland, IVec3, Voxel, World,
+    structural::{ISLAND_FINGERPRINT_SEED, describe_island, mix_island_fingerprint},
+};
 use core::fmt;
+use std::collections::{HashSet, VecDeque};
 
 const MILLIMETERS_PER_VOXEL: i64 = 1_000;
 const SQUARE_MILLIMETERS_PER_VOXEL: u128 = 1_000_000;
+const BODY_NEIGHBORS: [IVec3; 6] = [
+    IVec3::new(-1, 0, 0),
+    IVec3::new(1, 0, 0),
+    IVec3::new(0, -1, 0),
+    IVec3::new(0, 1, 0),
+    IVec3::new(0, 0, -1),
+    IVec3::new(0, 0, 1),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BodyLimits {
@@ -13,7 +25,7 @@ pub struct BodyLimits {
 
 impl Default for BodyLimits {
     fn default() -> Self {
-        Self { max_voxels: 65_536 }
+        Self { max_voxels: 16_384 }
     }
 }
 
@@ -31,10 +43,16 @@ pub struct InertiaDiagonalKgMm2 {
     pub z: u128,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BodyVoxel {
+    pub position: IVec3,
+    pub voxel: Voxel,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RigidBodyDescriptor {
     pub id: u128,
-    pub voxels: Vec<IVec3>,
+    pub voxels: Vec<BodyVoxel>,
     pub minimum: IVec3,
     pub maximum: IVec3,
     pub mass_kg: u64,
@@ -47,7 +65,10 @@ pub enum BodyError {
     EmptyIsland,
     TooManyVoxels(usize),
     NonCanonicalVoxels(IVec3),
+    NonStructuralVoxel(IVec3),
+    DisconnectedVoxels,
     IslandDescriptorMismatch,
+    IdentifierMismatch { expected: u128, actual: u128 },
     ZeroMass,
     CenterOfMassOverflow,
 }
@@ -63,12 +84,23 @@ impl fmt::Display for BodyError {
                     "rigid-body voxels are not canonical at {position:?}"
                 )
             }
+            Self::NonStructuralVoxel(position) => {
+                write!(
+                    formatter,
+                    "rigid body contains a non-structural voxel at {position:?}"
+                )
+            }
+            Self::DisconnectedVoxels => write!(formatter, "rigid-body voxels are disconnected"),
             Self::IslandDescriptorMismatch => {
                 write!(
                     formatter,
                     "detached island descriptor does not match its world voxels"
                 )
             }
+            Self::IdentifierMismatch { expected, actual } => write!(
+                formatter,
+                "rigid-body identifier mismatch: expected {expected:032x}, computed {actual:032x}"
+            ),
             Self::ZeroMass => write!(formatter, "detached island has zero physical mass"),
             Self::CenterOfMassOverflow => write!(formatter, "center of mass exceeds fixed units"),
         }
@@ -111,14 +143,77 @@ impl RigidBodyDescriptor {
             return Err(BodyError::ZeroMass);
         }
 
-        let center_of_mass_mm = center_of_mass(world, &canonical.voxels, canonical.mass_kg)?;
-        let inertia_diagonal_kg_mm2 = inertia_diagonal(world, &canonical.voxels, center_of_mass_mm);
+        let voxels = canonical
+            .voxels
+            .iter()
+            .copied()
+            .map(|position| BodyVoxel {
+                position,
+                voxel: world.voxel(position),
+            })
+            .collect();
+        Self::from_replicated_voxels(canonical.fingerprint, voxels, limits)
+    }
+
+    /// Rebuilds and verifies a body from untrusted replicated voxel membership.
+    ///
+    /// # Errors
+    ///
+    /// Applies the same size, canonical-order, structural-material, connectivity, mass, and identity
+    /// checks as local promotion.
+    pub fn from_replicated_voxels(
+        expected_id: u128,
+        voxels: Vec<BodyVoxel>,
+        limits: BodyLimits,
+    ) -> Result<Self, BodyError> {
+        if voxels.is_empty() {
+            return Err(BodyError::EmptyIsland);
+        }
+        if voxels.len() > limits.max_voxels {
+            return Err(BodyError::TooManyVoxels(voxels.len()));
+        }
+        for pair in voxels.windows(2) {
+            if pair[0].position >= pair[1].position {
+                return Err(BodyError::NonCanonicalVoxels(pair[1].position));
+            }
+        }
+        if let Some(invalid) = voxels.iter().find(|body_voxel| {
+            !body_voxel.voxel.is_solid()
+                || body_voxel.voxel.material.properties().structural_strength == 0
+        }) {
+            return Err(BodyError::NonStructuralVoxel(invalid.position));
+        }
+        if !is_connected(&voxels) {
+            return Err(BodyError::DisconnectedVoxels);
+        }
+
+        let (minimum, maximum) = body_bounds(&voxels);
+        let mut mass_kg = 0_u64;
+        let mut fingerprint = ISLAND_FINGERPRINT_SEED;
+        for body_voxel in &voxels {
+            mass_kg = mass_kg.saturating_add(u64::from(
+                body_voxel.voxel.material.properties().density_kg_m3,
+            ));
+            fingerprint =
+                mix_island_fingerprint(fingerprint, body_voxel.position, body_voxel.voxel);
+        }
+        if mass_kg == 0 {
+            return Err(BodyError::ZeroMass);
+        }
+        if fingerprint != expected_id {
+            return Err(BodyError::IdentifierMismatch {
+                expected: expected_id,
+                actual: fingerprint,
+            });
+        }
+        let center_of_mass_mm = center_of_mass(&voxels, mass_kg)?;
+        let inertia_diagonal_kg_mm2 = inertia_diagonal(&voxels, center_of_mass_mm);
         Ok(Self {
-            id: canonical.fingerprint,
-            voxels: canonical.voxels,
-            minimum: canonical.minimum,
-            maximum: canonical.maximum,
-            mass_kg: canonical.mass_kg,
+            id: fingerprint,
+            voxels,
+            minimum,
+            maximum,
+            mass_kg,
             center_of_mass_mm,
             inertia_diagonal_kg_mm2,
         })
@@ -126,13 +221,13 @@ impl RigidBodyDescriptor {
 }
 
 fn center_of_mass(
-    world: &World,
-    voxels: &[IVec3],
+    voxels: &[BodyVoxel],
     total_mass_kg: u64,
 ) -> Result<FixedMillimeters3, BodyError> {
     let mut weighted = [0_i128; 3];
-    for &position in voxels {
-        let mass = i128::from(world.voxel(position).material.properties().density_kg_m3);
+    for body_voxel in voxels {
+        let position = body_voxel.position;
+        let mass = i128::from(body_voxel.voxel.material.properties().density_kg_m3);
         for (sum, coordinate) in weighted.iter_mut().zip([
             voxel_center_mm(position.x),
             voxel_center_mm(position.y),
@@ -149,14 +244,11 @@ fn center_of_mass(
     })
 }
 
-fn inertia_diagonal(
-    world: &World,
-    voxels: &[IVec3],
-    center: FixedMillimeters3,
-) -> InertiaDiagonalKgMm2 {
+fn inertia_diagonal(voxels: &[BodyVoxel], center: FixedMillimeters3) -> InertiaDiagonalKgMm2 {
     let mut inertia = InertiaDiagonalKgMm2::default();
-    for &position in voxels {
-        let mass = u128::from(world.voxel(position).material.properties().density_kg_m3);
+    for body_voxel in voxels {
+        let position = body_voxel.position;
+        let mass = u128::from(body_voxel.voxel.material.properties().density_kg_m3);
         let dx = absolute_difference(center.x, voxel_center_mm(position.x));
         let dy = absolute_difference(center.y, voxel_center_mm(position.y));
         let dz = absolute_difference(center.z, voxel_center_mm(position.z));
@@ -175,6 +267,53 @@ fn inertia_diagonal(
         );
     }
     inertia
+}
+
+fn is_connected(voxels: &[BodyVoxel]) -> bool {
+    let positions: HashSet<_> = voxels
+        .iter()
+        .map(|body_voxel| body_voxel.position)
+        .collect();
+    let mut visited = HashSet::with_capacity(voxels.len());
+    let mut queue = VecDeque::from([voxels[0].position]);
+    visited.insert(voxels[0].position);
+    while let Some(position) = queue.pop_front() {
+        for offset in BODY_NEIGHBORS {
+            let neighbor = IVec3::new(
+                position.x.saturating_add(offset.x),
+                position.y.saturating_add(offset.y),
+                position.z.saturating_add(offset.z),
+            );
+            if positions.contains(&neighbor) && visited.insert(neighbor) {
+                queue.push_back(neighbor);
+            }
+        }
+    }
+    visited.len() == voxels.len()
+}
+
+fn body_bounds(voxels: &[BodyVoxel]) -> (IVec3, IVec3) {
+    voxels.iter().fold(
+        (
+            IVec3::new(i32::MAX, i32::MAX, i32::MAX),
+            IVec3::new(i32::MIN, i32::MIN, i32::MIN),
+        ),
+        |(minimum, maximum), body_voxel| {
+            let position = body_voxel.position;
+            (
+                IVec3::new(
+                    minimum.x.min(position.x),
+                    minimum.y.min(position.y),
+                    minimum.z.min(position.z),
+                ),
+                IVec3::new(
+                    maximum.x.max(position.x),
+                    maximum.y.max(position.y),
+                    maximum.z.max(position.z),
+                ),
+            )
+        },
+    )
 }
 
 #[allow(clippy::missing_const_for_fn)]
@@ -301,5 +440,33 @@ mod tests {
             ),
             Err(BodyError::TooManyVoxels(1))
         );
+    }
+
+    #[test]
+    fn replicated_voxels_require_connectivity_and_matching_identity() {
+        let voxel = Voxel::new(Material::Steel);
+        let disconnected = vec![
+            BodyVoxel {
+                position: IVec3::new(0, 2, 0),
+                voxel,
+            },
+            BodyVoxel {
+                position: IVec3::new(2, 2, 0),
+                voxel,
+            },
+        ];
+        assert_eq!(
+            RigidBodyDescriptor::from_replicated_voxels(0, disconnected, BodyLimits::default()),
+            Err(BodyError::DisconnectedVoxels)
+        );
+
+        let canonical = vec![BodyVoxel {
+            position: IVec3::new(0, 2, 0),
+            voxel,
+        }];
+        assert!(matches!(
+            RigidBodyDescriptor::from_replicated_voxels(123, canonical, BodyLimits::default()),
+            Err(BodyError::IdentifierMismatch { expected: 123, .. })
+        ));
     }
 }

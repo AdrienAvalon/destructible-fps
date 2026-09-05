@@ -22,6 +22,7 @@ struct Harness {
     random: XorShift64,
     changes: usize,
     fractured: usize,
+    detached: usize,
     frames_sent: usize,
     wire_bytes: usize,
 }
@@ -35,6 +36,7 @@ impl Harness {
             random: XorShift64::new(0x5eed_f00d_dead_beef),
             changes: 0,
             fractured: 0,
+            detached: 0,
             frames_sent: 0,
             wire_bytes: 0,
         }
@@ -74,12 +76,18 @@ impl Harness {
         }
         self.changes += report.changes.len();
         self.fractured += report.fractured_voxels;
+        self.detached += report.detached_voxels;
         Ok(event_start.elapsed())
     }
 
     fn verify(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.server.world().fingerprint() != self.client.world().fingerprint() {
             return Err("authoritative server and client replica diverged".into());
+        }
+        if self.server.body_fingerprint() != self.client.body_fingerprint()
+            || self.server.bodies() != self.client.bodies()
+        {
+            return Err("authoritative and replicated rigid bodies diverged".into());
         }
         if self.server.world().fingerprint() != self.server.world().recompute_fingerprint() {
             return Err("incremental server fingerprint differs from the reference scan".into());
@@ -96,6 +104,8 @@ struct BenchmarkResult {
     p99: Duration,
     changes: usize,
     fractured: usize,
+    detached: usize,
+    active_bodies: usize,
     frames_sent: usize,
     wire_bytes: usize,
     initial_solids: usize,
@@ -122,6 +132,8 @@ fn run_benchmark(events: usize) -> Result<BenchmarkResult, Box<dyn std::error::E
         p99: percentile(&durations, 99),
         changes: harness.changes,
         fractured: harness.fractured,
+        detached: harness.detached,
+        active_bodies: harness.server.bodies().len(),
         frames_sent: harness.frames_sent,
         wire_bytes: harness.wire_bytes,
         initial_solids: initial_stats.solid_voxels,
@@ -147,6 +159,8 @@ fn print_result(result: &BenchmarkResult) {
     );
     println!("  voxel changes       {}", result.changes);
     println!("  fractured voxels    {}", result.fractured);
+    println!("  detached voxels     {}", result.detached);
+    println!("  active bodies       {}", result.active_bodies);
     println!(
         "  network frames      {} (MTU {NETWORK_MTU})",
         result.frames_sent

@@ -1,16 +1,26 @@
 use crate::destruction::{DestructionReport, Explosion};
 use crate::material::{InvalidMaterial, Voxel};
+use crate::physics::{BodyError, BodyLimits, BodyVoxel, RigidBodyDescriptor};
+use crate::structural::{
+    StructuralAnchors, StructuralError, StructuralLimits, analyze_structural_changes,
+};
 use crate::world::{IVec3, VoxelChange, World, WorldError};
 use core::fmt;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const MAGIC: [u8; 4] = *b"DFPS";
-const PROTOCOL_VERSION: u8 = 1;
+const PROTOCOL_VERSION: u8 = 2;
 const DELTA_KIND: u8 = 1;
-const HEADER_BYTES: usize = 60;
+const HEADER_BYTES: usize = 94;
 const CHANGE_BYTES: usize = 16;
+const BODY_ASSIGNMENT_BYTES: usize = 30;
+const MAX_DATAGRAM_BYTES: usize = 1_200;
 const MAX_FRAGMENTS: u16 = 1_024;
 const MAX_PENDING_PACKETS: usize = 64;
+const MAX_PENDING_BYTES: usize = 8 * 1_024 * 1_024;
+const MAX_ACTIVE_BODIES: usize = 1_024;
+const MAX_ACTIVE_BODY_VOXELS: usize = 262_144;
+const MAX_SPAWNED_BODY_VOXELS: usize = 16_384;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExplosionCommand {
@@ -20,13 +30,23 @@ pub struct ExplosionCommand {
     pub peak_energy: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BodyVoxelAssignment {
+    pub body_id: u128,
+    pub position: IVec3,
+    pub voxel: Voxel,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeltaPacket {
     pub sequence: u64,
     pub tick: u64,
     pub base_fingerprint: u128,
     pub final_fingerprint: u128,
+    pub base_body_fingerprint: u128,
+    pub final_body_fingerprint: u128,
     pub changes: Vec<VoxelChange>,
+    pub body_assignments: Vec<BodyVoxelAssignment>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,14 +55,23 @@ pub struct DeltaFrame {
     pub tick: u64,
     pub base_fingerprint: u128,
     pub final_fingerprint: u128,
+    pub base_body_fingerprint: u128,
+    pub final_body_fingerprint: u128,
     pub fragment_index: u16,
     pub fragment_count: u16,
     pub changes: Vec<VoxelChange>,
+    pub body_assignments: Vec<BodyVoxelAssignment>,
 }
 
 #[derive(Clone)]
 pub struct AuthoritativeServer {
     world: World,
+    bodies: BTreeMap<u128, RigidBodyDescriptor>,
+    body_fingerprint: u128,
+    active_body_voxels: usize,
+    structural_anchors: StructuralAnchors,
+    structural_limits: StructuralLimits,
+    body_limits: BodyLimits,
     next_sequence: u64,
     last_command_id: HashMap<u64, u64>,
 }
@@ -52,7 +81,19 @@ pub enum CommandError {
     ZeroRadius,
     RadiusTooLarge(u16),
     EnergyTooLarge(u32),
-    ReplayedCommand { client_id: u64, command_id: u64 },
+    ReplayedCommand {
+        client_id: u64,
+        command_id: u64,
+    },
+    Structural(StructuralError),
+    Body(BodyError),
+    TooManyActiveBodies(usize),
+    TooManyActiveBodyVoxels(usize),
+    DuplicateBodyId(u128),
+    TransactionTooLarge {
+        changes: usize,
+        body_assignments: usize,
+    },
 }
 
 impl fmt::Display for CommandError {
@@ -60,7 +101,7 @@ impl fmt::Display for CommandError {
         match self {
             Self::ZeroRadius => write!(formatter, "explosion radius must be non-zero"),
             Self::RadiusTooLarge(radius) => {
-                write!(formatter, "explosion radius {radius} exceeds 64")
+                write!(formatter, "explosion radius {radius} exceeds 16")
             }
             Self::EnergyTooLarge(energy) => {
                 write!(formatter, "explosion energy {energy} exceeds 1,000,000")
@@ -72,20 +113,67 @@ impl fmt::Display for CommandError {
                 formatter,
                 "replayed command {command_id} from client {client_id}"
             ),
+            Self::Structural(error) => error.fmt(formatter),
+            Self::Body(error) => error.fmt(formatter),
+            Self::TooManyActiveBodies(count) => {
+                write!(formatter, "active rigid-body count would reach {count}")
+            }
+            Self::TooManyActiveBodyVoxels(count) => {
+                write!(formatter, "active rigid-body voxels would reach {count}")
+            }
+            Self::DuplicateBodyId(id) => write!(formatter, "duplicate rigid-body id {id:032x}"),
+            Self::TransactionTooLarge {
+                changes,
+                body_assignments,
+            } => write!(
+                formatter,
+                "authoritative transaction is too large: {changes} changes and {body_assignments} body assignments"
+            ),
         }
     }
 }
 
 impl std::error::Error for CommandError {}
 
+impl From<StructuralError> for CommandError {
+    fn from(value: StructuralError) -> Self {
+        Self::Structural(value)
+    }
+}
+
+impl From<BodyError> for CommandError {
+    fn from(value: BodyError) -> Self {
+        Self::Body(value)
+    }
+}
+
 impl AuthoritativeServer {
     #[must_use]
     pub fn new(world: World) -> Self {
         Self {
             world,
+            bodies: BTreeMap::new(),
+            body_fingerprint: 0,
+            active_body_voxels: 0,
+            structural_anchors: StructuralAnchors::foundation_plane(0),
+            structural_limits: StructuralLimits::default(),
+            body_limits: BodyLimits::default(),
             next_sequence: 1,
             last_command_id: HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_structural_config(
+        mut self,
+        anchors: StructuralAnchors,
+        structural_limits: StructuralLimits,
+        body_limits: BodyLimits,
+    ) -> Self {
+        self.structural_anchors = anchors;
+        self.structural_limits = structural_limits;
+        self.body_limits = body_limits;
+        self
     }
 
     /// Validates and applies one client request as an authoritative transaction.
@@ -111,11 +199,48 @@ impl AuthoritativeServer {
         }
 
         let base_fingerprint = self.world.fingerprint();
-        let report = self.world.apply_explosion(Explosion {
+        let base_body_fingerprint = self.body_fingerprint;
+        let mut report = self.world.apply_explosion(Explosion {
             center: command.center,
             radius_voxels: command.radius_voxels,
             peak_energy: command.peak_energy,
         });
+        let bodies = match self.prepare_detached_bodies(&report.changes) {
+            Ok(bodies) => bodies,
+            Err(error) => {
+                rollback_changes(&mut self.world, &report.changes);
+                return Err(error);
+            }
+        };
+        let spawned_voxels = bodies.iter().map(|body| body.voxels.len()).sum::<usize>();
+        let active_body_count = self.bodies.len().saturating_add(bodies.len());
+        let active_body_voxels = self.active_body_voxels.saturating_add(spawned_voxels);
+        if active_body_count > MAX_ACTIVE_BODIES {
+            rollback_changes(&mut self.world, &report.changes);
+            return Err(CommandError::TooManyActiveBodies(active_body_count));
+        }
+        if active_body_voxels > MAX_ACTIVE_BODY_VOXELS {
+            rollback_changes(&mut self.world, &report.changes);
+            return Err(CommandError::TooManyActiveBodyVoxels(active_body_voxels));
+        }
+        let (changes, body_assignments) = merged_detachment_changes(&self.world, &report, &bodies);
+        if !payload_fits_protocol(changes.len(), body_assignments.len(), MAX_DATAGRAM_BYTES) {
+            rollback_changes(&mut self.world, &report.changes);
+            return Err(CommandError::TransactionTooLarge {
+                changes: changes.len(),
+                body_assignments: body_assignments.len(),
+            });
+        }
+        for assignment in &body_assignments {
+            self.world.set_voxel(assignment.position, Voxel::AIR);
+        }
+        report.detached_voxels = spawned_voxels;
+        report.changes = changes;
+        for body in bodies {
+            self.body_fingerprint ^= body_fingerprint_token(body.id);
+            self.bodies.insert(body.id, body);
+        }
+        self.active_body_voxels = active_body_voxels;
         let tick = self.world.tick().wrapping_add(1);
         self.world.set_tick(tick);
         let packet = DeltaPacket {
@@ -123,7 +248,10 @@ impl AuthoritativeServer {
             tick,
             base_fingerprint,
             final_fingerprint: self.world.fingerprint(),
+            base_body_fingerprint,
+            final_body_fingerprint: self.body_fingerprint,
             changes: report.changes.clone(),
+            body_assignments,
         };
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.last_command_id.insert(client_id, command.command_id);
@@ -134,13 +262,123 @@ impl AuthoritativeServer {
     pub const fn world(&self) -> &World {
         &self.world
     }
+
+    #[must_use]
+    pub const fn bodies(&self) -> &BTreeMap<u128, RigidBodyDescriptor> {
+        &self.bodies
+    }
+
+    #[must_use]
+    pub const fn body_fingerprint(&self) -> u128 {
+        self.body_fingerprint
+    }
+
+    fn prepare_detached_bodies(
+        &self,
+        changes: &[VoxelChange],
+    ) -> Result<Vec<RigidBodyDescriptor>, CommandError> {
+        let structural = analyze_structural_changes(
+            &self.world,
+            changes,
+            &self.structural_anchors,
+            self.structural_limits,
+        )?;
+        let spawned_voxels = structural
+            .detached_islands
+            .iter()
+            .map(|island| island.voxels().len())
+            .sum::<usize>();
+        if spawned_voxels > MAX_SPAWNED_BODY_VOXELS {
+            return Err(CommandError::TransactionTooLarge {
+                changes: changes.len(),
+                body_assignments: spawned_voxels,
+            });
+        }
+        let mut bodies = Vec::with_capacity(structural.detached_islands.len());
+        for island in structural.detached_islands {
+            let body =
+                RigidBodyDescriptor::from_detached_island(&self.world, &island, self.body_limits)?;
+            if self.bodies.contains_key(&body.id)
+                || bodies
+                    .iter()
+                    .any(|existing: &RigidBodyDescriptor| existing.id == body.id)
+            {
+                return Err(CommandError::DuplicateBodyId(body.id));
+            }
+            bodies.push(body);
+        }
+        Ok(bodies)
+    }
+}
+
+fn merged_detachment_changes(
+    world: &World,
+    report: &DestructionReport,
+    bodies: &[RigidBodyDescriptor],
+) -> (Vec<VoxelChange>, Vec<BodyVoxelAssignment>) {
+    let mut changes: BTreeMap<_, _> = report
+        .changes
+        .iter()
+        .copied()
+        .map(|change| (change.position, change))
+        .collect();
+    let mut assignments = Vec::new();
+    for body in bodies {
+        for body_voxel in &body.voxels {
+            changes
+                .entry(body_voxel.position)
+                .and_modify(|change| change.after = Voxel::AIR)
+                .or_insert_with(|| VoxelChange {
+                    position: body_voxel.position,
+                    before: world.voxel(body_voxel.position),
+                    after: Voxel::AIR,
+                });
+            assignments.push(BodyVoxelAssignment {
+                body_id: body.id,
+                position: body_voxel.position,
+                voxel: body_voxel.voxel,
+            });
+        }
+    }
+    assignments.sort_unstable_by_key(|assignment| (assignment.body_id, assignment.position));
+    (changes.into_values().collect(), assignments)
+}
+
+fn rollback_changes(world: &mut World, changes: &[VoxelChange]) {
+    for change in changes.iter().rev() {
+        debug_assert_eq!(world.voxel(change.position), change.after);
+        world.set_voxel(change.position, change.before);
+    }
+}
+
+const fn body_fingerprint_token(id: u128) -> u128 {
+    id.rotate_left(41) ^ 0xa076_1d64_78bd_642f_e703_7ed1_a0b4_28db_u128
+}
+
+fn payload_fragment_count(changes: usize, assignments: usize, mtu: usize) -> Option<usize> {
+    if !(HEADER_BYTES + CHANGE_BYTES..=MAX_DATAGRAM_BYTES).contains(&mtu) {
+        return None;
+    }
+    let changes_per_frame = (mtu - HEADER_BYTES) / CHANGE_BYTES;
+    let assignments_per_frame = (mtu - HEADER_BYTES) / BODY_ASSIGNMENT_BYTES;
+    if changes > 0 && changes_per_frame == 0 || assignments > 0 && assignments_per_frame == 0 {
+        return None;
+    }
+    let change_fragments = changes.div_ceil(changes_per_frame.max(1));
+    let assignment_fragments = assignments.div_ceil(assignments_per_frame.max(1));
+    Some(change_fragments.saturating_add(assignment_fragments).max(1))
+}
+
+fn payload_fits_protocol(changes: usize, assignments: usize, mtu: usize) -> bool {
+    payload_fragment_count(changes, assignments, mtu)
+        .is_some_and(|count| count <= usize::from(MAX_FRAGMENTS))
 }
 
 const fn validate_command(command: ExplosionCommand) -> Result<(), CommandError> {
     if command.radius_voxels == 0 {
         return Err(CommandError::ZeroRadius);
     }
-    if command.radius_voxels > 64 {
+    if command.radius_voxels > 16 {
         return Err(CommandError::RadiusTooLarge(command.radius_voxels));
     }
     if command.peak_energy > 1_000_000 {
@@ -152,6 +390,9 @@ const fn validate_command(command: ExplosionCommand) -> Result<(), CommandError>
 #[derive(Clone)]
 pub struct ClientReplica {
     world: World,
+    bodies: BTreeMap<u128, RigidBodyDescriptor>,
+    body_fingerprint: u128,
+    active_body_voxels: usize,
     expected_sequence: u64,
 }
 
@@ -165,6 +406,13 @@ pub enum ClientStatus {
 pub enum ReplicationError {
     SequenceGap { expected: u64, received: u64 },
     BaseFingerprintMismatch { expected: u128, received: u128 },
+    BodyFingerprintMismatch { expected: u128, received: u128 },
+    NonCanonicalBodyAssignments,
+    BodyAssignmentWithoutRemoval(IVec3),
+    DuplicateBodyId(u128),
+    TooManyActiveBodies(usize),
+    TooManyActiveBodyVoxels(usize),
+    Body(BodyError),
     World(WorldError),
 }
 
@@ -181,6 +429,29 @@ impl fmt::Display for ReplicationError {
                 formatter,
                 "base fingerprint mismatch: local {expected:032x}, packet {received:032x}"
             ),
+            Self::BodyFingerprintMismatch { expected, received } => write!(
+                formatter,
+                "body fingerprint mismatch: local {expected:032x}, packet {received:032x}"
+            ),
+            Self::NonCanonicalBodyAssignments => {
+                write!(formatter, "body assignments are not canonically ordered")
+            }
+            Self::BodyAssignmentWithoutRemoval(position) => write!(
+                formatter,
+                "body assignment at {position:?} has no matching static-world removal"
+            ),
+            Self::DuplicateBodyId(id) => write!(formatter, "duplicate rigid-body id {id:032x}"),
+            Self::TooManyActiveBodies(count) => {
+                write!(
+                    formatter,
+                    "replica active rigid-body count would reach {count}"
+                )
+            }
+            Self::TooManyActiveBodyVoxels(count) => write!(
+                formatter,
+                "replica active rigid-body voxels would reach {count}"
+            ),
+            Self::Body(error) => error.fmt(formatter),
             Self::World(error) => error.fmt(formatter),
         }
     }
@@ -194,11 +465,20 @@ impl From<WorldError> for ReplicationError {
     }
 }
 
+impl From<BodyError> for ReplicationError {
+    fn from(value: BodyError) -> Self {
+        Self::Body(value)
+    }
+}
+
 impl ClientReplica {
     #[must_use]
     pub const fn new(world: World) -> Self {
         Self {
             world,
+            bodies: BTreeMap::new(),
+            body_fingerprint: 0,
+            active_body_voxels: 0,
             expected_sequence: 1,
         }
     }
@@ -224,8 +504,42 @@ impl ClientReplica {
                 received: packet.base_fingerprint,
             });
         }
+        if self.body_fingerprint != packet.base_body_fingerprint {
+            return Err(ReplicationError::BodyFingerprintMismatch {
+                expected: self.body_fingerprint,
+                received: packet.base_body_fingerprint,
+            });
+        }
+        let bodies =
+            rebuild_replicated_bodies(&packet.changes, &packet.body_assignments, &self.bodies)?;
+        let active_body_count = self.bodies.len().saturating_add(bodies.len());
+        let spawned_voxels = bodies.iter().map(|body| body.voxels.len()).sum::<usize>();
+        let active_body_voxels = self.active_body_voxels.saturating_add(spawned_voxels);
+        if active_body_count > MAX_ACTIVE_BODIES {
+            return Err(ReplicationError::TooManyActiveBodies(active_body_count));
+        }
+        if active_body_voxels > MAX_ACTIVE_BODY_VOXELS {
+            return Err(ReplicationError::TooManyActiveBodyVoxels(
+                active_body_voxels,
+            ));
+        }
+        let mut final_body_fingerprint = self.body_fingerprint;
+        for body in &bodies {
+            final_body_fingerprint ^= body_fingerprint_token(body.id);
+        }
+        if final_body_fingerprint != packet.final_body_fingerprint {
+            return Err(ReplicationError::BodyFingerprintMismatch {
+                expected: final_body_fingerprint,
+                received: packet.final_body_fingerprint,
+            });
+        }
         self.world
             .apply_checked(&packet.changes, packet.final_fingerprint)?;
+        for body in bodies {
+            self.bodies.insert(body.id, body);
+        }
+        self.body_fingerprint = final_body_fingerprint;
+        self.active_body_voxels = active_body_voxels;
         self.world.set_tick(packet.tick);
         self.expected_sequence = self.expected_sequence.wrapping_add(1);
         Ok(ClientStatus::Applied)
@@ -233,8 +547,18 @@ impl ClientReplica {
 
     /// Installs a server snapshot after a detected gap. The next delta is explicit to avoid
     /// accepting a stale snapshot that would silently move the client backwards.
-    pub fn install_snapshot(&mut self, world: World, next_sequence: u64) {
+    pub fn install_snapshot(
+        &mut self,
+        world: World,
+        bodies: BTreeMap<u128, RigidBodyDescriptor>,
+        next_sequence: u64,
+    ) {
+        self.active_body_voxels = bodies.values().map(|body| body.voxels.len()).sum();
+        self.body_fingerprint = bodies.keys().fold(0, |fingerprint, &id| {
+            fingerprint ^ body_fingerprint_token(id)
+        });
         self.world = world;
+        self.bodies = bodies;
         self.expected_sequence = next_sequence;
     }
 
@@ -242,11 +566,83 @@ impl ClientReplica {
     pub const fn world(&self) -> &World {
         &self.world
     }
+
+    #[must_use]
+    pub const fn bodies(&self) -> &BTreeMap<u128, RigidBodyDescriptor> {
+        &self.bodies
+    }
+
+    #[must_use]
+    pub const fn body_fingerprint(&self) -> u128 {
+        self.body_fingerprint
+    }
+}
+
+fn rebuild_replicated_bodies(
+    changes: &[VoxelChange],
+    assignments: &[BodyVoxelAssignment],
+    existing: &BTreeMap<u128, RigidBodyDescriptor>,
+) -> Result<Vec<RigidBodyDescriptor>, ReplicationError> {
+    if assignments.len() > MAX_SPAWNED_BODY_VOXELS {
+        return Err(ReplicationError::TooManyActiveBodyVoxels(assignments.len()));
+    }
+    for pair in changes.windows(2) {
+        if pair[0].position >= pair[1].position {
+            return Err(ReplicationError::World(
+                WorldError::DuplicateOrUnsortedChange(pair[1].position),
+            ));
+        }
+    }
+    for pair in assignments.windows(2) {
+        if (pair[0].body_id, pair[0].position) >= (pair[1].body_id, pair[1].position) {
+            return Err(ReplicationError::NonCanonicalBodyAssignments);
+        }
+    }
+    let changes_by_position: HashMap<_, _> = changes
+        .iter()
+        .map(|change| (change.position, change))
+        .collect();
+    let mut grouped = BTreeMap::<u128, Vec<BodyVoxel>>::new();
+    for assignment in assignments {
+        let valid_removal = changes_by_position
+            .get(&assignment.position)
+            .is_some_and(|change| {
+                change.after == Voxel::AIR
+                    && change.before.material == assignment.voxel.material
+                    && change.before.integrity >= assignment.voxel.integrity
+            });
+        if !valid_removal {
+            return Err(ReplicationError::BodyAssignmentWithoutRemoval(
+                assignment.position,
+            ));
+        }
+        grouped
+            .entry(assignment.body_id)
+            .or_default()
+            .push(BodyVoxel {
+                position: assignment.position,
+                voxel: assignment.voxel,
+            });
+    }
+
+    let mut bodies = Vec::with_capacity(grouped.len());
+    for (id, voxels) in grouped {
+        if existing.contains_key(&id) {
+            return Err(ReplicationError::DuplicateBodyId(id));
+        }
+        bodies.push(RigidBodyDescriptor::from_replicated_voxels(
+            id,
+            voxels,
+            BodyLimits::default(),
+        )?);
+    }
+    Ok(bodies)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CodecError {
     MtuTooSmall(usize),
+    MtuTooLarge(usize),
     TooManyFragments(usize),
     Truncated,
     InvalidMagic,
@@ -257,6 +653,7 @@ pub enum CodecError {
     InvalidMaterial(InvalidMaterial),
     InconsistentFragment,
     TooManyPendingPackets,
+    TooManyPendingBytes,
 }
 
 impl fmt::Display for CodecError {
@@ -282,8 +679,22 @@ pub fn encode_frames(packet: &DeltaPacket, mtu: usize) -> Result<Vec<Vec<u8>>, C
     if mtu < HEADER_BYTES + CHANGE_BYTES {
         return Err(CodecError::MtuTooSmall(mtu));
     }
-    let changes_per_frame = ((mtu - HEADER_BYTES) / CHANGE_BYTES).min(usize::from(u16::MAX));
-    let fragment_count = packet.changes.len().max(1).div_ceil(changes_per_frame);
+    if mtu > MAX_DATAGRAM_BYTES {
+        return Err(CodecError::MtuTooLarge(mtu));
+    }
+    let changes_per_frame = (mtu - HEADER_BYTES) / CHANGE_BYTES;
+    let assignments_per_frame = (mtu - HEADER_BYTES) / BODY_ASSIGNMENT_BYTES;
+    if !packet.body_assignments.is_empty() && assignments_per_frame == 0 {
+        return Err(CodecError::MtuTooSmall(mtu));
+    }
+    let change_fragments = packet.changes.len().div_ceil(changes_per_frame.max(1));
+    let assignment_fragments = packet
+        .body_assignments
+        .len()
+        .div_ceil(assignments_per_frame.max(1));
+    let fragment_count =
+        payload_fragment_count(packet.changes.len(), packet.body_assignments.len(), mtu)
+            .ok_or(CodecError::MtuTooSmall(mtu))?;
     if fragment_count > usize::from(MAX_FRAGMENTS) || fragment_count > usize::from(u16::MAX) {
         return Err(CodecError::TooManyFragments(fragment_count));
     }
@@ -291,14 +702,21 @@ pub fn encode_frames(packet: &DeltaPacket, mtu: usize) -> Result<Vec<Vec<u8>>, C
         u16::try_from(fragment_count).map_err(|_| CodecError::TooManyFragments(fragment_count))?;
     let mut frames = Vec::with_capacity(usize::from(fragment_count));
     for fragment_index in 0..fragment_count {
-        let start = usize::from(fragment_index) * changes_per_frame;
-        let end = (start + changes_per_frame).min(packet.changes.len());
-        let changes = if start < packet.changes.len() {
-            &packet.changes[start..end]
+        let index = usize::from(fragment_index);
+        let (changes, assignments) = if index < change_fragments {
+            let start = index * changes_per_frame;
+            let end = (start + changes_per_frame).min(packet.changes.len());
+            (&packet.changes[start..end], &[][..])
         } else {
-            &[]
+            let assignment_index = index.saturating_sub(change_fragments);
+            let start = assignment_index * assignments_per_frame.max(1);
+            let end = (start + assignments_per_frame.max(1)).min(packet.body_assignments.len());
+            (&[][..], &packet.body_assignments[start..end])
         };
-        let mut bytes = Vec::with_capacity(HEADER_BYTES + changes.len() * CHANGE_BYTES);
+        debug_assert!(index < change_fragments + assignment_fragments || fragment_count == 1);
+        let mut bytes = Vec::with_capacity(
+            HEADER_BYTES + changes.len() * CHANGE_BYTES + assignments.len() * BODY_ASSIGNMENT_BYTES,
+        );
         bytes.extend_from_slice(&MAGIC);
         bytes.push(PROTOCOL_VERSION);
         bytes.push(DELTA_KIND);
@@ -306,11 +724,16 @@ pub fn encode_frames(packet: &DeltaPacket, mtu: usize) -> Result<Vec<Vec<u8>>, C
         push_u64(&mut bytes, packet.tick);
         push_u128(&mut bytes, packet.base_fingerprint);
         push_u128(&mut bytes, packet.final_fingerprint);
+        push_u128(&mut bytes, packet.base_body_fingerprint);
+        push_u128(&mut bytes, packet.final_body_fingerprint);
         push_u16(&mut bytes, fragment_index);
         push_u16(&mut bytes, fragment_count);
         let change_count = u16::try_from(changes.len())
             .map_err(|_| CodecError::TooManyFragments(usize::from(fragment_count)))?;
         push_u16(&mut bytes, change_count);
+        let assignment_count = u16::try_from(assignments.len())
+            .map_err(|_| CodecError::TooManyFragments(usize::from(fragment_count)))?;
+        push_u16(&mut bytes, assignment_count);
         for change in changes {
             push_i32(&mut bytes, change.position.x);
             push_i32(&mut bytes, change.position.y);
@@ -319,6 +742,14 @@ pub fn encode_frames(packet: &DeltaPacket, mtu: usize) -> Result<Vec<Vec<u8>>, C
             bytes.push(change.before.integrity);
             bytes.push(change.after.material as u8);
             bytes.push(change.after.integrity);
+        }
+        for assignment in assignments {
+            push_u128(&mut bytes, assignment.body_id);
+            push_i32(&mut bytes, assignment.position.x);
+            push_i32(&mut bytes, assignment.position.y);
+            push_i32(&mut bytes, assignment.position.z);
+            bytes.push(assignment.voxel.material as u8);
+            bytes.push(assignment.voxel.integrity);
         }
         debug_assert!(bytes.len() <= mtu);
         frames.push(bytes);
@@ -332,6 +763,9 @@ pub fn encode_frames(packet: &DeltaPacket, mtu: usize) -> Result<Vec<Vec<u8>>, C
 ///
 /// Rejects malformed headers, unsupported protocol values, inconsistent lengths, and materials.
 pub fn decode_frame(bytes: &[u8]) -> Result<DeltaFrame, CodecError> {
+    if bytes.len() > MAX_DATAGRAM_BYTES {
+        return Err(CodecError::MtuTooLarge(bytes.len()));
+    }
     if bytes.len() < HEADER_BYTES {
         return Err(CodecError::Truncated);
     }
@@ -351,13 +785,23 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DeltaFrame, CodecError> {
     let tick = cursor.take_u64()?;
     let base_fingerprint = cursor.take_u128()?;
     let final_fingerprint = cursor.take_u128()?;
+    let base_body_fingerprint = cursor.take_u128()?;
+    let final_body_fingerprint = cursor.take_u128()?;
     let fragment_index = cursor.take_u16()?;
     let fragment_count = cursor.take_u16()?;
     let change_count = usize::from(cursor.take_u16()?);
+    let assignment_count = usize::from(cursor.take_u16()?);
     if fragment_count == 0 || fragment_count > MAX_FRAGMENTS || fragment_index >= fragment_count {
         return Err(CodecError::InvalidFragmentLayout);
     }
-    let expected_length = HEADER_BYTES + change_count * CHANGE_BYTES;
+    let expected_length = HEADER_BYTES
+        .checked_add(
+            change_count
+                .checked_mul(CHANGE_BYTES)
+                .ok_or(CodecError::Truncated)?,
+        )
+        .and_then(|length| length.checked_add(assignment_count.checked_mul(BODY_ASSIGNMENT_BYTES)?))
+        .ok_or(CodecError::Truncated)?;
     if bytes.len() != expected_length {
         return Err(CodecError::InvalidLength {
             expected: expected_length,
@@ -376,27 +820,51 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DeltaFrame, CodecError> {
             after,
         });
     }
+    let mut body_assignments = Vec::with_capacity(assignment_count);
+    for _ in 0..assignment_count {
+        let body_id = cursor.take_u128()?;
+        let position = IVec3::new(cursor.take_i32()?, cursor.take_i32()?, cursor.take_i32()?);
+        let voxel = Voxel::from_wire(cursor.take_u8()?, cursor.take_u8()?)?;
+        body_assignments.push(BodyVoxelAssignment {
+            body_id,
+            position,
+            voxel,
+        });
+    }
     Ok(DeltaFrame {
         sequence,
         tick,
         base_fingerprint,
         final_fingerprint,
+        base_body_fingerprint,
+        final_body_fingerprint,
         fragment_index,
         fragment_count,
         changes,
+        body_assignments,
     })
 }
 
 #[derive(Default)]
 pub struct FrameAssembler {
     pending: HashMap<u64, PendingPacket>,
+    pending_bytes: usize,
 }
 
 struct PendingPacket {
     tick: u64,
     base_fingerprint: u128,
     final_fingerprint: u128,
-    fragments: Vec<Option<Vec<VoxelChange>>>,
+    base_body_fingerprint: u128,
+    final_body_fingerprint: u128,
+    fragments: Vec<Option<FrameFragment>>,
+    retained_bytes: usize,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct FrameFragment {
+    changes: Vec<VoxelChange>,
+    body_assignments: Vec<BodyVoxelAssignment>,
 }
 
 impl FrameAssembler {
@@ -410,6 +878,17 @@ impl FrameAssembler {
         {
             return Err(CodecError::TooManyPendingPackets);
         }
+        if self.pending.get(&frame.sequence).is_some_and(|pending| {
+            pending.tick != frame.tick
+                || pending.base_fingerprint != frame.base_fingerprint
+                || pending.final_fingerprint != frame.final_fingerprint
+                || pending.base_body_fingerprint != frame.base_body_fingerprint
+                || pending.final_body_fingerprint != frame.final_body_fingerprint
+                || pending.fragments.len() != usize::from(frame.fragment_count)
+        }) {
+            self.remove_pending(frame.sequence);
+            return Err(CodecError::InconsistentFragment);
+        }
         let pending = self
             .pending
             .entry(frame.sequence)
@@ -417,24 +896,37 @@ impl FrameAssembler {
                 tick: frame.tick,
                 base_fingerprint: frame.base_fingerprint,
                 final_fingerprint: frame.final_fingerprint,
+                base_body_fingerprint: frame.base_body_fingerprint,
+                final_body_fingerprint: frame.final_body_fingerprint,
                 fragments: vec![None; usize::from(frame.fragment_count)],
+                retained_bytes: 0,
             });
-        if pending.tick != frame.tick
-            || pending.base_fingerprint != frame.base_fingerprint
-            || pending.final_fingerprint != frame.final_fingerprint
-            || pending.fragments.len() != usize::from(frame.fragment_count)
-        {
-            self.pending.remove(&frame.sequence);
-            return Err(CodecError::InconsistentFragment);
-        }
         let slot = &mut pending.fragments[usize::from(frame.fragment_index)];
+        let fragment = FrameFragment {
+            changes: frame.changes,
+            body_assignments: frame.body_assignments,
+        };
         if let Some(existing) = slot {
-            if existing != &frame.changes {
-                self.pending.remove(&frame.sequence);
+            if existing != &fragment {
+                self.remove_pending(frame.sequence);
                 return Err(CodecError::InconsistentFragment);
             }
         } else {
-            *slot = Some(frame.changes);
+            let retained_bytes = HEADER_BYTES
+                .saturating_add(fragment.changes.len().saturating_mul(CHANGE_BYTES))
+                .saturating_add(
+                    fragment
+                        .body_assignments
+                        .len()
+                        .saturating_mul(BODY_ASSIGNMENT_BYTES),
+                );
+            if self.pending_bytes.saturating_add(retained_bytes) > MAX_PENDING_BYTES {
+                self.remove_pending(frame.sequence);
+                return Err(CodecError::TooManyPendingBytes);
+            }
+            self.pending_bytes += retained_bytes;
+            pending.retained_bytes += retained_bytes;
+            *slot = Some(fragment);
         }
         if pending.fragments.iter().any(Option::is_none) {
             return Ok(None);
@@ -444,19 +936,39 @@ impl FrameAssembler {
             .pending
             .remove(&frame.sequence)
             .ok_or(CodecError::InconsistentFragment)?;
-        let changes = complete.fragments.into_iter().flatten().flatten().collect();
+        self.pending_bytes = self.pending_bytes.saturating_sub(complete.retained_bytes);
+        let mut changes = Vec::new();
+        let mut body_assignments = Vec::new();
+        for fragment in complete.fragments.into_iter().flatten() {
+            changes.extend(fragment.changes);
+            body_assignments.extend(fragment.body_assignments);
+        }
         Ok(Some(DeltaPacket {
             sequence: frame.sequence,
             tick: complete.tick,
             base_fingerprint: complete.base_fingerprint,
             final_fingerprint: complete.final_fingerprint,
+            base_body_fingerprint: complete.base_body_fingerprint,
+            final_body_fingerprint: complete.final_body_fingerprint,
             changes,
+            body_assignments,
         }))
     }
 
     #[must_use]
     pub fn pending_packets(&self) -> usize {
         self.pending.len()
+    }
+
+    #[must_use]
+    pub const fn pending_bytes(&self) -> usize {
+        self.pending_bytes
+    }
+
+    fn remove_pending(&mut self, sequence: u64) {
+        if let Some(packet) = self.pending.remove(&sequence) {
+            self.pending_bytes = self.pending_bytes.saturating_sub(packet.retained_bytes);
+        }
     }
 }
 

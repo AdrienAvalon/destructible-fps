@@ -59,11 +59,12 @@ Command:
 cargo run --release --bin destruction-benchmark -- --events 500
 ```
 
-The representative multi-material scene completed 500 server-authoritative destruction,
-fragmentation, reordering, decode, reassembly, client-application, and final-verification cycles at
-77,742 events/s. Event latency was 0.009 ms p50, 0.035 ms p95, and 0.060 ms p99. The run produced
-768 application datagrams (0.468 MiB), fractured 14,321 voxels, and ended with identical server and
-client fingerprints.
+The representative multi-material scene completed 500 server-authoritative destruction, structural
+analysis, body promotion, protocol-v2 fragmentation, reordering, decode, reassembly,
+client-application, and final-verification cycles at 20,330 events/s. Event latency was 0.013 ms
+p50, 0.226 ms p95, and 0.451 ms p99, or 2.7% of one 60 Hz frame budget. The run produced 847
+application datagrams (0.525 MiB), fractured 13,009 voxels, detached 1,361 voxels into 32 active
+bodies, and ended with identical static-world and body-set state on server and client.
 
 ## 2026-09-05 — structural island extraction
 
@@ -79,19 +80,20 @@ foundation path, computes mass/bounds, and reproduces the same 128-bit island fi
 
 | Measurement | Result |
 |---|---:|
-| Combined throughput | 317 analyses and promotions/s |
-| Topology analysis p50 | 2.561 ms |
-| Topology analysis p95 | 2.605 ms |
-| Topology analysis p99 | 2.664 ms |
-| Body promotion p50 | 0.582 ms |
-| Body promotion p95 | 0.630 ms |
-| Body promotion p99 | 0.638 ms |
-| Combined p50 | 3.147 ms |
-| Combined p95 | 3.203 ms |
-| Combined p99 | 3.295 ms |
-| Combined max | 3.400 ms |
+| Combined throughput | 256 analyses and promotions/s |
+| Topology analysis p50 | 2.592 ms |
+| Topology analysis p95 | 2.624 ms |
+| Topology analysis p99 | 2.691 ms |
+| Body promotion p50 | 1.285 ms |
+| Body promotion p95 | 1.327 ms |
+| Body promotion p99 | 1.333 ms |
+| Combined p50 | 3.880 ms |
+| Combined p95 | 3.940 ms |
+| Combined p99 | 3.995 ms |
+| Combined max | 4.007 ms |
 
-The promotion step revalidates the read-only island proof, computes the fixed-unit centre of mass,
-and computes diagonal inertia. The combined result is below the 12 ms server-work target on this
-fixture. It is not yet a full collapse tick: static-world detachment, body integration, collision
-solving, transaction integration, and replication remain separate promotion gates.
+The promotion step revalidates the read-only island proof, canonical material voxels, six-neighbour
+connectivity and identity before computing fixed-unit centre of mass and diagonal inertia. The
+combined result is below the 12 ms server-work target on this fixture. Static-world detachment and
+replication are integrated separately in the end-to-end benchmark; fixed-step motion, collision
+solving, sleeping, and progressive stress remain later promotion gates.

@@ -43,6 +43,8 @@ snapshot. Corrupt or stale data cannot partially mutate a replica.
   roughness, surface variation, fog, and filmic tone mapping with exactly one display transfer;
 - bounded CPU frame distributions and non-blocking GPU timestamp readback with a fixed four-slot
   ring and graceful capability fallback;
+- conservative camera-frustum chunk culling with explicit resident, visible, world-draw, and
+  shadow-draw counters;
 - auto-terminating real-GPU smoke mode.
 
 Gate evidence: the release smoke test created a Vulkan surface on the RTX 4050 Laptop GPU, validated
@@ -54,7 +56,7 @@ cleanly. This is point-in-time developer-machine evidence, not a portable FPS gu
 - Linux and Windows window/input abstraction;
 - bindless material tables and physically based shading;
 - large-world streaming beyond the bounded local bootstrap window;
-- GPU frustum and occlusion culling;
+- hierarchical-Z occlusion culling and indirect drawing beyond the delivered CPU chunk frustum;
 - HDR output, temporal anti-aliasing, and measured dynamic resolution;
 - a benchmark capture for the RTX 4050 Laptop at 1,920×1,080.
 

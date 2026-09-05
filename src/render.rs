@@ -3,7 +3,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use crate::{
-    IVec3,
+    CHUNK_EDGE, IVec3,
     mesh::{CpuMesh, Vertex},
 };
 use bytemuck::{Pod, Zeroable};
@@ -43,6 +43,9 @@ struct GpuChunk {
 pub struct RenderStats {
     pub chunks: usize,
     pub exposed_faces: usize,
+    pub visible_chunks: usize,
+    pub world_draw_calls: usize,
+    pub shadow_draw_calls: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -586,14 +589,12 @@ impl Renderer {
     }
 
     fn refresh_stats(&mut self) {
-        self.stats = RenderStats {
-            chunks: self.chunks.len(),
-            exposed_faces: self
-                .chunks
-                .values()
-                .map(|chunk| chunk.index_count as usize / 6)
-                .sum(),
-        };
+        self.stats.chunks = self.chunks.len();
+        self.stats.exposed_faces = self
+            .chunks
+            .values()
+            .map(|chunk| chunk.index_count as usize / 6)
+            .sum();
     }
 
     #[must_use]
@@ -633,9 +634,10 @@ impl Renderer {
         let projection =
             glam::camera::rh::proj::directx::perspective(70_f32.to_radians(), aspect, 0.05, 420.0);
         let view = glam::camera::rh::view::look_to_mat4(camera_position, view_direction, Vec3::Y);
+        let view_projection = projection * view;
         let light_view_projection = light_view_projection();
         let globals = Globals {
-            view_projection: (projection * view).to_cols_array_2d(),
+            view_projection: view_projection.to_cols_array_2d(),
             light_view_projection: light_view_projection.to_cols_array_2d(),
             camera_time: [
                 camera_position.x,
@@ -666,6 +668,15 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
+        let visible_chunks: Vec<_> = self
+            .chunks
+            .iter()
+            .filter(|(position, _chunk)| chunk_intersects_frustum(**position, view_projection))
+            .map(|(_position, chunk)| chunk)
+            .collect();
+        self.stats.visible_chunks = visible_chunks.len();
+        self.stats.world_draw_calls = visible_chunks.len();
+        self.stats.shadow_draw_calls = self.chunks.len();
         let shadow_timestamp_writes = self
             .gpu_profiler
             .as_ref()
@@ -728,7 +739,7 @@ impl Renderer {
             pass.set_pipeline(&self.world_pipeline);
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
             pass.set_bind_group(1, &self.shadow_sampling_bind_group, &[]);
-            for chunk in self.chunks.values() {
+            for chunk in &visible_chunks {
                 pass.set_vertex_buffer(0, chunk.vertex.slice(..));
                 pass.set_index_buffer(chunk.index.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..chunk.index_count, 0, 0..1);
@@ -769,6 +780,30 @@ fn light_view_projection() -> Mat4 {
     let projection =
         glam::camera::rh::proj::directx::orthographic(-105.0, 105.0, -105.0, 105.0, 0.1, 300.0);
     projection * view
+}
+
+fn chunk_intersects_frustum(chunk: IVec3, view_projection: Mat4) -> bool {
+    let edge = CHUNK_EDGE as f32;
+    let minimum = Vec3::new(chunk.x as f32, chunk.y as f32, chunk.z as f32) * edge;
+    let maximum = minimum + Vec3::splat(edge);
+    let corners = [
+        Vec3::new(minimum.x, minimum.y, minimum.z),
+        Vec3::new(maximum.x, minimum.y, minimum.z),
+        Vec3::new(minimum.x, maximum.y, minimum.z),
+        Vec3::new(maximum.x, maximum.y, minimum.z),
+        Vec3::new(minimum.x, minimum.y, maximum.z),
+        Vec3::new(maximum.x, minimum.y, maximum.z),
+        Vec3::new(minimum.x, maximum.y, maximum.z),
+        Vec3::new(maximum.x, maximum.y, maximum.z),
+    ]
+    .map(|corner| view_projection * corner.extend(1.0));
+
+    !(corners.iter().all(|corner| corner.x < -corner.w)
+        || corners.iter().all(|corner| corner.x > corner.w)
+        || corners.iter().all(|corner| corner.y < -corner.w)
+        || corners.iter().all(|corner| corner.y > corner.w)
+        || corners.iter().all(|corner| corner.z < 0.0)
+        || corners.iter().all(|corner| corner.z > corner.w))
 }
 
 fn non_zero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
@@ -853,5 +888,34 @@ mod tests {
         );
         assert!(gpu_frame_time(&[100, 99, 175, 275], 10.0).is_none());
         assert!(gpu_frame_time(&[100, 160, 175], 10.0).is_none());
+    }
+
+    #[test]
+    fn camera_frustum_rejects_chunks_behind_the_viewer() {
+        let projection = glam::camera::rh::proj::directx::perspective(
+            70_f32.to_radians(),
+            16.0 / 9.0,
+            0.05,
+            420.0,
+        );
+        let view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, -Vec3::Z, Vec3::Y);
+        let view_projection = projection * view;
+
+        assert!(chunk_intersects_frustum(
+            IVec3::new(0, 0, -1),
+            view_projection
+        ));
+        assert!(chunk_intersects_frustum(
+            IVec3::new(-1, -1, -1),
+            view_projection
+        ));
+        assert!(!chunk_intersects_frustum(
+            IVec3::new(0, 0, 1),
+            view_projection
+        ));
+        assert!(!chunk_intersects_frustum(
+            IVec3::new(30, 0, -1),
+            view_projection
+        ));
     }
 }

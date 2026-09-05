@@ -378,9 +378,12 @@ impl Game {
             let fps = f64::from(self.frames_since_stats) / stats_elapsed.as_secs_f64();
             let frame_ms = 1_000.0 / fps.max(0.001);
             let world = self.session.world().stats();
+            let render = self.renderer.stats();
             self.window.set_title(&format!(
-                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {} | {}",
+                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {}/{} chunks visibles | {} | {}",
                 world.solid_voxels,
+                render.visible_chunks,
+                render.chunks,
                 if self.cursor_captured {
                     "souris capturee"
                 } else {
@@ -393,6 +396,14 @@ impl Game {
         }
         if exit_after.is_some_and(|duration| now.duration_since(self.started) >= duration) {
             self.telemetry.print_report(&self.renderer);
+            let render = self.renderer.stats();
+            println!(
+                "Culling: {}/{} chunks visibles; {} draws monde, {} draws ombres",
+                render.visible_chunks,
+                render.chunks,
+                render.world_draw_calls,
+                render.shadow_draw_calls
+            );
             if self.mesh_phase != MeshPhase::Live {
                 let error = format!(
                     "streaming initial incomplet: {} chunks en attente, worker actif={}",

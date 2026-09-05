@@ -45,7 +45,8 @@ developer impressions are never release evidence.
 - distance-prioritized initial streaming and boundary-aware background remeshing on shared immutable
   world snapshots;
 - voxel ambient occlusion, directional shadows, fog, and filmic output;
-- bounded CPU frame distributions and non-blocking real-GPU timestamp telemetry.
+- bounded CPU frame distributions and non-blocking real-GPU timestamp telemetry;
+- conservative chunk-frustum culling with explicit draw counters.
 
 Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, and actual captures.
 
@@ -55,7 +56,8 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
   comparison remains);
 - asynchronous initial meshing and distance-prioritized bounded bootstrap streaming (delivered;
   large-world residency streaming remains);
-- camera frustum, hierarchical-Z occlusion, indirect drawing, and mesh-buffer arenas;
+- conservative CPU chunk-frustum culling (delivered); hierarchical-Z occlusion, indirect drawing,
+  and mesh-buffer arenas remain;
 - physically based material table, texture arrays, normal/roughness/metalness maps, and HDR pipeline;
 - cascaded sun shadows, local lights, temporal anti-aliasing, and measured dynamic resolution;
 - deterministic screenshot scenes and image-difference regression thresholds.
@@ -166,9 +168,9 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add chunk frustum culling with visible/drawn counters and an adversarial camera fixture;
-2. implement the first incremental support graph and a deterministic unsupported-island fixture;
-3. promote unsupported islands into bounded authoritative rigid-body descriptors.
+1. implement the first incremental support graph and a deterministic unsupported-island fixture;
+2. promote unsupported islands into bounded authoritative rigid-body descriptors;
+3. replicate structural detachments through fingerprinted server transactions.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

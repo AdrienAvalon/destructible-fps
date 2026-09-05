@@ -25,7 +25,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - server-authorized rifle and explosive impacts rendered from the replicated world;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map, procedural material
   shading, distance fog, single-transfer tone mapping, and a crosshair;
-- non-blocking real-GPU timestamp queries and bounded CPU/GPU p50/p95/p99 frame telemetry.
+- non-blocking real-GPU timestamp queries and bounded CPU/GPU p50/p95/p99 frame telemetry;
+- conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not a photorealistic or production multiplayer
 game. Structural collapse, detached rigid bodies, remote sessions, audio, asset-quality PBR,

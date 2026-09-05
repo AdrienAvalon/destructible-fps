@@ -43,6 +43,14 @@ all 43,912 exposed faces in 32.4 ms after the game runtime started and still com
 GPU smoke with zero dropped timestamp samples. The initial pending set is explicitly capped at 512
 chunks; larger future worlds require the Stage 1 residency streamer rather than an unbounded queue.
 
+## 2026-09-05 — camera-frustum culling
+
+The five-second release showcase kept 90 of 128 resident chunks in the camera frustum and submitted
+90 world draw calls. All 128 chunks remained in the directional shadow pass deliberately: geometry
+outside the camera can still cast a visible shadow. GPU frame p99 was 0.201 ms in this run, but the
+scene is too small and run-to-run variance too large to attribute a speedup. This result proves the
+culling decision and counters; the later representative-scene gate will establish performance impact.
+
 ## 2026-09-05 — authoritative destruction baseline
 
 Command:

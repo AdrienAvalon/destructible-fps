@@ -227,8 +227,10 @@ supervisor still needs to validate OIDC discovery over TLS and atomically delive
 
 The process configuration is bounded to 16 KiB and rejects unknown fields, links, relative credential
 paths, non-regular files, certificates over 256 KiB or eight entries, private keys over 64 KiB, and
-JWKS over 64 KiB. It requires exactly one PEM private key and verifies key/certificate compatibility
-through rustls before opening the endpoint. On Unix, configuration, certificate, and JWKS files may
+JWKS over 64 KiB. It requires exactly one PEM private key, verifies key/certificate compatibility
+through rustls, and parses the complete X.509 chain before opening the endpoint. Every certificate
+must be currently valid with at least 60 seconds remaining; the earliest expiry becomes a monotonic
+process shutdown deadline. On Unix, configuration, certificate, and JWKS files may
 not be group/world writable; the private key may have no group/world access. Credential content is
 never accepted through argv or printed. Windows remains loopback-only while installer-owned DACL
 validation is designed.
@@ -238,11 +240,12 @@ invalid application credential, a stalled admission deadline, a mismatched nonce
 payloads in both directions, and 20 independent sequential sessions. A second real-QUIC integration
 suite admits two clients, routes one destructive command through the authority, and verifies that
 both receive the same canonical transaction. It also proves that invalid credentials never enter
-authority state and that an over-rate session closes before simulation work. Four standalone-process
+authority state and that an over-rate session closes before simulation work. Five standalone-process
 tests exercise real OIDC admission and command application, invalid-token rejection without a world
-mutation, remote-bind rejection, and private-key permission rejection before readiness. Production
-OIDC discovery/JWKS refresh, certificate lifecycle, reliable snapshot/control streams, OS-specific
-secret ACL validation, and a non-loopback attack matrix remain required before remote exposure. Both
+mutation, remote-bind rejection, expired-certificate rejection, and private-key permission rejection
+before readiness. Production OIDC discovery/JWKS refresh, automated certificate renewal, reliable
+snapshot/control streams, OS-specific secret ACL validation, and a non-loopback attack matrix remain
+required before remote exposure. Both
 the direct runtime API and the validated file policy remain fail-closed to loopback.
 
 ## Planned engine layers

@@ -35,6 +35,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map(std::num::NonZeroUsize::get);
     let jwks_expiration_deadline =
         tokio::time::Instant::from_std(launch.jwks_expiration_deadline());
+    let certificate_expiration_deadline =
+        tokio::time::Instant::from_std(launch.certificate_expiration_deadline());
     let exposure = launch.exposure();
     let mut server = launch.start(demo_world())?;
     println!("READY {} exposure={exposure:?}", server.local_addr()?);
@@ -50,6 +52,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
+                if tokio::time::Instant::now() >= certificate_expiration_deadline {
+                    terminal_error = Some("TLS certificate validity expired".into());
+                    break;
+                }
                 if tokio::time::Instant::now() >= jwks_expiration_deadline {
                     terminal_error = Some("static JWKS validity expired".into());
                     break;

@@ -119,6 +119,23 @@ fn standalone_process_refuses_remote_configuration_before_ready() {
     assert!(!String::from_utf8_lossy(&output.stdout).contains("READY"));
 }
 
+#[test]
+fn standalone_process_refuses_expired_certificate_before_ready() {
+    let fixture = Fixture::new(1, None);
+    fixture.replace_with_expired_tls_identity();
+
+    let output = process_command(&fixture.config)
+        .output()
+        .expect("rejected expired-certificate process");
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("READY"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("InvalidCertificateLifetime"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn standalone_process_refuses_group_readable_private_key_before_ready() {
@@ -236,6 +253,7 @@ struct Fixture {
     directory: PathBuf,
     config: PathBuf,
     key: PathBuf,
+    certificate_path: PathBuf,
     certificate: CertificateDer<'static>,
     oidc_signing_key: SigningRsaKeyPair,
 }
@@ -283,6 +301,7 @@ impl Fixture {
             directory,
             config,
             key: key_path,
+            certificate_path,
             certificate: identity.cert.der().clone(),
             oidc_signing_key,
         }
@@ -299,6 +318,20 @@ impl Fixture {
             serde_json::to_vec_pretty(document).expect("encode process config"),
         )
         .expect("rewrite process config");
+    }
+
+    fn replace_with_expired_tls_identity(&self) {
+        let signing_key = rcgen::KeyPair::generate().expect("expired process signing key");
+        let mut parameters =
+            rcgen::CertificateParams::new(vec!["localhost".into()]).expect("certificate params");
+        parameters.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        parameters.not_after = rcgen::date_time_ymd(2021, 1, 1);
+        let certificate = parameters
+            .self_signed(&signing_key)
+            .expect("expired process certificate");
+        fs::write(&self.certificate_path, certificate.pem()).expect("replace process certificate");
+        fs::write(&self.key, signing_key.serialize_pem()).expect("replace process key");
+        secure_private_key(&self.key);
     }
 
     fn signed_token(&self, jti: &str) -> String {

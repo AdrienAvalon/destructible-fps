@@ -444,6 +444,7 @@ dependencies = [
  "tokio",
  "wgpu",
  "winit",
+ "x509-parser",
  "zeroize",
 ]
 

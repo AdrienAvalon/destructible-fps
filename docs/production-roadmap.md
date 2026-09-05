@@ -162,8 +162,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   wiring and spatial delta baselines remain); graphical late-join snapshot, ordered catch-up and
   bounded correction smoothing are delivered for loopback;
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
-  Unix permission checks, static-JWKS expiry, signal-aware shutdown, and a four-case external-process
-  matrix (delivered for loopback; online refresh and remote policy remain);
+  Unix permission checks, complete-chain X.509 lifetime preflight, monotonic TLS/static-JWKS expiry,
+  signal-aware shutdown, and a five-case external-process matrix (delivered for loopback; online
+  refresh, automated renewal, platform ACLs, and remote policy remain);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - broader entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
@@ -255,8 +256,8 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add trusted OIDC discovery/JWKS refresh, certificate-expiry/lifecycle validation, Windows service
-   DACL checks, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
+1. add trusted OIDC discovery/JWKS refresh, automated certificate renewal, Windows service DACL
+   checks, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
 2. extend the delivered oriented per-voxel dynamic contact with rotated vertical support, continuous
    multi-contact manifolds, gyroscopic response, and deeper collision-island convergence;
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at

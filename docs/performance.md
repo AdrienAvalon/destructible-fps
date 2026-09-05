@@ -3,6 +3,25 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — complete-chain TLS lifetime gate
+
+Source state: parent `7a1009b` plus the certificate-lifecycle increment documented here. Startup
+parses all one-to-eight X.509 certificates after the existing bounded PEM and permission checks,
+rejects malformed trailing data, refuses a chain that is not yet valid or already expired, and
+requires at least 60 seconds remaining on every entry. The earliest wall-clock expiry is converted
+once to a monotonic deadline; the standalone process stops before continuing to serve expired trust
+material. Key/certificate compatibility remains independently enforced by rustls. The parser is the
+exactly pinned `x509-parser` 0.18.1 with default features disabled and a single direct dependency
+path.
+
+Unit fixtures reject both past and future validity windows. A fifth external-process case installs
+an expired but key-compatible identity, proves non-zero exit before `READY`, and observes only the
+non-sensitive error category. The complete promotion passed 135 library tests, ten binary tests and
+44 integration tests in debug and release with strict Clippy clean. A real five-second Vulkan smoke
+on the RTX 4050 completed with GPU-total p99 0.241 ms, maximum 0.246 ms and zero abandoned samples.
+The server remains loopback-only: certificate renewal, online OIDC discovery/JWKS refresh, Windows
+service DACL validation, and the remote abuse matrix remain separate gates.
+
 ## 2026-09-05 — bounded oriented dynamic contact refinement
 
 Source state: parent `0a6af47` plus the oriented dynamic-contact increment documented here. Swept

@@ -15,7 +15,7 @@ fields.
 |---|---|
 | `bind` | Loopback socket address. Port zero is allowed only when `max_ticks` bounds the run. |
 | `exposure` | Must be `loopback`. No remote value exists yet. |
-| `certificate_chain_file` | Absolute, regular, non-link PEM file; at most 256 KiB and eight certificates. |
+| `certificate_chain_file` | Absolute, regular, non-link PEM file; at most 256 KiB and eight currently valid certificates, each with at least 60 seconds remaining. |
 | `private_key_file` | Absolute, regular, non-link PEM file; at most 64 KiB and exactly one private key. |
 | `oidc_jwks_file` | Absolute, regular, non-link JWKS file; at most 64 KiB and 32 validated RS256 keys. |
 | `oidc_issuer` | Exact HTTPS token issuer. |
@@ -31,11 +31,13 @@ standard-library implementation cannot validate DACL ownership; the loopback res
 mandatory boundary until an installer-owned service ACL check is implemented.
 
 The PEM buffer holding the private key is zeroized after parsing. Rustls checks that the leaf
-certificate and private key are compatible. Startup converts the absolute JWKS deadline into one
-monotonic deadline, so a wall-clock rollback cannot extend it. The verifier rejects new admissions at
-expiry, and the process terminates on the first tick at or after that deadline. Set a short rotation
-horizon and replace the complete file/config pair atomically; automatic trusted discovery and refresh
-are a later gate.
+certificate and private key are compatible. Every certificate in the chain is parsed independently,
+must be currently valid, and must have at least 60 seconds remaining. Startup converts both the
+earliest certificate expiry and the absolute JWKS deadline into monotonic deadlines, so a wall-clock
+rollback cannot extend either. The verifier rejects new admissions at JWKS expiry, and the process
+terminates on the first tick at or after either deadline. Set a short rotation horizon and replace the
+complete file/config pair atomically; automatic trusted discovery, refresh, and certificate renewal
+are later gates.
 
 ## Local launch
 
@@ -73,6 +75,6 @@ Readiness emits only the selected socket and the non-secret exposure class. The 
 bounded counters, never credentials or principal identifiers. `Ctrl-C`, `max_ticks`, JWKS expiry,
 and `stop_after_commands` all converge through endpoint shutdown.
 
-Do not expose this milestone to a LAN or the Internet. Remote enablement requires trusted discovery
-and key refresh, certificate validity/lifecycle enforcement, platform secret-ACL checks, external
+Do not expose this milestone to a LAN or the Internet. Remote enablement still requires trusted
+discovery and key refresh, automated certificate renewal, platform secret-ACL checks, external
 loss/abuse tests, and an explicit reviewed exposure policy.

@@ -19,12 +19,14 @@ use std::{
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
 pub const MAX_SECURE_CONFIG_BYTES: usize = 16 * 1_024;
 pub const MAX_CERTIFICATE_CHAIN_BYTES: usize = 256 * 1_024;
 pub const MAX_CERTIFICATE_CHAIN_ENTRIES: usize = 8;
 pub const MAX_TLS_PRIVATE_KEY_BYTES: usize = 64 * 1_024;
+pub const MIN_TLS_CERTIFICATE_REMAINING_SECONDS: u64 = 60;
 pub const MIN_STATIC_JWKS_VALIDITY_SECONDS: u64 = 60;
 pub const MAX_STATIC_JWKS_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
 
@@ -60,6 +62,7 @@ pub struct SecureAuthorityLaunchConfig {
     exposure: SecureNetworkExposure,
     server_config: ServerConfig,
     verifier: Arc<dyn SessionCredentialVerifier>,
+    certificate_expiration_deadline: Instant,
     jwks_expiration_deadline: Instant,
     max_ticks: Option<NonZeroU64>,
     stop_after_commands: Option<std::num::NonZeroUsize>,
@@ -80,6 +83,7 @@ pub enum SecureAuthorityLaunchError {
     },
     InvalidConfiguration,
     InvalidCertificateChain,
+    InvalidCertificateLifetime,
     InvalidPrivateKey,
     InvalidJwksLifetime,
     Oidc(OidcVerificationError),
@@ -107,6 +111,9 @@ impl fmt::Display for SecureAuthorityLaunchError {
                 write!(formatter, "invalid secure authority configuration")
             }
             Self::InvalidCertificateChain => write!(formatter, "invalid TLS certificate chain"),
+            Self::InvalidCertificateLifetime => {
+                write!(formatter, "invalid TLS certificate validity window")
+            }
             Self::InvalidPrivateKey => write!(formatter, "invalid TLS private key"),
             Self::InvalidJwksLifetime => write!(formatter, "invalid static JWKS validity window"),
             Self::Oidc(error) => error.fmt(formatter),
@@ -144,8 +151,10 @@ impl SecureAuthorityLaunchConfig {
         )?;
         let raw = serde_json::from_slice::<RawSecureAuthorityConfig>(&config_bytes)
             .map_err(|_| SecureAuthorityLaunchError::InvalidConfiguration)?;
-        let jwks_remaining_validity = validate_raw_config(&raw)?;
-        let jwks_expiration_deadline = Instant::now()
+        let now = unix_seconds().map_err(|_| SecureAuthorityLaunchError::InvalidJwksLifetime)?;
+        let jwks_remaining_validity = validate_raw_config(&raw, now)?;
+        let monotonic_now = Instant::now();
+        let jwks_expiration_deadline = monotonic_now
             .checked_add(std::time::Duration::from_secs(jwks_remaining_validity))
             .ok_or(SecureAuthorityLaunchError::InvalidJwksLifetime)?;
 
@@ -169,6 +178,12 @@ impl SecureAuthorityLaunchConfig {
         )?;
 
         let certificates = parse_certificates(&certificate_bytes)?;
+        let certificate_remaining_validity = validate_certificate_lifetimes(&certificates, now)?;
+        let certificate_expiration_deadline = monotonic_now
+            .checked_add(std::time::Duration::from_secs(
+                certificate_remaining_validity,
+            ))
+            .ok_or(SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
         let private_key = parse_private_key(&private_key_bytes)?;
         let server_config = secure_server_config(certificates, private_key)
             .map_err(SecureAuthorityLaunchError::Transport)?;
@@ -184,6 +199,7 @@ impl SecureAuthorityLaunchConfig {
             exposure: raw.exposure,
             server_config,
             verifier,
+            certificate_expiration_deadline,
             jwks_expiration_deadline,
             max_ticks: raw.max_ticks,
             stop_after_commands: raw.stop_after_commands,
@@ -218,6 +234,11 @@ impl SecureAuthorityLaunchConfig {
     #[must_use]
     pub const fn jwks_expiration_deadline(&self) -> Instant {
         self.jwks_expiration_deadline
+    }
+
+    #[must_use]
+    pub const fn certificate_expiration_deadline(&self) -> Instant {
+        self.certificate_expiration_deadline
     }
 
     #[must_use]
@@ -322,7 +343,10 @@ fn validate_permissions(
     Ok(())
 }
 
-fn validate_raw_config(raw: &RawSecureAuthorityConfig) -> Result<u64, SecureAuthorityLaunchError> {
+fn validate_raw_config(
+    raw: &RawSecureAuthorityConfig,
+    now: u64,
+) -> Result<u64, SecureAuthorityLaunchError> {
     if raw.exposure != SecureNetworkExposure::Loopback
         || !raw.bind.ip().is_loopback()
         || raw.bind.port() == 0 && raw.max_ticks.is_none()
@@ -332,7 +356,6 @@ fn validate_raw_config(raw: &RawSecureAuthorityConfig) -> Result<u64, SecureAuth
     {
         return Err(SecureAuthorityLaunchError::InvalidConfiguration);
     }
-    let now = unix_seconds().map_err(|_| SecureAuthorityLaunchError::InvalidJwksLifetime)?;
     let remaining = raw
         .jwks_valid_until_unix_seconds
         .checked_sub(now)
@@ -341,6 +364,35 @@ fn validate_raw_config(raw: &RawSecureAuthorityConfig) -> Result<u64, SecureAuth
         return Err(SecureAuthorityLaunchError::InvalidJwksLifetime);
     }
     Ok(remaining)
+}
+
+fn validate_certificate_lifetimes(
+    certificates: &[CertificateDer<'static>],
+    now: u64,
+) -> Result<u64, SecureAuthorityLaunchError> {
+    let now =
+        i64::try_from(now).map_err(|_| SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
+    let mut minimum_remaining = u64::MAX;
+    for certificate in certificates {
+        let (remainder, certificate) = parse_x509_certificate(certificate.as_ref())
+            .map_err(|_| SecureAuthorityLaunchError::InvalidCertificateChain)?;
+        if !remainder.is_empty() {
+            return Err(SecureAuthorityLaunchError::InvalidCertificateChain);
+        }
+        let validity = certificate.validity();
+        if now < validity.not_before.timestamp() || now > validity.not_after.timestamp() {
+            return Err(SecureAuthorityLaunchError::InvalidCertificateLifetime);
+        }
+        let remaining = u64::try_from(validity.not_after.timestamp().saturating_sub(now))
+            .map_err(|_| SecureAuthorityLaunchError::InvalidCertificateLifetime)?;
+        if remaining < MIN_TLS_CERTIFICATE_REMAINING_SECONDS {
+            return Err(SecureAuthorityLaunchError::InvalidCertificateLifetime);
+        }
+        minimum_remaining = minimum_remaining.min(remaining);
+    }
+    (minimum_remaining != u64::MAX)
+        .then_some(minimum_remaining)
+        .ok_or(SecureAuthorityLaunchError::InvalidCertificateChain)
 }
 
 fn parse_certificates(
@@ -468,9 +520,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn expired_and_not_yet_valid_certificate_chains_fail_closed() {
+        let fixture = Fixture::new();
+        for (not_before, not_after) in [((2020, 1, 1), (2021, 1, 1)), ((4090, 1, 1), (4091, 1, 1))]
+        {
+            let signing_key = rcgen::KeyPair::generate().expect("lifetime test signing key");
+            let mut parameters = rcgen::CertificateParams::new(vec!["localhost".into()])
+                .expect("certificate params");
+            parameters.not_before = rcgen::date_time_ymd(not_before.0, not_before.1, not_before.2);
+            parameters.not_after = rcgen::date_time_ymd(not_after.0, not_after.1, not_after.2);
+            let certificate = parameters
+                .self_signed(&signing_key)
+                .expect("lifetime test certificate");
+            fs::write(&fixture.certificate, certificate.pem()).expect("replace test certificate");
+            fs::write(&fixture.key, signing_key.serialize_pem()).expect("replace test key");
+            secure_private_key(&fixture.key);
+
+            assert!(matches!(
+                SecureAuthorityLaunchConfig::load(&fixture.config),
+                Err(SecureAuthorityLaunchError::InvalidCertificateLifetime)
+            ));
+        }
+    }
+
     struct Fixture {
         directory: PathBuf,
         config: PathBuf,
+        certificate: PathBuf,
         key: PathBuf,
     }
 
@@ -510,6 +587,7 @@ mod tests {
             Self {
                 directory,
                 config,
+                certificate,
                 key,
             }
         }

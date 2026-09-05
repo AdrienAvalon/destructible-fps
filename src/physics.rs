@@ -515,6 +515,16 @@ pub fn apply_impulse_at_local_point(
 ) -> bool {
     let before = *state;
     let _ = apply_linear_impulse(body, state, impulse);
+    apply_angular_impulse_at_local_point(body, state, impulse, application_point_mm);
+    *state != before
+}
+
+fn apply_angular_impulse_at_local_point(
+    body: &RigidBodyDescriptor,
+    state: &mut RigidBodyState,
+    impulse: FixedImpulseMilliNewtonSeconds3,
+    application_point_mm: FixedMillimeters3,
+) {
     let local_center = [
         i128::from(body.center_of_mass_mm.x)
             .saturating_sub(i128::from(body.minimum.x) * i128::from(MILLIMETERS_PER_VOXEL)),
@@ -572,7 +582,6 @@ pub fn apply_impulse_at_local_point(
         state.sleep_ticks = 0;
         state.sleeping = false;
     }
-    *state != before
 }
 
 const fn quaternion_is_canonical(orientation: FixedQuaternion) -> bool {
@@ -800,7 +809,7 @@ pub fn step_rigid_body(
         let proposed = current
             .saturating_add(delta)
             .clamp(-MAX_WORLD_TRANSLATION_UM, MAX_WORLD_TRANSLATION_UM);
-        let contact = sweep_static_axis(world, body, state.translation_um, axis, proposed);
+        let contact = sweep_static_axis(world, body, *state, axis, proposed);
         if let Some(contact) = contact {
             collided_with_static = true;
             axis.set_component(&mut state.translation_um, contact.origin);
@@ -809,6 +818,7 @@ pub fn step_rigid_body(
                 combined_response(body.restitution_per_mille, contact.restitution_per_mille);
             let reflected = reflected_velocity(incoming, restitution);
             axis.set_component(&mut state.linear_velocity_um_per_second, reflected);
+            apply_static_contact_torque(body, state, axis, incoming, reflected, contact);
             state.integration_remainder[remainder_index] = 0;
             if axis == Axis::Y && incoming < 0 {
                 let friction =
@@ -824,7 +834,7 @@ pub fn step_rigid_body(
     let supported = sweep_static_axis(
         world,
         body,
-        state.translation_um,
+        *state,
         Axis::Y,
         state.translation_um.y.saturating_sub(1),
     )
@@ -1580,6 +1590,32 @@ struct StaticContact {
     origin: i64,
     friction_per_mille: u16,
     restitution_per_mille: u16,
+    application_point_mm: FixedMillimeters3,
+    application_samples: u32,
+}
+
+fn apply_static_contact_torque(
+    body: &RigidBodyDescriptor,
+    state: &mut RigidBodyState,
+    axis: Axis,
+    incoming_velocity: i64,
+    resolved_velocity: i64,
+    contact: StaticContact,
+) {
+    if incoming_velocity.unsigned_abs() < MIN_BOUNCE_SPEED_UM_PER_SECOND.cast_unsigned() {
+        return;
+    }
+    let delta_velocity =
+        i128::from(resolved_velocity).saturating_sub(i128::from(incoming_velocity));
+    let impulse_component = delta_velocity.saturating_mul(i128::from(body.mass_kg)) / 1_000;
+    let impulse_component = bounded_i64(impulse_component, i64::MAX);
+    let mut impulse = FixedImpulseMilliNewtonSeconds3::default();
+    match axis {
+        Axis::X => impulse.x = impulse_component,
+        Axis::Y => impulse.y = impulse_component,
+        Axis::Z => impulse.z = impulse_component,
+    }
+    apply_angular_impulse_at_local_point(body, state, impulse, contact.application_point_mm);
 }
 
 fn integrate_axis(velocity: i64, remainder: u8) -> (i64, u8) {
@@ -1592,10 +1628,14 @@ fn integrate_axis(velocity: i64, remainder: u8) -> (i64, u8) {
 fn sweep_static_axis(
     world: &World,
     body: &RigidBodyDescriptor,
-    translation: FixedMicrometers3,
+    state: RigidBodyState,
     axis: Axis,
     proposed: i64,
 ) -> Option<StaticContact> {
+    if state.orientation != FixedQuaternion::IDENTITY {
+        return sweep_rotated_static_axis(world, body, state, axis, proposed);
+    }
+    let translation = state.translation_um;
     let current = axis.component(translation);
     let direction = proposed.cmp(&current);
     if direction == std::cmp::Ordering::Equal {
@@ -1649,13 +1689,13 @@ fn sweep_static_axis(
                     coordinates[orthogonal[0].index()] = first;
                     coordinates[orthogonal[1].index()] = second;
                     let Ok(x) = i32::try_from(coordinates[0]) else {
-                        return Some(out_of_bounds_contact(current));
+                        return Some(out_of_bounds_contact(body, current));
                     };
                     let Ok(y) = i32::try_from(coordinates[1]) else {
-                        return Some(out_of_bounds_contact(current));
+                        return Some(out_of_bounds_contact(body, current));
                     };
                     let Ok(z) = i32::try_from(coordinates[2]) else {
-                        return Some(out_of_bounds_contact(current));
+                        return Some(out_of_bounds_contact(body, current));
                     };
                     let voxel = world.voxel(IVec3::new(x, y, z));
                     if !voxel.is_solid() {
@@ -1673,6 +1713,8 @@ fn sweep_static_axis(
                         origin: boundary.saturating_sub(local_face),
                         friction_per_mille: voxel.material.properties().friction_per_mille,
                         restitution_per_mille: voxel.material.properties().restitution_per_mille,
+                        application_point_mm: local_voxel_center_mm(body, surface_voxel),
+                        application_samples: 1,
                     };
                     merge_contact(&mut nearest, contact, positive);
                 }
@@ -1683,6 +1725,243 @@ fn sweep_static_axis(
         }
     }
     nearest
+}
+
+struct RotatedVoxelShape {
+    orientation: FixedQuaternion,
+    pivot_um: [i128; 3],
+    half_extent_um: [i128; 3],
+}
+
+impl RotatedVoxelShape {
+    fn new(body: &RigidBodyDescriptor, orientation: FixedQuaternion) -> Self {
+        const HALF_VOXEL_UM: i128 = 500_000;
+        const ROUNDING_MARGIN_UM: i128 = 4;
+        let basis = [
+            rotate_fixed_vector(orientation, [HALF_VOXEL_UM, 0, 0]),
+            rotate_fixed_vector(orientation, [0, HALF_VOXEL_UM, 0]),
+            rotate_fixed_vector(orientation, [0, 0, HALF_VOXEL_UM]),
+        ];
+        let half_extent_um = std::array::from_fn(|axis| {
+            basis
+                .iter()
+                .map(|vector| vector[axis].saturating_abs())
+                .fold(ROUNDING_MARGIN_UM, i128::saturating_add)
+        });
+        Self {
+            orientation,
+            pivot_um: local_center_of_mass_um(body),
+            half_extent_um,
+        }
+    }
+
+    fn voxel_bounds(
+        &self,
+        body: &RigidBodyDescriptor,
+        position: IVec3,
+    ) -> (FixedMicrometers3, FixedMicrometers3) {
+        let position = [position.x, position.y, position.z];
+        let minimum = [body.minimum.x, body.minimum.y, body.minimum.z];
+        let local_center: [i128; 3] = std::array::from_fn(|axis| {
+            i128::from(position[axis].saturating_sub(minimum[axis]))
+                .saturating_mul(i128::from(MICROMETERS_PER_VOXEL))
+                .saturating_add(i128::from(MICROMETERS_PER_VOXEL) / 2)
+        });
+        let offset =
+            std::array::from_fn(|axis| local_center[axis].saturating_sub(self.pivot_um[axis]));
+        let rotated = rotate_fixed_vector(self.orientation, offset);
+        let center: [i128; 3] =
+            std::array::from_fn(|axis| self.pivot_um[axis].saturating_add(rotated[axis]));
+        let minimum =
+            std::array::from_fn(|axis| center[axis].saturating_sub(self.half_extent_um[axis]));
+        let maximum =
+            std::array::from_fn(|axis| center[axis].saturating_add(self.half_extent_um[axis]));
+        (
+            fixed_vector_from_array(minimum),
+            fixed_vector_from_array(maximum),
+        )
+    }
+}
+
+fn sweep_rotated_static_axis(
+    world: &World,
+    body: &RigidBodyDescriptor,
+    state: RigidBodyState,
+    axis: Axis,
+    proposed: i64,
+) -> Option<StaticContact> {
+    let current = axis.component(state.translation_um);
+    let direction = proposed.cmp(&current);
+    if direction == std::cmp::Ordering::Equal {
+        return None;
+    }
+    let positive = direction == std::cmp::Ordering::Greater;
+    let orthogonal = axis.orthogonal();
+    let shape = RotatedVoxelShape::new(body, state.orientation);
+    let mut nearest = None;
+    for body_voxel in &body.voxels {
+        let local_bounds = shape.voxel_bounds(body, body_voxel.position);
+        let local_face = if positive {
+            axis.component(local_bounds.1)
+        } else {
+            axis.component(local_bounds.0)
+        };
+        let current_face = current.saturating_add(local_face);
+        let proposed_face = proposed.saturating_add(local_face);
+        let (first_candidate, last_candidate) =
+            swept_candidate_cells(current_face, proposed_face, positive);
+        let first_orthogonal = overlapped_interval_cells(
+            orthogonal[0]
+                .component(state.translation_um)
+                .saturating_add(orthogonal[0].component(local_bounds.0)),
+            orthogonal[0]
+                .component(state.translation_um)
+                .saturating_add(orthogonal[0].component(local_bounds.1)),
+        );
+        let second_orthogonal = overlapped_interval_cells(
+            orthogonal[1]
+                .component(state.translation_um)
+                .saturating_add(orthogonal[1].component(local_bounds.0)),
+            orthogonal[1]
+                .component(state.translation_um)
+                .saturating_add(orthogonal[1].component(local_bounds.1)),
+        );
+        let candidate_span = last_candidate.saturating_sub(first_candidate);
+        for offset in 0..=candidate_span {
+            let candidate = if positive {
+                first_candidate.saturating_add(offset)
+            } else {
+                last_candidate.saturating_sub(offset)
+            };
+            let mut candidate_hit = false;
+            for first in first_orthogonal.0..=first_orthogonal.1 {
+                for second in second_orthogonal.0..=second_orthogonal.1 {
+                    let mut coordinates = [0_i64; 3];
+                    coordinates[axis.index()] = candidate;
+                    coordinates[orthogonal[0].index()] = first;
+                    coordinates[orthogonal[1].index()] = second;
+                    let (Ok(x), Ok(y), Ok(z)) = (
+                        i32::try_from(coordinates[0]),
+                        i32::try_from(coordinates[1]),
+                        i32::try_from(coordinates[2]),
+                    ) else {
+                        return Some(out_of_bounds_contact(body, current));
+                    };
+                    let voxel = world.voxel(IVec3::new(x, y, z));
+                    if !voxel.is_solid() {
+                        continue;
+                    }
+                    candidate_hit = true;
+                    let boundary = if positive {
+                        candidate.saturating_mul(MICROMETERS_PER_VOXEL)
+                    } else {
+                        candidate
+                            .saturating_add(1)
+                            .saturating_mul(MICROMETERS_PER_VOXEL)
+                    };
+                    let origin = boundary.saturating_sub(local_face);
+                    let properties = voxel.material.properties();
+                    merge_contact(
+                        &mut nearest,
+                        StaticContact {
+                            origin,
+                            friction_per_mille: properties.friction_per_mille,
+                            restitution_per_mille: properties.restitution_per_mille,
+                            application_point_mm: rotated_contact_local_point_mm(
+                                body,
+                                &shape,
+                                state.translation_um,
+                                local_bounds,
+                                axis,
+                                origin,
+                                boundary,
+                                [first, second],
+                            ),
+                            application_samples: 1,
+                        },
+                        positive,
+                    );
+                }
+            }
+            if candidate_hit {
+                break;
+            }
+        }
+    }
+    nearest
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rotated_contact_local_point_mm(
+    body: &RigidBodyDescriptor,
+    shape: &RotatedVoxelShape,
+    translation: FixedMicrometers3,
+    local_bounds: (FixedMicrometers3, FixedMicrometers3),
+    normal_axis: Axis,
+    contact_origin: i64,
+    contact_boundary: i64,
+    orthogonal_cells: [i64; 2],
+) -> FixedMillimeters3 {
+    let orthogonal = normal_axis.orthogonal();
+    let mut contact_translation = translation;
+    normal_axis.set_component(&mut contact_translation, contact_origin);
+    let mut world_point = [0_i128; 3];
+    world_point[normal_axis.index()] = i128::from(contact_boundary);
+    for index in 0..2 {
+        let axis = orthogonal[index];
+        let voxel_minimum = axis
+            .component(contact_translation)
+            .saturating_add(axis.component(local_bounds.0));
+        let voxel_maximum = axis
+            .component(contact_translation)
+            .saturating_add(axis.component(local_bounds.1));
+        let cell_minimum = orthogonal_cells[index].saturating_mul(MICROMETERS_PER_VOXEL);
+        let cell_maximum = orthogonal_cells[index]
+            .saturating_add(1)
+            .saturating_mul(MICROMETERS_PER_VOXEL);
+        let overlap_minimum = voxel_minimum.max(cell_minimum);
+        let overlap_maximum = voxel_maximum.min(cell_maximum);
+        world_point[axis.index()] = i128::from(overlap_minimum).saturating_add(
+            i128::from(overlap_maximum).saturating_sub(i128::from(overlap_minimum)) / 2,
+        );
+    }
+    let translated: [i128; 3] = std::array::from_fn(|axis| {
+        world_point[axis].saturating_sub(i128::from(axis_value(contact_translation, axis)))
+    });
+    let from_pivot =
+        std::array::from_fn(|axis| translated[axis].saturating_sub(shape.pivot_um[axis]));
+    let local_from_pivot = rotate_fixed_vector(conjugate(shape.orientation), from_pivot);
+    let local_um: [i128; 3] =
+        std::array::from_fn(|axis| shape.pivot_um[axis].saturating_add(local_from_pivot[axis]));
+    let local_point = fixed_vector_from_array(local_um.map(|value| value / 1_000));
+    let maximum_local_mm = FixedMillimeters3 {
+        x: i64::from(
+            body.maximum
+                .x
+                .saturating_sub(body.minimum.x)
+                .saturating_add(1),
+        )
+        .saturating_mul(MILLIMETERS_PER_VOXEL),
+        y: i64::from(
+            body.maximum
+                .y
+                .saturating_sub(body.minimum.y)
+                .saturating_add(1),
+        )
+        .saturating_mul(MILLIMETERS_PER_VOXEL),
+        z: i64::from(
+            body.maximum
+                .z
+                .saturating_sub(body.minimum.z)
+                .saturating_add(1),
+        )
+        .saturating_mul(MILLIMETERS_PER_VOXEL),
+    };
+    FixedMillimeters3 {
+        x: local_point.x.clamp(0, maximum_local_mm.x),
+        y: local_point.y.clamp(0, maximum_local_mm.y),
+        z: local_point.z.clamp(0, maximum_local_mm.z),
+    }
 }
 
 const fn swept_candidate_cells(
@@ -1726,6 +2005,43 @@ const fn overlapped_cells(start: i64) -> (i64, i64) {
     )
 }
 
+const fn overlapped_interval_cells(minimum: i64, maximum: i64) -> (i64, i64) {
+    (
+        minimum.div_euclid(MICROMETERS_PER_VOXEL),
+        maximum.saturating_sub(1).div_euclid(MICROMETERS_PER_VOXEL),
+    )
+}
+
+fn local_voxel_center_mm(body: &RigidBodyDescriptor, position: IVec3) -> FixedMillimeters3 {
+    let center = |position: i32, minimum: i32| {
+        i64::from(position.saturating_sub(minimum))
+            .saturating_mul(MILLIMETERS_PER_VOXEL)
+            .saturating_add(MILLIMETERS_PER_VOXEL / 2)
+    };
+    FixedMillimeters3 {
+        x: center(position.x, body.minimum.x),
+        y: center(position.y, body.minimum.y),
+        z: center(position.z, body.minimum.z),
+    }
+}
+
+fn local_body_center_mm(body: &RigidBodyDescriptor) -> FixedMillimeters3 {
+    FixedMillimeters3 {
+        x: body
+            .center_of_mass_mm
+            .x
+            .saturating_sub(i64::from(body.minimum.x) * MILLIMETERS_PER_VOXEL),
+        y: body
+            .center_of_mass_mm
+            .y
+            .saturating_sub(i64::from(body.minimum.y) * MILLIMETERS_PER_VOXEL),
+        z: body
+            .center_of_mass_mm
+            .z
+            .saturating_sub(i64::from(body.minimum.z) * MILLIMETERS_PER_VOXEL),
+    }
+}
+
 fn merge_contact(nearest: &mut Option<StaticContact>, contact: StaticContact, positive: bool) {
     match nearest {
         Some(current) if current.origin == contact.origin => {
@@ -1733,6 +2049,10 @@ fn merge_contact(nearest: &mut Option<StaticContact>, contact: StaticContact, po
             current.restitution_per_mille = current
                 .restitution_per_mille
                 .max(contact.restitution_per_mille);
+            current.application_point_mm = merged_contact_point(*current, contact);
+            current.application_samples = current
+                .application_samples
+                .saturating_add(contact.application_samples);
         }
         Some(current)
             if (positive && current.origin <= contact.origin)
@@ -1741,11 +2061,37 @@ fn merge_contact(nearest: &mut Option<StaticContact>, contact: StaticContact, po
     }
 }
 
-const fn out_of_bounds_contact(origin: i64) -> StaticContact {
+fn merged_contact_point(first: StaticContact, second: StaticContact) -> FixedMillimeters3 {
+    let first_count = i128::from(first.application_samples);
+    let second_count = i128::from(second.application_samples);
+    let total = first_count.saturating_add(second_count).max(1);
+    let merge = |left: i64, right: i64| {
+        let weighted = i128::from(left)
+            .saturating_mul(first_count)
+            .saturating_add(i128::from(right).saturating_mul(second_count))
+            / total;
+        i64::try_from(weighted).unwrap_or_else(|_| {
+            if weighted.is_negative() {
+                i64::MIN
+            } else {
+                i64::MAX
+            }
+        })
+    };
+    FixedMillimeters3 {
+        x: merge(first.application_point_mm.x, second.application_point_mm.x),
+        y: merge(first.application_point_mm.y, second.application_point_mm.y),
+        z: merge(first.application_point_mm.z, second.application_point_mm.z),
+    }
+}
+
+fn out_of_bounds_contact(body: &RigidBodyDescriptor, origin: i64) -> StaticContact {
     StaticContact {
         origin,
         friction_per_mille: 1_000,
         restitution_per_mille: 0,
+        application_point_mm: local_body_center_mm(body),
+        application_samples: 1,
     }
 }
 
@@ -1793,23 +2139,92 @@ fn body_aabb(
     let extent = |maximum: i32, minimum: i32| {
         i64::from(maximum.saturating_sub(minimum).saturating_add(1)) * MICROMETERS_PER_VOXEL
     };
+    let extent = FixedMicrometers3 {
+        x: extent(body.maximum.x, body.minimum.x),
+        y: extent(body.maximum.y, body.minimum.y),
+        z: extent(body.maximum.z, body.minimum.z),
+    };
+    if state.orientation == FixedQuaternion::IDENTITY {
+        return (
+            state.translation_um,
+            FixedMicrometers3 {
+                x: state.translation_um.x.saturating_add(extent.x),
+                y: state.translation_um.y.saturating_add(extent.y),
+                z: state.translation_um.z.saturating_add(extent.z),
+            },
+        );
+    }
+
+    let pivot = local_center_of_mass_um(body);
+    let mut minimum = [i128::MAX; 3];
+    let mut maximum = [i128::MIN; 3];
+    for corner in [
+        [0, 0, 0],
+        [extent.x, 0, 0],
+        [0, extent.y, 0],
+        [0, 0, extent.z],
+        [extent.x, extent.y, 0],
+        [extent.x, 0, extent.z],
+        [0, extent.y, extent.z],
+        [extent.x, extent.y, extent.z],
+    ] {
+        let offset =
+            std::array::from_fn(|index| i128::from(corner[index]).saturating_sub(pivot[index]));
+        let rotated = rotate_fixed_vector(state.orientation, offset);
+        let world: [i128; 3] = std::array::from_fn(|index| {
+            i128::from(axis_value(state.translation_um, index))
+                .saturating_add(pivot[index])
+                .saturating_add(rotated[index])
+        });
+        for index in 0..3 {
+            minimum[index] = minimum[index].min(world[index]);
+            maximum[index] = maximum[index].max(world[index]);
+        }
+    }
     (
-        state.translation_um,
-        FixedMicrometers3 {
-            x: state
-                .translation_um
-                .x
-                .saturating_add(extent(body.maximum.x, body.minimum.x)),
-            y: state
-                .translation_um
-                .y
-                .saturating_add(extent(body.maximum.y, body.minimum.y)),
-            z: state
-                .translation_um
-                .z
-                .saturating_add(extent(body.maximum.z, body.minimum.z)),
-        },
+        fixed_vector_from_array(minimum),
+        fixed_vector_from_array(maximum),
     )
+}
+
+fn local_center_of_mass_um(body: &RigidBodyDescriptor) -> [i128; 3] {
+    let absolute = [
+        body.center_of_mass_mm.x,
+        body.center_of_mass_mm.y,
+        body.center_of_mass_mm.z,
+    ]
+    .map(|coordinate| i128::from(coordinate).saturating_mul(1_000));
+    let minimum = [body.minimum.x, body.minimum.y, body.minimum.z];
+    std::array::from_fn(|index| {
+        absolute[index].saturating_sub(
+            i128::from(minimum[index]).saturating_mul(i128::from(MICROMETERS_PER_VOXEL)),
+        )
+    })
+}
+
+const fn axis_value(vector: FixedMicrometers3, index: usize) -> i64 {
+    match index {
+        0 => vector.x,
+        1 => vector.y,
+        _ => vector.z,
+    }
+}
+
+fn fixed_vector_from_array(values: [i128; 3]) -> FixedMicrometers3 {
+    let bounded = values.map(|value| {
+        i64::try_from(value).unwrap_or_else(|_| {
+            if value.is_negative() {
+                i64::MIN
+            } else {
+                i64::MAX
+            }
+        })
+    });
+    FixedMicrometers3 {
+        x: bounded[0],
+        y: bounded[1],
+        z: bounded[2],
+    }
 }
 
 fn swept_body_aabb(
@@ -1841,7 +2256,12 @@ fn swept_dynamic_support_origin(
     support_before: RigidBodyState,
     support_after: RigidBodyState,
 ) -> Option<i64> {
-    if after.translation_um.y >= before.translation_um.y {
+    if after.translation_um.y >= before.translation_um.y
+        || before.orientation != FixedQuaternion::IDENTITY
+        || after.orientation != FixedQuaternion::IDENTITY
+        || support_before.orientation != FixedQuaternion::IDENTITY
+        || support_after.orientation != FixedQuaternion::IDENTITY
+    {
         return None;
     }
     let mut body_index = 0_usize;
@@ -1888,6 +2308,11 @@ fn rests_on(
     support: &RigidBodyDescriptor,
     support_state: RigidBodyState,
 ) -> bool {
+    if state.orientation != FixedQuaternion::IDENTITY
+        || support_state.orientation != FixedQuaternion::IDENTITY
+    {
+        return false;
+    }
     let mut body_index = 0_usize;
     let mut support_index = 0_usize;
     let mut highest_origin = None;
@@ -2902,6 +3327,221 @@ mod tests {
         assert!(restored[0].abs_diff(1_000) <= 2);
         assert!(restored[1].unsigned_abs() <= 2);
         assert_eq!(restored[2], 0);
+    }
+
+    #[test]
+    fn body_bounds_rotate_about_the_exact_mass_center() {
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![
+                BodyVoxel {
+                    position: IVec3::new(0, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                BodyVoxel {
+                    position: IVec3::new(1, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )
+        .expect("two-voxel bar");
+        let scale = i128::from(FIXED_QUATERNION_SCALE);
+        let state = RigidBodyState {
+            orientation: normalize_quaternion([0, 0, scale, scale]),
+            ..RigidBodyState::at_spawn(&body)
+        };
+
+        let (minimum, maximum) = body_aabb(&body, state);
+
+        assert!(minimum.x.abs_diff(500_000) <= 4);
+        assert!(minimum.y.abs_diff(4_500_000) <= 4);
+        assert_eq!(minimum.z, 0);
+        assert!(maximum.x.abs_diff(1_500_000) <= 4);
+        assert!(maximum.y.abs_diff(6_500_000) <= 4);
+        assert_eq!(maximum.z, MICROMETERS_PER_VOXEL);
+    }
+
+    #[test]
+    fn broad_phase_contains_the_swept_rotated_extent() {
+        let bar = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![
+                BodyVoxel {
+                    position: IVec3::new(0, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                BodyVoxel {
+                    position: IVec3::new(1, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )
+        .expect("rotated bar");
+        let other = one_voxel_body(2, Material::Wood);
+        let scale = i128::from(FIXED_QUATERNION_SCALE);
+        let bar_state = RigidBodyState {
+            orientation: normalize_quaternion([0, 0, scale, scale]),
+            ..RigidBodyState::at_spawn(&bar)
+        };
+        let other_state = RigidBodyState {
+            translation_um: FixedMicrometers3 {
+                x: 500_000,
+                y: 3_750_000,
+                z: 0,
+            },
+            ..RigidBodyState::at_spawn(&other)
+        };
+        let bodies = BTreeMap::from([(bar.id, bar), (other.id, other)]);
+        let states = BTreeMap::from([(1, bar_state), (2, other_state)]);
+
+        assert_eq!(broad_phase_pairs(&bodies, &states).pairs, vec![(1, 2)]);
+    }
+
+    #[test]
+    fn rotated_bodies_cannot_enter_the_axis_aligned_dynamic_support_solver() {
+        let body = one_voxel_body(1, Material::Wood);
+        let support = one_voxel_body(2, Material::Wood);
+        let mut body_before = RigidBodyState::at_spawn(&body);
+        body_before.translation_um.y = 2 * MICROMETERS_PER_VOXEL;
+        let mut body_after = body_before;
+        body_after.translation_um.y = MICROMETERS_PER_VOXEL / 2;
+        let mut support_state = RigidBodyState::at_spawn(&support);
+        support_state.translation_um.y = 0;
+        let scale = i128::from(FIXED_QUATERNION_SCALE);
+        body_before.orientation = normalize_quaternion([0, 0, scale, scale]);
+        body_after.orientation = body_before.orientation;
+
+        assert_eq!(
+            swept_dynamic_support_origin(
+                &body,
+                body_before,
+                body_after,
+                &support,
+                support_state,
+                support_state,
+            ),
+            None
+        );
+        assert!(!rests_on(&body, body_after, &support, support_state));
+    }
+
+    #[test]
+    fn rotated_voxel_proxy_stops_at_static_geometry_and_generates_contact_torque() {
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![
+                BodyVoxel {
+                    position: IVec3::new(0, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                BodyVoxel {
+                    position: IVec3::new(1, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )
+        .expect("rotated falling bar");
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 3, 0), Voxel::new(Material::Wood));
+        let scale = i128::from(FIXED_QUATERNION_SCALE);
+        let mut state = RigidBodyState {
+            orientation: normalize_quaternion([0, 0, scale, scale]),
+            linear_velocity_um_per_second: FixedMicrometers3 {
+                y: -60_000_000,
+                ..FixedMicrometers3::default()
+            },
+            ..RigidBodyState::at_spawn(&body)
+        };
+
+        let result = step_rigid_body(&world, &body, &mut state);
+        let bounds = body_aabb(&body, state);
+
+        assert!(result.collided_with_static);
+        assert!(bounds.0.y >= 4 * MICROMETERS_PER_VOXEL);
+        assert!(bounds.0.y <= 4 * MICROMETERS_PER_VOXEL + 8);
+        assert!(state.linear_velocity_um_per_second.y > 0);
+        assert!(state.angular_velocity_mrad_per_second.z < 0, "{state:?}");
+        assert!(valid_rigid_body_state(state));
+    }
+
+    #[test]
+    fn symmetric_static_contacts_merge_at_the_center_without_false_torque() {
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![
+                BodyVoxel {
+                    position: IVec3::new(0, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                BodyVoxel {
+                    position: IVec3::new(1, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )
+        .expect("symmetric falling bar");
+        let mut world = World::default();
+        world.set_voxel(IVec3::new(0, 3, 0), Voxel::new(Material::Wood));
+        world.set_voxel(IVec3::new(1, 3, 0), Voxel::new(Material::Wood));
+        let mut state = RigidBodyState {
+            linear_velocity_um_per_second: FixedMicrometers3 {
+                y: -60_000_000,
+                ..FixedMicrometers3::default()
+            },
+            ..RigidBodyState::at_spawn(&body)
+        };
+
+        let result = step_rigid_body(&world, &body, &mut state);
+
+        assert!(result.collided_with_static);
+        assert_eq!(
+            state.angular_velocity_mrad_per_second,
+            FixedMilliradians3::default()
+        );
+    }
+
+    #[test]
+    fn resting_contact_correction_does_not_reinject_angular_energy() {
+        let body = RigidBodyDescriptor::from_replicated_voxels(
+            1,
+            vec![
+                BodyVoxel {
+                    position: IVec3::new(0, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+                BodyVoxel {
+                    position: IVec3::new(1, 5, 0),
+                    voxel: Voxel::new(Material::Wood),
+                },
+            ],
+            BodyLimits::default(),
+        )
+        .expect("resting bar");
+        let mut state = RigidBodyState::at_spawn(&body);
+        let origin = state.translation_um.y;
+        apply_static_contact_torque(
+            &body,
+            &mut state,
+            Axis::Y,
+            -200_000,
+            0,
+            StaticContact {
+                origin,
+                friction_per_mille: 500,
+                restitution_per_mille: 0,
+                application_point_mm: FixedMillimeters3::default(),
+                application_samples: 1,
+            },
+        );
+
+        assert_eq!(
+            state.angular_velocity_mrad_per_second,
+            FixedMilliradians3::default()
+        );
     }
 
     #[test]

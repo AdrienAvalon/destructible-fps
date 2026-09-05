@@ -81,8 +81,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   independent body frustum culling, and participation in both world and shadow passes;
 - 60 Hz server-authoritative body motion in deterministic micrometre units, mass-weighted blast
   impulses, inertia-weighted off-centre angular response, canonical fixed-quaternion integration,
-  three-axis swept static collision, material ground friction and normal restitution, vertical
-  voxel-column body collision, four-pass coarse swept X/Z body contacts with mass-weighted impulse
+  three-axis swept static collision using rotation-aware per-voxel conservative proxies, off-centre
+  static-contact torque, material ground friction and normal restitution, vertical voxel-column body
+  collision, four-pass coarse swept X/Z body contacts with mass-weighted impulse
   exchange and tangential friction, stable stacking, wake propagation, sleeping, bounded
   sweep-and-prune broad phase, atomic overload rollback, and replicated GPU transforms about the
   mass centre;
@@ -113,9 +114,11 @@ interval. Four bounded passes separate coarse swept X/Z body bounds, exchange no
 mass and restitution, reduce tangential slip without losing linear momentum, and propagate a short
 contact chain. A nearest-voxel blast application point additionally generates deterministic angular
 velocity through the diagonal inertia tensor; protocol-v6 deltas and snapshot-v2 transfers replicate
-the canonical quaternion, and the GPU rotates the mesh around its mass centre. Collision geometry is
-still axis-aligned, so oriented voxel contact, contact torque, and full constraint-island convergence
-are not claimed yet.
+the canonical quaternion, and the GPU rotates the mesh around its mass centre. Rotated static sweeps
+use a deterministic conservative AABB for each material voxel and derive their contact lever from the
+actual overlapped cell. Rotated bodies fail closed out of the legacy axis-aligned vertical-support
+solver. Continuous angular sweep, oriented dynamic-body narrow phase and full constraint-island
+convergence are not claimed yet.
 
 ## Screenshots
 
@@ -138,6 +141,7 @@ cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario lateral-sweep
+cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300 --scenario rotated-lateral-sweep
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 1000 --scenario dynamic-head-on
 cargo run --release --bin snapshot-benchmark -- --iterations 20
 cargo run --release --bin playable-demo

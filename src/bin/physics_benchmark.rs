@@ -1,6 +1,6 @@
 use destructible_fps::{
-    BodyId, BodyLimits, IVec3, Material, RigidBodyDescriptor, RigidBodyState, SampleWindow, Voxel,
-    World, step_rigid_bodies,
+    BodyId, BodyLimits, FixedQuaternion, IVec3, Material, RigidBodyDescriptor, RigidBodyState,
+    SampleWindow, Voxel, World, step_rigid_bodies,
 };
 use std::{collections::BTreeMap, error::Error, hint::black_box, time::Instant};
 
@@ -18,6 +18,7 @@ type Fixture = (World, BodyMap, StateMap);
 enum Scenario {
     Stacks,
     LateralSweep,
+    RotatedLateralSweep,
     DynamicHeadOn,
 }
 
@@ -26,6 +27,7 @@ impl Scenario {
         match self {
             Self::Stacks => "stacks",
             Self::LateralSweep => "lateral-sweep",
+            Self::RotatedLateralSweep => "rotated-lateral-sweep",
             Self::DynamicHeadOn => "dynamic-head-on",
         }
     }
@@ -43,7 +45,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut body_collisions = 0_usize;
 
     for _ in 0..ticks {
-        if matches!(scenario, Scenario::LateralSweep | Scenario::DynamicHeadOn) {
+        if matches!(
+            scenario,
+            Scenario::LateralSweep | Scenario::RotatedLateralSweep | Scenario::DynamicHeadOn
+        ) {
             states.clone_from(&initial_states);
         }
         let tick_started = Instant::now();
@@ -94,12 +99,52 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             verify_lateral_sweeps(&states, &initial_states)?;
         }
+        Scenario::RotatedLateralSweep => {
+            if static_collisions != body_count.saturating_mul(ticks) {
+                return Err("not every rotated sweep reached its static wall".into());
+            }
+            verify_rotated_lateral_sweeps(&states, &initial_states)?;
+        }
         Scenario::DynamicHeadOn => {
             let expected = body_count.saturating_mul(ticks) / 2;
             if body_collisions != expected {
                 return Err("not every dynamic pair resolved one head-on contact".into());
             }
             verify_dynamic_head_on(&states, &initial_states)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_rotated_lateral_sweeps(
+    states: &StateMap,
+    initial_states: &StateMap,
+) -> Result<(), Box<dyn Error>> {
+    let mut canonical = None;
+    for (&body_id, state) in states {
+        let initial = initial_states
+            .get(&body_id)
+            .ok_or("rotated fixture lost an initial body state")?;
+        if state.linear_velocity_um_per_second.x >= 0
+            || state.angular_velocity_mrad_per_second.z == 0
+        {
+            return Err(format!("rotated body {body_id} did not resolve wall contact").into());
+        }
+        let outcome = (
+            state
+                .translation_um
+                .x
+                .saturating_sub(initial.translation_um.x),
+            state.translation_um.y,
+            state.linear_velocity_um_per_second,
+            state.angular_velocity_mrad_per_second,
+        );
+        match canonical {
+            Some(expected) if outcome != expected => {
+                return Err("rotated sweeps did not produce one canonical outcome".into());
+            }
+            None => canonical = Some(outcome),
+            Some(_) => {}
         }
     }
     Ok(())
@@ -192,6 +237,7 @@ fn fixture(body_count: usize, scenario: Scenario) -> Result<Fixture, Box<dyn Err
     match scenario {
         Scenario::Stacks => stack_fixture(body_count),
         Scenario::LateralSweep => lateral_sweep_fixture(body_count),
+        Scenario::RotatedLateralSweep => rotated_lateral_sweep_fixture(body_count),
         Scenario::DynamicHeadOn => dynamic_head_on_fixture(body_count),
     }
 }
@@ -299,6 +345,45 @@ fn lateral_sweep_fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
     Ok((world, bodies, states))
 }
 
+fn rotated_lateral_sweep_fixture(body_count: usize) -> Result<Fixture, Box<dyn Error>> {
+    const SPACING: i32 = 12;
+    const HEIGHT: i32 = 8;
+    let mut world = World::default();
+    let mut bodies = BTreeMap::new();
+    let mut states = BTreeMap::new();
+    for index in 0..body_count {
+        let x = i32::try_from(index)?.saturating_mul(SPACING);
+        let positions = [IVec3::new(x, HEIGHT, 0), IVec3::new(x + 1, HEIGHT, 0)];
+        for position in positions {
+            world.set_voxel(position, Voxel::new(Material::Wood));
+        }
+        let body = RigidBodyDescriptor::from_world_voxels(
+            BodyId::try_from(index + 1)?,
+            &world,
+            positions.to_vec(),
+            BodyLimits::default(),
+        )?;
+        for position in positions {
+            world.set_voxel(position, Voxel::AIR);
+        }
+        world.set_voxel(
+            IVec3::new(x.saturating_add(5), HEIGHT, 0),
+            Voxel::new(Material::Glass),
+        );
+        let mut state = RigidBodyState::at_spawn(&body);
+        state.orientation = FixedQuaternion {
+            x: 0,
+            y: 0,
+            z: 707_107,
+            w: 707_107,
+        };
+        state.linear_velocity_um_per_second.x = 250_000_000;
+        states.insert(body.id, state);
+        bodies.insert(body.id, body);
+    }
+    Ok((world, bodies, states))
+}
+
 fn parse_arguments() -> Result<(usize, usize, Scenario), Box<dyn Error>> {
     let mut bodies = DEFAULT_BODIES;
     let mut ticks = DEFAULT_TICKS;
@@ -321,11 +406,14 @@ fn parse_arguments() -> Result<(usize, usize, Scenario), Box<dyn Error>> {
             "--scenario" => {
                 scenario = match arguments
                     .next()
-                    .ok_or("--scenario requires stacks, lateral-sweep, or dynamic-head-on")?
+                    .ok_or(
+                        "--scenario requires stacks, lateral-sweep, rotated-lateral-sweep, or dynamic-head-on",
+                    )?
                     .as_str()
                 {
                     "stacks" => Scenario::Stacks,
                     "lateral-sweep" => Scenario::LateralSweep,
+                    "rotated-lateral-sweep" => Scenario::RotatedLateralSweep,
                     "dynamic-head-on" => Scenario::DynamicHeadOn,
                     value => return Err(format!("unknown physics scenario: {value}").into()),
                 };

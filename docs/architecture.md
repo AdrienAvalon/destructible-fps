@@ -132,11 +132,12 @@ draw. The placeholder dimensions exactly match the authoritative 0.6 m by 1.8 m 
 This deliberately proves the data/GPU path before committing to a skinned character asset and
 animation graph.
 
-The first graphical network harness deliberately uses only the legacy loopback adapter. It starts
-from the identical deterministic demo world, performs the source-bound development handshake, sends
-camera-relative inputs at 60 Hz, predicts the local collider, reconciles every newer authority view,
-samples remote players through the delayed interpolation history, and uploads those transforms to
-the instanced renderer. It also orders the permanent-world delta stream, validates every transaction
+The graphical network harness selects either the legacy loopback adapter or authenticated QUIC/TLS
+from one complete file-backed launch contract. It starts from the identical deterministic demo
+world, obtains its session through the selected transport, sends camera-relative inputs at 60 Hz,
+predicts the local collider, reconciles every newer authority view, samples remote players through
+the delayed interpolation history, and uploads those transforms to the instanced renderer. It also
+orders the permanent-world delta stream, validates every transaction
 through `ClientReplica`, remeshes changed chunk boundaries, uploads newly detached rigid bodies, and
 tracks their replicated transforms. Mouse actions send requests only; the authority chooses and
 broadcasts the resulting mutation. A release smoke run requires both real Vulkan clients to apply
@@ -158,8 +159,9 @@ the bounded ordered inbox. An intentionally impaired Vulkan smoke drops the comp
 transaction, accepts the second, obtains the retained frames, releases both in order and requires
 their mesh queues to drain before success. An expired retained sequence can still move the client
 back through the same atomic snapshot path.
-This does not relax exposure: both binaries refuse non-loopback addresses, and the production client
-must use authenticated QUIC/OIDC before any remote deployment.
+This does not relax exposure: the legacy client/server pair and current secure authority refuse
+non-loopback operation. The graphical QUIC client is transport-ready for a remote address, but that
+path remains unavailable until the authority's remote security gate is satisfied.
 
 The dedicated-authority sessions described above are deliberately loopback-only and unauthenticated;
 the snapshot hash is an integrity check, not a MAC, and that legacy transport provides no
@@ -290,11 +292,13 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - local-space body meshes produced by the bounded background worker, fixed-capacity GPU transform
   instances, body frustum culling, and world/shadow rendering (delivered);
 - deterministic 60 Hz micrometre state, gravity, mass-weighted blast impulse, inertia-weighted
-  off-centre angular response, canonical fixed-quaternion integration, three-axis swept static
-  collision, material ground friction and normal restitution, exact vertical body columns, stable
-  stacking, wake propagation, sleeping, bounded sweep-and-prune with atomic overload rollback,
-  protocol-v6/snapshot-v2 state replication, and mass-centred GPU rotation with conservative rotated
-  render bounds (delivered; collision geometry remains axis-aligned);
+  off-centre angular response, canonical fixed-quaternion integration, rotation-aware per-voxel
+  conservative static sweeps, collision-generated torque, material ground friction and normal
+  restitution, exact vertical body columns, stable stacking, wake propagation, sleeping, bounded
+  sweep-and-prune with atomic overload rollback, protocol-v6/snapshot-v2 state replication, and
+  mass-centred GPU rotation with conservative rotated render bounds (delivered; continuous angular
+  sweep and oriented dynamic-body narrow phase remain, and rotated bodies fail closed out of the
+  legacy vertical-column solver);
 - four-pass X/Z dynamic contact from swept coarse body bounds, rational orthogonal-overlap validation
   at time of impact, inverse-mass separation, material restitution, momentum-preserving tangential
   friction, impact wake-up, and deterministic short-chain propagation (delivered);
@@ -311,8 +315,8 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
 - local stress propagation after damage;
 - unsupported island extraction (delivered for topology-changing voxel edits);
 - rigid-body mass, centre of mass, and inertia derived from geometry (delivered);
-- oriented voxel contact, collision-generated torque, gyroscopic response, deeper constraint-island
-  convergence, clustering, and distance-based solver budgets.
+- continuous angular collision sweep, oriented dynamic-body voxel contact, gyroscopic response,
+  deeper constraint-island convergence, clustering, and distance-based solver budgets.
 - player-state replication, client prediction and reconciliation, authoritative view/weapon state,
   persistent inventories, recipes, removal tools, material selection UI, dynamic-body character
   contact, and dynamic-body attachment for construction.

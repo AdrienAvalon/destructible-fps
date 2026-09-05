@@ -3,6 +3,29 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — rotation-aware static collision proxy
+
+Source state: parent `5eec27a` plus the physics increment documented here. Non-identity rigid bodies
+now derive a conservative fixed-point AABB per rotated material voxel, sweep those bounded proxies
+against static cells on all three translation axes, and reconstruct an off-centre local contact point
+from the actual overlapped cell. The resulting normal impulse updates the existing diagonal-inertia
+angular response only above the existing impact threshold; resting support correction cannot inject
+fresh angular energy. Identity bodies retain the direct precomputed surface path. Broad-phase bounds
+now rotate all eight body corners about the exact mass centre, so rotated extents cannot disappear
+before narrow-phase work.
+
+The dedicated `rotated-lateral-sweep` release scenario resets and drives 1,024 two-voxel bars into
+separate walls for 300 ticks, requiring 307,200 static contacts, non-zero contact torque, and one
+canonical result across every body. It measured tick p50 3.929 ms, p95 4.103 ms, p99 4.227 ms and
+maximum 4.454 ms. The unchanged lateral sweep measured p99 0.848 ms and a 1,000-tick dynamic
+head-on run measured p99 1.091 ms. All remain below the 16.67 ms 60 Hz tick budget on this machine.
+Focused physics and end-to-end simulation tests pass, including rotated mass-centred bounds, rotated
+broad-phase inclusion, static non-penetration and collision-generated torque. The final complete
+promotion passed 127 library tests, ten binary tests
+and 43 integration tests in debug and release with strict Clippy clean. The required 1,024-body
+stacking rerun measured p99 1.162 ms and maximum 1.185 ms. A real five-second Vulkan smoke on the RTX
+4050 reported GPU-total p99 0.247 ms, maximum 0.251 ms and zero abandoned samples.
+
 ## 2026-09-05 — graphical authenticated-QUIC integration
 
 Source state: parent `7322e85` plus the graphical secure-transport increment documented here. The

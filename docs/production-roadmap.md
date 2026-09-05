@@ -83,11 +83,13 @@ streaming, with no synchronous world meshing on the presentation thread.
 - preserved-material body rendering through bounded off-thread local-space meshing and a
   fixed-capacity GPU transform arena (delivered);
 - 60 Hz micrometre gravity, mass-weighted blast impulses, inertia-weighted off-centre angular
-  response, canonical fixed-quaternion integration, three-axis swept static collision, material
-  ground friction and normal restitution, vertical body-column collision, stable stacking, wake
-  propagation, deterministic sleeping, bounded sweep-and-prune with fail-closed overflow,
-  protocol-v6/snapshot-v2 state updates, and mass-centred GPU transforms with conservative rotated
-  render bounds (delivered; collision geometry remains axis-aligned);
+  response, canonical fixed-quaternion integration, rotation-aware per-voxel conservative static
+  sweeps, collision-generated torque, material ground friction and normal restitution, vertical
+  body-column collision, stable stacking, wake propagation, deterministic sleeping, bounded
+  sweep-and-prune with fail-closed overflow, protocol-v6/snapshot-v2 state updates, and mass-centred
+  GPU transforms with conservative rotated render bounds (delivered; continuous angular sweep and
+  oriented dynamic-body narrow phase remain, and rotated bodies fail closed out of the legacy
+  vertical-column solver);
 - four-pass coarse swept X/Z body contacts with rational time-of-impact overlap validation,
   inverse-mass separation, material restitution, momentum-preserving tangential friction, sleep
   wake-up, and deterministic short-chain propagation (delivered);
@@ -95,8 +97,9 @@ streaming, with no synchronous world meshing on the presentation thread.
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
 - unsupported component extraction with mass, centre of mass, and inertia from voxel geometry;
-- oriented voxel contact, collision-generated torque, gyroscopic response, deeper collision-island
-  convergence, and continuous multi-contact resolution between fast moving bodies;
+- continuous angular collision sweep, oriented dynamic-body voxel contact, gyroscopic response,
+  deeper collision-island convergence, and continuous multi-contact resolution between fast moving
+  bodies;
 - debris relevance tiers: authoritative hazards, replicated coarse bodies, deterministic cosmetic
   fragments, and settled static clusters;
 - player construction with shared replay ordering, bounded static placement, per-session resource
@@ -252,8 +255,8 @@ The next three bounded increments are:
 
 1. add trusted OIDC discovery/JWKS refresh, certificate-expiry/lifecycle validation, Windows service
    DACL checks, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
-2. replace the remaining axis-aligned body contacts with bounded oriented voxel contact, generate
-   collision torque, and validate conservative continuous rotation against static and dynamic bodies;
+2. extend the delivered rotated static proxy and contact torque with conservative continuous angular
+   sweep plus bounded oriented dynamic-body contact;
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at
    least four clients, with RTT estimation, adaptive retransmission, and bandwidth fairness.
 

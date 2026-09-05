@@ -1399,6 +1399,18 @@ impl OrderedDeltaInbox {
         if packet.sequence < self.next_sequence {
             return Ok(Vec::new());
         }
+        if packet.sequence == self.next_sequence {
+            // The missing packet is immediately deliverable, not another retained future packet.
+            // Admit it even at the future-queue limit so repair can release that bounded queue.
+            let mut ready = vec![packet];
+            self.next_sequence = self.next_sequence.wrapping_add(1);
+            while let Some(packet) = self.complete.remove(&self.next_sequence) {
+                self.complete_bytes = self.complete_bytes.saturating_sub(packet.retained_bytes());
+                ready.push(packet);
+                self.next_sequence = self.next_sequence.wrapping_add(1);
+            }
+            return Ok(ready);
+        }
         let retained = packet.retained_bytes();
         if let Some(existing) = self.complete.get(&packet.sequence) {
             return if existing == &packet {
@@ -1414,13 +1426,7 @@ impl OrderedDeltaInbox {
         }
         self.complete_bytes = self.complete_bytes.saturating_add(retained);
         self.complete.insert(packet.sequence, packet);
-        let mut ready = Vec::new();
-        while let Some(packet) = self.complete.remove(&self.next_sequence) {
-            self.complete_bytes = self.complete_bytes.saturating_sub(packet.retained_bytes());
-            ready.push(packet);
-            self.next_sequence = self.next_sequence.wrapping_add(1);
-        }
-        Ok(ready)
+        Ok(Vec::new())
     }
 
     #[must_use]
@@ -1527,6 +1533,47 @@ mod tests {
             ),
             Err(crate::CommandError::ExplosionOutOfReach(position)) if position == far
         ));
+    }
+
+    #[test]
+    fn ordered_inbox_accepts_gap_repair_when_the_future_packet_queue_is_full() {
+        let mut inbox = OrderedDeltaInbox::default();
+        for sequence in 2..=u64::try_from(MAX_COMPLETE_PACKETS + 1).unwrap() {
+            for frame in encode_frames(
+                &empty_packet(sequence),
+                LEGACY_UDP_APPLICATION_DATAGRAM_BYTES,
+            )
+            .unwrap()
+            {
+                assert!(inbox.push(&frame).unwrap().is_empty());
+            }
+        }
+        assert_eq!(inbox.buffered_complete_packets(), MAX_COMPLETE_PACKETS);
+        let overflow = encode_frames(
+            &empty_packet(u64::try_from(MAX_COMPLETE_PACKETS + 2).unwrap()),
+            LEGACY_UDP_APPLICATION_DATAGRAM_BYTES,
+        )
+        .unwrap();
+        let retained = inbox.buffered_complete_bytes();
+        assert!(matches!(
+            inbox.push(&overflow[0]),
+            Err(CodecError::TooManyPendingBytes)
+        ));
+        assert_eq!(inbox.buffered_complete_packets(), MAX_COMPLETE_PACKETS);
+        assert_eq!(inbox.buffered_complete_bytes(), retained);
+        let repair =
+            encode_frames(&empty_packet(1), LEGACY_UDP_APPLICATION_DATAGRAM_BYTES).unwrap();
+        let ready = inbox
+            .push(&repair[0])
+            .expect("repair must drain a full queue without admitting more future packets");
+        assert_eq!(ready.len(), MAX_COMPLETE_PACKETS + 1);
+        assert_eq!(ready[0].sequence, 1);
+        for (offset, packet) in ready.iter().enumerate() {
+            assert_eq!(packet.sequence, u64::try_from(offset + 1).unwrap());
+        }
+        assert_eq!(inbox.buffered_complete_packets(), 0);
+        assert_eq!(inbox.buffered_complete_bytes(), 0);
+        assert_eq!(inbox.push(&overflow[0]).unwrap().len(), 1);
     }
 
     #[test]

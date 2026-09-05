@@ -1898,7 +1898,15 @@ fn receive_available(endpoint: &mut Endpoint, server: SocketAddr) {
                 let ready = endpoint
                     .inbox
                     .push(&buffer[..length])
-                    .expect("bounded ordered delta");
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "bounded ordered delta: {error:?}; incoming={} expected={} buffered={} bytes={}",
+                            frame.sequence,
+                            endpoint.inbox.expected_sequence(),
+                            endpoint.inbox.buffered_complete_packets(),
+                            endpoint.inbox.buffered_complete_bytes()
+                        )
+                    });
                 for packet in ready {
                     endpoint
                         .replica

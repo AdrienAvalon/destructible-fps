@@ -223,7 +223,8 @@ Startup parses every certificate in the bounded chain, requires its current vali
 seconds remaining, then maps the earliest expiry to a monotonic shutdown deadline. On Unix the
 standalone process refuses effective UID 0, requires the private key to belong to its service UID,
 accepts other trust files only from root or that UID, and opens every trust file with kernel
-`O_NOFOLLOW` protection before validating the opened descriptor. An optional
+`O_NOFOLLOW` protection before validating the opened descriptor. Every immediate parent directory
+must also be a non-link owned by root or the service UID and not group/world writable. An optional
 bounded file watcher atomically validates replacement certificate/key pairs and changes only future
 QUIC handshakes; existing sessions are not disrupted. It distinguishes an unchanged valid check from
 a newly installed public certificate chain without hashing or logging private-key material. The secure

@@ -102,6 +102,7 @@ pub enum SecureAuthorityLaunchError {
     InvalidFileType(&'static str),
     UnsafeFilePermissions(&'static str),
     UnsafeFileOwnership(&'static str),
+    UnsafeParentDirectory(&'static str),
     PrivilegedProcess,
     OversizedFile {
         purpose: &'static str,
@@ -132,6 +133,9 @@ impl fmt::Display for SecureAuthorityLaunchError {
             }
             Self::UnsafeFileOwnership(purpose) => {
                 write!(formatter, "unsafe ownership on {purpose}")
+            }
+            Self::UnsafeParentDirectory(purpose) => {
+                write!(formatter, "unsafe parent directory for {purpose}")
             }
             Self::PrivilegedProcess => {
                 write!(
@@ -536,6 +540,7 @@ fn read_bounded_file(
     if !path.is_absolute() {
         return Err(SecureAuthorityLaunchError::InvalidConfiguration);
     }
+    validate_parent_directory(path, purpose)?;
     let link_metadata = fs::symlink_metadata(path)
         .map_err(|source| SecureAuthorityLaunchError::File { purpose, source })?;
     if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
@@ -633,6 +638,33 @@ fn validate_runtime_identity() -> Result<(), SecureAuthorityLaunchError> {
 }
 
 #[cfg(unix)]
+fn validate_parent_directory(
+    path: &Path,
+    purpose: &'static str,
+) -> Result<(), SecureAuthorityLaunchError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let parent = path
+        .parent()
+        .ok_or(SecureAuthorityLaunchError::UnsafeParentDirectory(purpose))?;
+    let metadata = fs::symlink_metadata(parent)
+        .map_err(|_| SecureAuthorityLaunchError::UnsafeParentDirectory(purpose))?;
+    let effective_uid = rustix::process::geteuid().as_raw();
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.permissions().mode() & 0o022 != 0
+        || !unix_file_owner_allowed(
+            metadata.uid(),
+            effective_uid,
+            FilePermissionPolicy::Integrity,
+        )
+    {
+        return Err(SecureAuthorityLaunchError::UnsafeParentDirectory(purpose));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 const fn unix_process_identity_allowed(effective_uid: u32) -> bool {
     effective_uid != 0
 }
@@ -648,6 +680,14 @@ fn validate_permissions(
 
 #[cfg(not(unix))]
 const fn validate_runtime_identity() -> Result<(), SecureAuthorityLaunchError> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+const fn validate_parent_directory(
+    _path: &Path,
+    _purpose: &'static str,
+) -> Result<(), SecureAuthorityLaunchError> {
     Ok(())
 }
 
@@ -1101,6 +1141,22 @@ mod tests {
             SecureAuthorityLaunchConfig::load(&fixture.config),
             Err(SecureAuthorityLaunchError::UnsafeFilePermissions(
                 "TLS private key"
+            ))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_trust_parent_directory_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        fs::set_permissions(&fixture.directory, fs::Permissions::from_mode(0o770))
+            .expect("unsafe parent permissions");
+        assert!(matches!(
+            SecureAuthorityLaunchConfig::load(&fixture.config),
+            Err(SecureAuthorityLaunchError::UnsafeParentDirectory(
+                "secure authority configuration"
             ))
         ));
     }

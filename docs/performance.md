@@ -1181,3 +1181,28 @@ point validation; parent-directory ownership and replacement rights also remain 
 | Snapshot encode + decode + install p99 | 9.459 ms |
 | Vulkan GPU total p99, RTX 4050 | 0.247 ms |
 | Vulkan timestamp samples dropped | 0 |
+
+## 2026-09-05 — Unix trust-parent confinement
+
+Source state: parent `95dfdf7` plus the immediate-parent policy. Before opening any configured trust
+file, the authority now requires its immediate parent to be a real, non-link directory, owned by root
+or the service UID, with no group/world write bits. A real mode-0770 fixture is rejected before its
+configuration bytes are read. Combined with owner validation on the opened file and kernel
+`O_NOFOLLOW`, directory substitution by an unrelated account no longer passes merely because the
+replacement file itself is read-only.
+
+| Promotion evidence | Result |
+|---|---:|
+| Library tests | 155 passed debug; 155 passed release |
+| Binary tests | 10 passed debug; 10 passed release |
+| Integration tests | 51 passed debug; 51 passed release |
+| Destruction p99, 500 events | 0.355 ms |
+| Structural analysis + promotion p99, 8,192 voxels | 4.583 ms |
+| Physics p99, 1,024 bodies | 1.231 ms |
+| Snapshot encode + decode + install p99 | 9.373 ms |
+| Vulkan GPU total p99, RTX 4050 | 0.226 ms |
+| Vulkan timestamp samples dropped | 0 |
+
+This completes the current Unix file and immediate-directory ownership gate. Windows DACL/reparse
+validation, automated issuance with expiry-outage evidence, and hostile external load still block
+any non-loopback policy.

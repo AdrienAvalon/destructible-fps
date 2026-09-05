@@ -33,7 +33,8 @@ On Unix, the standalone authority refuses effective UID 0. The configuration, ce
 and optional discovery root bundle must be owned by either root or the service UID and must not be
 group/world writable. The private key must be owned exactly by the service UID with no group/world
 permissions, normally mode `0600`. Every file is opened only after link and regular-file type
-checks, then read through a second size bound. On Windows the current
+checks. Its immediate parent must be a non-link directory owned by root or the service UID and not
+group/world writable. The opened file is then read through a second size bound. On Windows the current
 standard-library implementation cannot validate DACL ownership; the loopback restriction remains a
 mandatory boundary until an installer-owned service ACL check is implemented.
 

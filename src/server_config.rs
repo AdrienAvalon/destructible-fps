@@ -1,8 +1,9 @@
 //! Fail-closed file configuration for the standalone secure authority.
 
 use crate::{
-    MAX_OIDC_JWKS_BYTES, OidcSessionVerifier, OidcVerificationError, SecureConfigError,
-    SecureDedicatedServer, SessionCredentialVerifier, World, secure_server_config,
+    MAX_OIDC_DISCOVERY_ROOT_BYTES, MAX_OIDC_JWKS_BYTES, OidcDiscoveryClient, OidcDiscoveryError,
+    OidcSessionVerifier, OidcVerificationError, SecureConfigError, SecureDedicatedServer,
+    SessionCredentialVerifier, World, secure_server_config,
 };
 use core::fmt;
 use quinn::{
@@ -16,8 +17,8 @@ use std::{
     net::SocketAddr,
     num::NonZeroU64,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    sync::{Arc, RwLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
@@ -29,6 +30,7 @@ pub const MAX_TLS_PRIVATE_KEY_BYTES: usize = 64 * 1_024;
 pub const MIN_TLS_CERTIFICATE_REMAINING_SECONDS: u64 = 60;
 pub const MIN_STATIC_JWKS_VALIDITY_SECONDS: u64 = 60;
 pub const MAX_STATIC_JWKS_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
+const OIDC_REFRESH_GRACE_INTERVALS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -48,22 +50,33 @@ struct RawSecureAuthorityConfig {
     oidc_audience: String,
     jwks_valid_until_unix_seconds: u64,
     #[serde(default)]
+    oidc_discovery: Option<RawOidcDiscoveryConfig>,
+    #[serde(default)]
     max_ticks: Option<NonZeroU64>,
     #[serde(default)]
     stop_after_commands: Option<std::num::NonZeroUsize>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOidcDiscoveryConfig {
+    refresh_interval_seconds: NonZeroU64,
+    #[serde(default)]
+    root_certificate_file: Option<PathBuf>,
+}
+
 /// Validated, fully materialized inputs required to start one secure authority process.
 ///
-/// The private key and OIDC data are loaded once from bounded regular files. The public API does
-/// not expose those buffers, and this milestone deliberately permits only loopback endpoints.
+/// The private key and bootstrap OIDC data are loaded from bounded regular files. Optional trusted
+/// discovery can replace the verifier's public keys without exposing credential bytes. This
+/// milestone deliberately permits only loopback endpoints.
 pub struct SecureAuthorityLaunchConfig {
     bind: SocketAddr,
     exposure: SecureNetworkExposure,
     server_config: ServerConfig,
-    verifier: Arc<dyn SessionCredentialVerifier>,
+    verifier: Arc<ExpiringOidcVerifier>,
+    oidc_refresh: Option<OidcRefreshController>,
     certificate_expiration_deadline: Instant,
-    jwks_expiration_deadline: Instant,
     max_ticks: Option<NonZeroU64>,
     stop_after_commands: Option<std::num::NonZeroUsize>,
 }
@@ -87,6 +100,8 @@ pub enum SecureAuthorityLaunchError {
     InvalidPrivateKey,
     InvalidJwksLifetime,
     Oidc(OidcVerificationError),
+    OidcDiscovery(OidcDiscoveryError),
+    OidcRefreshStateUnavailable,
     Transport(SecureConfigError),
     Bind(io::Error),
 }
@@ -117,6 +132,10 @@ impl fmt::Display for SecureAuthorityLaunchError {
             Self::InvalidPrivateKey => write!(formatter, "invalid TLS private key"),
             Self::InvalidJwksLifetime => write!(formatter, "invalid static JWKS validity window"),
             Self::Oidc(error) => error.fmt(formatter),
+            Self::OidcDiscovery(error) => error.fmt(formatter),
+            Self::OidcRefreshStateUnavailable => {
+                write!(formatter, "OIDC refresh state unavailable")
+            }
             Self::Transport(error) => error.fmt(formatter),
             Self::Bind(error) => error.fmt(formatter),
         }
@@ -128,6 +147,7 @@ impl std::error::Error for SecureAuthorityLaunchError {
         match self {
             Self::File { source, .. } | Self::Bind(source) => Some(source),
             Self::Oidc(source) => Some(source),
+            Self::OidcDiscovery(source) => Some(source),
             Self::Transport(source) => Some(source),
             _ => None,
         }
@@ -187,20 +207,47 @@ impl SecureAuthorityLaunchConfig {
         let private_key = parse_private_key(&private_key_bytes)?;
         let server_config = secure_server_config(certificates, private_key)
             .map_err(SecureAuthorityLaunchError::Transport)?;
-        let oidc = OidcSessionVerifier::new(raw.oidc_issuer, raw.oidc_audience, &jwks)
+        let oidc = OidcSessionVerifier::new(&raw.oidc_issuer, raw.oidc_audience, &jwks)
             .map_err(SecureAuthorityLaunchError::Oidc)?;
-        let verifier: Arc<dyn SessionCredentialVerifier> = Arc::new(ExpiringOidcVerifier {
+        let verifier = Arc::new(ExpiringOidcVerifier {
             inner: oidc,
-            expiration_deadline: jwks_expiration_deadline,
+            expiration_deadline: RwLock::new(jwks_expiration_deadline),
         });
+        let oidc_refresh = raw
+            .oidc_discovery
+            .map(|config| {
+                let root_bundle = config
+                    .root_certificate_file
+                    .as_deref()
+                    .map(|path| {
+                        read_bounded_file(
+                            path,
+                            "OIDC discovery root bundle",
+                            MAX_OIDC_DISCOVERY_ROOT_BYTES,
+                            FilePermissionPolicy::Integrity,
+                        )
+                    })
+                    .transpose()?;
+                let discovery = OidcDiscoveryClient::new(
+                    &raw.oidc_issuer,
+                    Duration::from_secs(config.refresh_interval_seconds.get()),
+                    root_bundle.as_deref(),
+                )
+                .map_err(SecureAuthorityLaunchError::OidcDiscovery)?;
+                Ok(OidcRefreshController {
+                    discovery,
+                    verifier: Arc::clone(&verifier),
+                })
+            })
+            .transpose()?;
 
         Ok(Self {
             bind: raw.bind,
             exposure: raw.exposure,
             server_config,
             verifier,
+            oidc_refresh,
             certificate_expiration_deadline,
-            jwks_expiration_deadline,
             max_ticks: raw.max_ticks,
             stop_after_commands: raw.stop_after_commands,
         })
@@ -212,10 +259,11 @@ impl SecureAuthorityLaunchConfig {
     ///
     /// Returns endpoint bind or authority construction failures.
     pub fn start(self, world: World) -> Result<SecureDedicatedServer, SecureAuthorityLaunchError> {
+        let verifier: Arc<dyn SessionCredentialVerifier> = self.verifier;
         SecureDedicatedServer::bind_validated_loopback(
             self.bind,
             self.server_config,
-            self.verifier,
+            verifier,
             world,
         )
         .map_err(SecureAuthorityLaunchError::Bind)
@@ -232,8 +280,13 @@ impl SecureAuthorityLaunchConfig {
     }
 
     #[must_use]
-    pub const fn jwks_expiration_deadline(&self) -> Instant {
-        self.jwks_expiration_deadline
+    pub fn jwks_expiration_deadline(&self) -> Option<Instant> {
+        self.verifier.expiration_deadline()
+    }
+
+    #[must_use]
+    pub fn oidc_refresh_controller(&self) -> Option<OidcRefreshController> {
+        self.oidc_refresh.clone()
     }
 
     #[must_use]
@@ -254,14 +307,86 @@ impl SecureAuthorityLaunchConfig {
 
 struct ExpiringOidcVerifier {
     inner: OidcSessionVerifier,
-    expiration_deadline: Instant,
+    expiration_deadline: RwLock<Instant>,
 }
 
 impl SessionCredentialVerifier for ExpiringOidcVerifier {
     fn verify(&self, credential: &[u8]) -> Option<crate::AuthenticatedPrincipal> {
-        (Instant::now() < self.expiration_deadline)
+        let keys_are_current = self
+            .expiration_deadline
+            .read()
+            .ok()
+            .is_some_and(|deadline| Instant::now() < *deadline);
+        keys_are_current
             .then(|| self.inner.verify_oidc(credential).ok())
             .flatten()
+    }
+}
+
+impl ExpiringOidcVerifier {
+    fn expiration_deadline(&self) -> Option<Instant> {
+        self.expiration_deadline
+            .read()
+            .ok()
+            .map(|deadline| *deadline)
+    }
+
+    fn replace_jwks(
+        &self,
+        jwks: &[u8],
+        validity: Duration,
+    ) -> Result<usize, SecureAuthorityLaunchError> {
+        let deadline = Instant::now()
+            .checked_add(validity)
+            .ok_or(SecureAuthorityLaunchError::InvalidJwksLifetime)?;
+        let replacement_count = self
+            .inner
+            .replace_jwks(jwks)
+            .map_err(SecureAuthorityLaunchError::Oidc)?;
+        let mut current = self
+            .expiration_deadline
+            .write()
+            .map_err(|_| SecureAuthorityLaunchError::OidcRefreshStateUnavailable)?;
+        *current = deadline;
+        drop(current);
+        Ok(replacement_count)
+    }
+}
+
+#[derive(Clone)]
+pub struct OidcRefreshController {
+    discovery: OidcDiscoveryClient,
+    verifier: Arc<ExpiringOidcVerifier>,
+}
+
+impl OidcRefreshController {
+    #[must_use]
+    pub const fn refresh_interval(&self) -> Duration {
+        self.discovery.refresh_interval()
+    }
+
+    #[must_use]
+    pub fn expiration_deadline(&self) -> Option<Instant> {
+        self.verifier.expiration_deadline()
+    }
+
+    /// Fetches, validates, and atomically installs a complete discovered JWKS.
+    ///
+    /// # Errors
+    ///
+    /// Discovery, key-policy, and clock failures leave the previous key set and deadline in force.
+    /// A poisoned synchronization state rejects future admissions rather than extending validity.
+    pub async fn refresh_once(&self) -> Result<usize, SecureAuthorityLaunchError> {
+        let jwks = self
+            .discovery
+            .fetch_jwks()
+            .await
+            .map_err(SecureAuthorityLaunchError::OidcDiscovery)?;
+        let validity = self
+            .refresh_interval()
+            .checked_mul(OIDC_REFRESH_GRACE_INTERVALS)
+            .ok_or(SecureAuthorityLaunchError::InvalidJwksLifetime)?;
+        self.verifier.replace_jwks(&jwks, validity)
     }
 }
 
@@ -353,6 +478,11 @@ fn validate_raw_config(
         || !raw.certificate_chain_file.is_absolute()
         || !raw.private_key_file.is_absolute()
         || !raw.oidc_jwks_file.is_absolute()
+        || raw
+            .oidc_discovery
+            .as_ref()
+            .and_then(|config| config.root_certificate_file.as_ref())
+            .is_some_and(|path| !path.is_absolute())
     {
         return Err(SecureAuthorityLaunchError::InvalidConfiguration);
     }
@@ -456,6 +586,108 @@ mod tests {
         assert_eq!(config.exposure(), SecureNetworkExposure::Loopback);
         assert_eq!(config.max_ticks().map(NonZeroU64::get), Some(120));
         assert_eq!(config.stop_after_commands(), None);
+        assert!(config.oidc_refresh_controller().is_none());
+    }
+
+    #[test]
+    fn bounded_discovery_configuration_materializes_a_refresh_controller() {
+        let fixture = Fixture::new();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture.config).expect("read discovery fixture"))
+                .expect("parse discovery fixture");
+        document["oidc_discovery"] = serde_json::json!({
+            "refresh_interval_seconds": 60,
+            "root_certificate_file": fixture.certificate,
+        });
+        fs::write(
+            &fixture.config,
+            serde_json::to_vec(&document).expect("discovery config JSON"),
+        )
+        .expect("discovery config");
+
+        let config = SecureAuthorityLaunchConfig::load(&fixture.config)
+            .expect("valid discovery launch config");
+        let refresh = config
+            .oidc_refresh_controller()
+            .expect("configured refresh controller");
+        assert_eq!(refresh.refresh_interval(), Duration::from_mins(1));
+        assert!(refresh.expiration_deadline().is_some());
+    }
+
+    #[test]
+    fn unsafe_discovery_configuration_fails_closed() {
+        let fixture = Fixture::new();
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture.config).expect("read discovery fixture"))
+                .expect("parse discovery fixture");
+        let mut document = original.clone();
+        document["oidc_discovery"] = serde_json::json!({
+            "refresh_interval_seconds": 59,
+        });
+        fs::write(
+            &fixture.config,
+            serde_json::to_vec(&document).expect("short-interval config JSON"),
+        )
+        .expect("short-interval config");
+        assert!(matches!(
+            SecureAuthorityLaunchConfig::load(&fixture.config),
+            Err(SecureAuthorityLaunchError::OidcDiscovery(
+                OidcDiscoveryError::InvalidRefreshInterval
+            ))
+        ));
+
+        document = original;
+        document["oidc_discovery"] = serde_json::json!({
+            "refresh_interval_seconds": 60,
+            "root_certificate_file": "relative-root.pem",
+        });
+        fs::write(
+            &fixture.config,
+            serde_json::to_vec(&document).expect("relative-root config JSON"),
+        )
+        .expect("relative-root config");
+        assert!(matches!(
+            SecureAuthorityLaunchConfig::load(&fixture.config),
+            Err(SecureAuthorityLaunchError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
+    fn refresh_deadline_changes_only_after_a_valid_complete_key_set() {
+        let initial_deadline = Instant::now()
+            .checked_add(Duration::from_mins(1))
+            .expect("initial refresh deadline");
+        let verifier = ExpiringOidcVerifier {
+            inner: OidcSessionVerifier::new(
+                "https://identity.example.test/realms/game",
+                "destructible-fps",
+                &valid_jwks(),
+            )
+            .expect("initial refresh verifier"),
+            expiration_deadline: RwLock::new(initial_deadline),
+        };
+
+        assert!(
+            verifier
+                .replace_jwks(br#"{"keys":[]}"#, Duration::from_mins(3))
+                .is_err()
+        );
+        assert_eq!(verifier.expiration_deadline(), Some(initial_deadline));
+
+        let before = Instant::now()
+            .checked_add(Duration::from_mins(3))
+            .expect("minimum replacement deadline");
+        assert_eq!(
+            verifier
+                .replace_jwks(&valid_jwks(), Duration::from_mins(3))
+                .expect("valid replacement JWKS"),
+            1
+        );
+        assert!(
+            verifier
+                .expiration_deadline()
+                .is_some_and(|deadline| deadline >= before)
+        );
     }
 
     #[test]

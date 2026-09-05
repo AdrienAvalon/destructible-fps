@@ -148,8 +148,8 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - offline RS256 access-token verification with strict JWKS key policy, exact issuer/audience and time
   validation, bounded one-use `jti` cache, atomic rotation, and issuer/subject-derived 256-bit
   principal (delivered); a TLS-only, no-redirect/no-proxy discovery client with bounded private
-  roots, exact issuer, same-origin JWKS, deadlines and response ceilings is also delivered, while
-  atomic process refresh wiring remains;
+  roots, exact issuer, same-origin JWKS, deadlines and response ceilings is also delivered and wired
+  to mandatory pre-readiness plus periodic atomic refresh with monotonic stale-key shutdown;
 - transport-independent authority state keyed by opaque peer IDs, authenticated principal binding,
   bounded core-owned ingress and egress, transport-sized delta/snapshot framing, and legacy UDP
   behavior preserved by process tests (delivered);
@@ -165,8 +165,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   bounded correction smoothing are delivered for loopback;
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
   Unix permission checks, complete-chain X.509 lifetime preflight, monotonic TLS/static-JWKS expiry,
-  signal-aware shutdown, and a five-case external-process matrix (delivered for loopback; online
-  refresh, automated renewal, platform ACLs, and remote policy remain);
+  signal-aware shutdown, and a seven-case external-process matrix including trusted discovery and
+  hostile issuer mismatch (delivered for loopback; automated renewal, platform ACLs, production
+  issuer/root provisioning, and remote policy remain);
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - broader entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
@@ -258,9 +259,8 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. connect the delivered trusted OIDC discovery client to bounded atomic JWKS refresh, then add
-   automated certificate renewal, Windows service DACL checks, and a remote attack/failure matrix
-   before enabling an explicit non-loopback policy;
+1. add automated certificate renewal, Windows service DACL checks, production OIDC issuer/root
+   provisioning, and a remote attack/failure matrix before enabling an explicit non-loopback policy;
 2. extend the delivered oriented per-voxel dynamic contact with rotated vertical support, continuous
    multi-contact manifolds, gyroscopic response, and deeper collision-island convergence;
 3. extend the fixed impairment profile into configurable trace replay and congestion tests for at

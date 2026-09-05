@@ -21,12 +21,16 @@ fields.
 | `oidc_issuer` | Exact HTTPS token issuer. |
 | `oidc_audience` | Exact game audience. |
 | `jwks_valid_until_unix_seconds` | Absolute expiry with 60 to 86,400 seconds remaining at startup. |
+| `oidc_discovery` | Optional object enabling mandatory startup discovery and periodic refresh. |
+| `oidc_discovery.refresh_interval_seconds` | Whole seconds from 60 through 3,600. Refreshed keys remain usable for at most three configured intervals without another successful refresh. |
+| `oidc_discovery.root_certificate_file` | Optional absolute, regular, non-link PEM trust bundle; at most 256 KiB and 16 certificates. Platform roots remain available. |
 | `max_ticks` | Optional positive fixed-tick limit; intended for bounded validation runs. |
 | `stop_after_commands` | Optional positive applied-command limit; intended for bounded validation runs. |
 
-On Unix, the configuration, certificate, and JWKS must not be group/world writable. The private key
-must have no group/world permissions, normally mode `0600`. All four files are opened only after
-links and regular-file type checks, then read through a second size bound. On Windows the current
+On Unix, the configuration, certificate, JWKS, and optional discovery root bundle must not be
+group/world writable. The private key must have no group/world permissions, normally mode `0600`.
+Every file is opened only after link and regular-file type checks, then read through a second size
+bound. On Windows the current
 standard-library implementation cannot validate DACL ownership; the loopback restriction remains a
 mandatory boundary until an installer-owned service ACL check is implemented.
 
@@ -35,9 +39,16 @@ certificate and private key are compatible. Every certificate in the chain is pa
 must be currently valid, and must have at least 60 seconds remaining. Startup converts both the
 earliest certificate expiry and the absolute JWKS deadline into monotonic deadlines, so a wall-clock
 rollback cannot extend either. The verifier rejects new admissions at JWKS expiry, and the process
-terminates on the first tick at or after either deadline. Set a short rotation horizon and replace the
-complete file/config pair atomically; automatic trusted discovery, refresh, and certificate renewal
-are later gates.
+terminates on the first tick at or after either deadline.
+
+The static JWKS remains a bounded bootstrap and rollback input. When `oidc_discovery` is configured,
+the process must fetch and validate discovery metadata plus a complete JWKS before emitting `READY`.
+It then refreshes outside the simulation loop at the configured interval. Each successful complete-set
+swap advances a monotonic deadline by three intervals; any failed fetch keeps the previous keys and
+deadline, emits only a non-secret failure counter, and ultimately stops the authority rather than
+serving indefinitely stale identity data. HTTPS requires TLS 1.2 or later, exact issuer equality,
+same-origin JWKS, no redirects, no ambient proxy, three-second connect and five-second total
+deadlines, and 16 KiB/64 KiB response limits. Certificate renewal remains a separate gate.
 
 ## Local launch
 
@@ -71,10 +82,11 @@ prints the generated key or either distinct player credential. Start the server 
 clients with the paths it reports, then delete the complete directory. This convenience authority is
 deliberately unsuitable for LAN or Internet exposure.
 
-Readiness emits only the selected socket and the non-secret exposure class. The final line contains
-bounded counters, never credentials or principal identifiers. `Ctrl-C`, `max_ticks`, JWKS expiry,
-and `stop_after_commands` all converge through endpoint shutdown.
+Readiness emits only the selected socket, non-secret exposure class, and whether refresh is active.
+The final line contains bounded gameplay and refresh counters, never credentials, endpoints, or
+principal identifiers. `Ctrl-C`, `max_ticks`, JWKS expiry, and `stop_after_commands` all converge
+through endpoint shutdown.
 
-Do not expose this milestone to a LAN or the Internet. Remote enablement still requires trusted
-discovery and key refresh, automated certificate renewal, platform secret-ACL checks, external
+Do not expose this milestone to a LAN or the Internet. Remote enablement still requires production
+issuer/root provisioning, automated certificate renewal, platform secret-ACL checks, external
 loss/abuse tests, and an explicit reviewed exposure policy.

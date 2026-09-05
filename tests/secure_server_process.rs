@@ -25,10 +25,21 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, ExitStatus, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::time::{sleep, timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    time::{sleep, timeout},
+};
+use tokio_rustls::{
+    TlsAcceptor,
+    rustls::{ServerConfig, pki_types::PrivatePkcs8KeyDer},
+};
 
 const ISSUER: &str = "https://identity.example.test/realms/game";
 const AUDIENCE: &str = "destructible-fps";
@@ -77,6 +88,156 @@ async fn standalone_process_accepts_oidc_and_applies_an_authoritative_command() 
     assert!(!output.stdout.contains(&token));
     assert!(!output.stderr.contains(&token));
     client.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_process_refreshes_discovered_jwks_before_ready() {
+    let fixture = Fixture::new(300, Some(1));
+    let discovery_identity = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+        .expect("process discovery TLS identity");
+    let tls = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![discovery_identity.cert.der().clone()],
+            PrivatePkcs8KeyDer::from(discovery_identity.signing_key.serialize_der()).into(),
+        )
+        .expect("process discovery TLS config");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("process discovery listener");
+    let port = listener
+        .local_addr()
+        .expect("process discovery address")
+        .port();
+    let issuer = format!("https://localhost:{port}/realms/game");
+    let root = fixture.directory.join("discovery-root.pem");
+    fs::write(&root, discovery_identity.cert.pem()).expect("process discovery root");
+    fixture.configure_discovery(&issuer, &root);
+
+    let (_, wrong_static_jwks) = oidc_material();
+    fs::write(&fixture.jwks_path, wrong_static_jwks).expect("replace static process JWKS");
+    let metadata = serde_json::to_vec(&json!({
+        "issuer": issuer,
+        "jwks_uri": format!("https://localhost:{port}/realms/game/keys"),
+    }))
+    .expect("process discovery metadata");
+    let discovery_server = tokio::spawn(serve_https_documents(
+        listener,
+        Arc::new(tls),
+        vec![
+            (
+                "/realms/game/.well-known/openid-configuration",
+                "application/json",
+                metadata,
+            ),
+            (
+                "/realms/game/keys",
+                "application/jwk-set+json",
+                fixture.oidc_jwks.clone(),
+            ),
+        ],
+    ));
+
+    let token = fixture.signed_token_for_issuer("process-discovered-jti", &issuer);
+    let mut process = RunningServer::spawn(&fixture.config);
+    let client = trusted_client(fixture.certificate.clone());
+    let connection = connect(&client, process.address).await;
+    let welcome = establish_session(&connection, 407, token.as_bytes())
+        .await
+        .expect("discovered-key OIDC process session");
+    send_gameplay_datagram(
+        &connection,
+        encode_explosion_request(
+            welcome.session_id,
+            ExplosionCommand {
+                command_id: 1,
+                center: IVec3::new(0, 1, 0),
+                radius_voxels: 4,
+                peak_energy: 10_000,
+            },
+        ),
+    )
+    .expect("encrypted discovered-key command");
+
+    let output = process.finish().await;
+    assert!(output.status.success(), "process stderr: {}", output.stderr);
+    assert!(output.stdout.contains("commands=1"), "{}", output.stdout);
+    assert!(output.stdout.contains("admitted=1"), "{}", output.stdout);
+    assert!(
+        output.stdout.contains("oidc_refresh_attempts=1"),
+        "{}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("oidc_refresh_successes=1"),
+        "{}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("oidc_refresh_failures=0"),
+        "{}",
+        output.stdout
+    );
+    assert!(!output.stdout.contains(&token));
+    assert!(!output.stderr.contains(&token));
+    discovery_server
+        .await
+        .expect("process discovery server task");
+    client.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_process_refuses_mismatched_discovery_before_ready() {
+    let fixture = Fixture::new(1, None);
+    let discovery_identity = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+        .expect("mismatched discovery TLS identity");
+    let tls = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![discovery_identity.cert.der().clone()],
+            PrivatePkcs8KeyDer::from(discovery_identity.signing_key.serialize_der()).into(),
+        )
+        .expect("mismatched discovery TLS config");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mismatched discovery listener");
+    let port = listener
+        .local_addr()
+        .expect("mismatched discovery address")
+        .port();
+    let issuer = format!("https://localhost:{port}/realms/game");
+    let root = fixture.directory.join("mismatched-discovery-root.pem");
+    fs::write(&root, discovery_identity.cert.pem()).expect("mismatched discovery root");
+    fixture.configure_discovery(&issuer, &root);
+    let metadata = serde_json::to_vec(&json!({
+        "issuer": "https://attacker.invalid/realms/game",
+        "jwks_uri": format!("https://localhost:{port}/realms/game/keys"),
+    }))
+    .expect("mismatched discovery metadata");
+    let discovery_server = tokio::spawn(serve_https_documents(
+        listener,
+        Arc::new(tls),
+        vec![(
+            "/realms/game/.well-known/openid-configuration",
+            "application/json",
+            metadata,
+        )],
+    ));
+
+    let output = process_command(&fixture.config)
+        .output()
+        .expect("mismatched discovery process");
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("READY"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("IssuerMismatch"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&issuer));
+    discovery_server
+        .await
+        .expect("mismatched discovery server task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -256,6 +417,8 @@ struct Fixture {
     certificate_path: PathBuf,
     certificate: CertificateDer<'static>,
     oidc_signing_key: SigningRsaKeyPair,
+    oidc_jwks: Vec<u8>,
+    jwks_path: PathBuf,
 }
 
 impl Fixture {
@@ -276,7 +439,7 @@ impl Fixture {
         fs::write(&key_path, identity.signing_key.serialize_pem()).expect("process private key");
         secure_private_key(&key_path);
         let (oidc_signing_key, jwks) = oidc_material();
-        fs::write(&jwks_path, jwks).expect("process JWKS");
+        fs::write(&jwks_path, &jwks).expect("process JWKS");
         let valid_until = unix_seconds() + 300;
         let mut document = json!({
             "bind": "127.0.0.1:0",
@@ -304,6 +467,8 @@ impl Fixture {
             certificate_path,
             certificate: identity.cert.der().clone(),
             oidc_signing_key,
+            oidc_jwks: jwks,
+            jwks_path,
         }
     }
 
@@ -334,12 +499,26 @@ impl Fixture {
         secure_private_key(&self.key);
     }
 
+    fn configure_discovery(&self, issuer: &str, root: &Path) {
+        let mut document = self.read_config();
+        document["oidc_issuer"] = json!(issuer);
+        document["oidc_discovery"] = json!({
+            "refresh_interval_seconds": 60,
+            "root_certificate_file": path_string(root),
+        });
+        self.write_config(&document);
+    }
+
     fn signed_token(&self, jti: &str) -> String {
+        self.signed_token_for_issuer(jti, ISSUER)
+    }
+
+    fn signed_token_for_issuer(&self, jti: &str, issuer: &str) -> String {
         let now = unix_seconds();
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(KEY_ID.into());
         let claims = Claims {
-            iss: ISSUER,
+            iss: issuer,
             aud: AUDIENCE,
             sub: "process-player",
             exp: now + 120,
@@ -364,6 +543,63 @@ impl Fixture {
             "{message}.{}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature)
         )
+    }
+}
+
+async fn serve_https_documents(
+    listener: TcpListener,
+    config: Arc<ServerConfig>,
+    documents: Vec<(&'static str, &'static str, Vec<u8>)>,
+) {
+    let acceptor = TlsAcceptor::from(config);
+    for (expected_path, content_type, document) in documents {
+        let (stream, _) = listener.accept().await.expect("process discovery client");
+        let mut stream = acceptor
+            .accept(stream)
+            .await
+            .expect("process discovery TLS handshake");
+        let mut request = vec![0_u8; 8 * 1_024];
+        let mut received = 0_usize;
+        loop {
+            let count = stream
+                .read(&mut request[received..])
+                .await
+                .expect("process discovery request");
+            assert!(count > 0, "process discovery request ended before headers");
+            received += count;
+            if request[..received]
+                .windows(4)
+                .any(|window| window == b"\r\n\r\n")
+            {
+                break;
+            }
+            assert!(
+                received < request.len(),
+                "process discovery request exceeded bound"
+            );
+        }
+        let request =
+            std::str::from_utf8(&request[..received]).expect("UTF-8 process discovery request");
+        assert!(
+            request.starts_with(&format!("GET {expected_path} HTTP/1.1\r\n")),
+            "unexpected process discovery path"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            document.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("process discovery response headers");
+        stream
+            .write_all(&document)
+            .await
+            .expect("process discovery response body");
+        stream
+            .shutdown()
+            .await
+            .expect("process discovery TLS shutdown");
     }
 }
 

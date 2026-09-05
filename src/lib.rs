@@ -108,8 +108,8 @@ pub use secure_transport::{
 pub use server_config::{
     MAX_CERTIFICATE_CHAIN_BYTES, MAX_CERTIFICATE_CHAIN_ENTRIES, MAX_SECURE_CONFIG_BYTES,
     MAX_STATIC_JWKS_VALIDITY_SECONDS, MAX_TLS_PRIVATE_KEY_BYTES, MIN_STATIC_JWKS_VALIDITY_SECONDS,
-    MIN_TLS_CERTIFICATE_REMAINING_SECONDS, SecureAuthorityLaunchConfig, SecureAuthorityLaunchError,
-    SecureNetworkExposure,
+    MIN_TLS_CERTIFICATE_REMAINING_SECONDS, OidcRefreshController, SecureAuthorityLaunchConfig,
+    SecureAuthorityLaunchError, SecureNetworkExposure,
 };
 pub use session::{BuildResult, DemoSession, FireMode, SessionError, ShotResult, dirty_chunks};
 pub use snapshot::{

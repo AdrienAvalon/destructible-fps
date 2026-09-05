@@ -3,6 +3,29 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — fail-closed OIDC authority refresh lifecycle
+
+Source state: parent `fdf0b62` plus the authority-refresh increment documented here. The standalone
+authority can retain its bounded static JWKS as bootstrap material while requiring trusted online
+discovery before readiness. A valid complete discovered set replaces the bootstrap atomically and
+starts a monotonic validity horizon of exactly three configured refresh intervals. Refresh work runs
+outside the 60 Hz simulation loop. A request or validation failure retains both the previous set and
+its previous deadline, exposes only a non-secret failure count, and cannot extend stale trust; the
+authority terminates once that deadline is reached.
+
+Focused configuration tests reject intervals below 60 seconds and relative private-root paths, and
+prove that a rejected key set cannot advance the deadline. The seven-case external-process matrix
+includes a real local HTTPS issuer with an explicit root: it replaces an intentionally wrong static
+key before `READY`, admits a token signed only by the discovered key, and applies an authoritative
+command. A separate issuer-mismatch case exits before `READY` without logging the configured issuer.
+The complete promotion passed 141 library tests, ten binary tests and 46 integration tests in both
+debug and release with strict Clippy clean. A real five-second Vulkan smoke on the RTX 4050 streamed
+all 128 chunks in 35.6 ms and completed with GPU-total p99 0.884 ms, maximum 0.925 ms, and zero
+abandoned samples. The required release baselines measured destruction p99 0.356 ms, 8,192-voxel
+structural analysis plus promotion p99 4.211 ms, 1,024-body stacking p99 1.159 ms, and snapshot total
+p99 9.298 ms. The authority remains loopback-only pending certificate renewal, platform ACLs,
+production issuer/root provisioning, and the remote abuse/failure matrix.
+
 ## 2026-09-05 — bounded trusted OIDC discovery client
 
 Source state: parent `a53fb98` plus the isolated discovery-client increment documented here. The

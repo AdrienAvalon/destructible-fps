@@ -224,13 +224,16 @@ long enough to clone the selected immutable key. The standalone process loads a 
 whose declared remaining validity must be between one minute and 24 hours. The verifier rejects new
 admissions at expiry and the process stops rather than running on stale identity data.
 
-The staged discovery client derives the standard well-known path from one parsed issuer, requires
+The discovery client derives the standard well-known path from one parsed issuer, requires
 TLS 1.2 or later with platform or explicitly bounded private roots, disables redirects and ambient
 proxies, and uses three-second connection plus five-second total deadlines. Discovery metadata is
 limited to 16 KiB, must repeat the exact issuer, and may point only to an HTTPS JWKS endpoint on the
 same scheme/host/port. JWKS is limited to 64 KiB. Both known and chunked bodies are counted before
-growth, and only JSON/JWK Set media types are accepted. This client is not yet connected to the
-authority lifecycle; until the atomic refresh controller lands, static expiry remains authoritative.
+growth, and only JSON/JWK Set media types are accepted. When configured, an initial online refresh
+must validate and atomically replace the bootstrap set before readiness. A bounded background task
+then refreshes outside the fixed simulation tick. A successful complete-set swap grants exactly
+three refresh intervals of monotonic validity; a failure leaves the previous keys and deadline in
+force, so repeated failure eventually closes the authority rather than extending stale trust.
 
 The process configuration is bounded to 16 KiB and rejects unknown fields, links, relative credential
 paths, non-regular files, certificates over 256 KiB or eight entries, private keys over 64 KiB, and
@@ -250,9 +253,11 @@ both receive the same canonical transaction. It also proves that invalid credent
 authority state and that an over-rate session closes before simulation work. Five standalone-process
 tests exercise real OIDC admission and command application, invalid-token rejection without a world
 mutation, remote-bind rejection, expired-certificate rejection, and private-key permission rejection
-before readiness. Production OIDC discovery/JWKS refresh, automated certificate renewal, reliable
-snapshot/control streams, OS-specific secret ACL validation, and a non-loopback attack matrix remain
-required before remote exposure. Both
+before readiness. Two additional process cases prove that trusted HTTPS discovery replaces an
+intentionally wrong bootstrap key before accepting a real OIDC command, while mismatched metadata
+exits before readiness without disclosing the endpoint. Production issuer/root provisioning,
+automated certificate renewal, reliable snapshot/control streams, OS-specific secret ACL validation,
+and a non-loopback attack matrix remain required before remote exposure. Both
 the direct runtime API and the validated file policy remain fail-closed to loopback.
 
 ## Planned engine layers
@@ -353,8 +358,9 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
   (delivered for loopback tests);
 - bounded TLS 1.3 QUIC transport and post-TLS credential admission (delivered and wired to both the
   authority and graphical client; remote operational exposure remains gated);
-- bounded offline RS256/JWKS OIDC validation, atomic rotation, replay cache, and stable principal
-  mapping (delivered as an injectable verifier; trusted refresh and process configuration remain);
+- bounded offline RS256/JWKS OIDC validation, atomic rotation, replay cache, stable principal mapping,
+  bounded process configuration, and trusted pre-readiness plus periodic refresh (delivered;
+  production issuer/root provisioning remains);
 - transport-independent bounded authority core, opaque peer IDs, authenticated principal binding,
   transport-sized framing, and a regression-preserving loopback UDP adapter (delivered);
 - bounded async admission/gameplay queues, monotonic session IDs, CSPRNG server nonces, per-session

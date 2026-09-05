@@ -75,15 +75,17 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
   hostile-input limits, and replica reconstruction (delivered);
 - local-space body meshes produced by the bounded background worker, fixed-capacity GPU transform
   instances, body frustum culling, and world/shadow rendering (delivered);
-- deterministic 60 Hz micrometre state, gravity, swept vertical collision against static voxels,
-  sleeping, bounded sweep-and-prune candidates, protocol state replication, and batched GPU
-  transform updates (delivered for axis-aligned bodies);
+- deterministic 60 Hz micrometre state, gravity, swept vertical collision against static voxels and
+  exact body columns, stable stacking, wake propagation, sleeping, bounded sweep-and-prune with
+  atomic overload rollback, protocol state replication, and batched GPU transform updates
+  (delivered for axis-aligned downward contacts);
 - persistent foundation and material constraint graph integrated into authoritative transactions;
 - compression, tension, shear, and connection limits by material;
 - local stress propagation after damage;
 - unsupported island extraction (delivered for topology-changing voxel edits);
 - rigid-body mass, centre of mass, and inertia derived from geometry (delivered);
-- body-body contact response, rotation, clustering, and distance-based solver budgets.
+- horizontal impulses, friction, restitution, rotation, clustering, and distance-based solver
+  budgets.
 
 Gate: destroying a load-bearing member produces a repeatable progressive collapse and never stalls a
 60 Hz server tick in the agreed worst-case scene.

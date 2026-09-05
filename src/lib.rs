@@ -21,9 +21,11 @@ pub use destruction::{DestructionReport, Explosion};
 pub use generator::demo_world;
 pub use material::{Material, MaterialProperties, Voxel};
 pub use physics::{
-    BodyError, BodyLimits, BodyStepResult, BodyVoxel, FixedMicrometers3, FixedMillimeters3,
-    InertiaDiagonalKgMm2, MAX_BROAD_PHASE_PAIRS, MICROMETERS_PER_VOXEL, RigidBodyDescriptor,
-    RigidBodyState, SERVER_PHYSICS_HZ, broad_phase_pairs, step_rigid_body, valid_rigid_body_state,
+    BodyError, BodyLimits, BodySimulationReport, BodyStateTransition, BodyStepResult, BodyVoxel,
+    BroadPhaseResult, FixedMicrometers3, FixedMillimeters3, InertiaDiagonalKgMm2,
+    MAX_BROAD_PHASE_PAIRS, MICROMETERS_PER_VOXEL, RigidBodyDescriptor, RigidBodyState,
+    SERVER_PHYSICS_HZ, broad_phase_pairs, step_rigid_bodies, step_rigid_body,
+    valid_rigid_body_state,
 };
 pub use replication::{
     AuthoritativeServer, BodyStateUpdate, BodyVoxelAssignment, ClientReplica, ClientStatus,

@@ -2,7 +2,7 @@ use crate::destruction::{DestructionReport, Explosion};
 use crate::material::{InvalidMaterial, Voxel};
 use crate::physics::{
     BodyError, BodyLimits, BodyVoxel, FixedMicrometers3, RigidBodyDescriptor, RigidBodyState,
-    broad_phase_pairs, step_rigid_body, valid_rigid_body_state,
+    step_rigid_bodies, valid_rigid_body_state,
 };
 use crate::structural::{
     StructuralAnchors, StructuralError, StructuralLimits, analyze_structural_changes,
@@ -51,7 +51,9 @@ pub struct BodyStateUpdate {
 pub struct PhysicsTickReport {
     pub updated_bodies: usize,
     pub static_collisions: usize,
+    pub body_collisions: usize,
     pub bodies_put_to_sleep: usize,
+    pub bodies_woken: usize,
     pub broad_phase_pairs: usize,
     pub broad_phase_saturated: bool,
 }
@@ -306,31 +308,24 @@ impl AuthoritativeServer {
 
     #[must_use]
     pub fn advance_physics(&mut self) -> (Option<DeltaPacket>, PhysicsTickReport) {
-        let pairs = broad_phase_pairs(&self.bodies, &self.body_states);
-        let mut report = PhysicsTickReport {
-            broad_phase_pairs: pairs.len(),
-            broad_phase_saturated: pairs.len() == crate::physics::MAX_BROAD_PHASE_PAIRS,
-            ..PhysicsTickReport::default()
+        let simulation = step_rigid_bodies(&self.world, &self.bodies, &mut self.body_states);
+        let report = PhysicsTickReport {
+            updated_bodies: simulation.transitions.len(),
+            static_collisions: simulation.static_collisions,
+            body_collisions: simulation.body_collisions,
+            bodies_put_to_sleep: simulation.bodies_put_to_sleep,
+            bodies_woken: simulation.bodies_woken,
+            broad_phase_pairs: simulation.broad_phase_pairs,
+            broad_phase_saturated: simulation.broad_phase_saturated,
         };
         let base_body_fingerprint = self.body_fingerprint;
-        let mut updates = Vec::new();
-        for (&body_id, body) in &self.bodies {
-            let Some(state) = self.body_states.get_mut(&body_id) else {
-                continue;
-            };
-            let before = *state;
-            let result = step_rigid_body(&self.world, body, state);
-            if !result.moved {
-                continue;
-            }
-            self.body_fingerprint ^=
-                body_fingerprint_token(body_id, before) ^ body_fingerprint_token(body_id, *state);
-            report.updated_bodies += 1;
-            report.static_collisions += usize::from(result.collided_with_static);
-            report.bodies_put_to_sleep += usize::from(result.became_sleeping);
+        let mut updates = Vec::with_capacity(simulation.transitions.len());
+        for transition in simulation.transitions {
+            self.body_fingerprint ^= body_fingerprint_token(transition.body_id, transition.before)
+                ^ body_fingerprint_token(transition.body_id, transition.after);
             updates.push(BodyStateUpdate {
-                body_id,
-                state: *state,
+                body_id: transition.body_id,
+                state: transition.after,
             });
         }
         let tick = self.world.tick().wrapping_add(1);

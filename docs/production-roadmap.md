@@ -77,9 +77,10 @@ streaming, with no synchronous world meshing on the presentation thread.
   (delivered);
 - preserved-material body rendering through bounded off-thread local-space meshing and a
   fixed-capacity GPU transform arena (delivered);
-- 60 Hz micrometre gravity, swept vertical static collision, deterministic sleeping, bounded
-  sweep-and-prune candidates, protocol-v3 state updates, and batched GPU transforms (delivered for
-  axis-aligned bodies; contact response remains);
+- 60 Hz micrometre gravity, swept vertical static and body-column collision, stable stacking, wake
+  propagation, deterministic sleeping, bounded sweep-and-prune with fail-closed overflow,
+  protocol-v3 state updates, and batched GPU transforms (delivered for downward axis-aligned
+  contacts);
 - persistent authored and inferred support graph with material compression, tension, shear, and
   joint limits;
 - incremental stress propagation restricted to affected graph islands;
@@ -182,12 +183,11 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add deterministic body-body contact response, stacking, wake propagation, and pair-overflow
-   policy on top of the delivered broad phase;
-2. add angular state, inertia-driven impulses, conservative rotated bounds, and replicated
-   orientation;
-3. replace the spawn-position body identity with a separate monotonic entity identity before
-   allowing structures to be rebuilt and detached repeatedly at the same coordinates.
+1. replace spawn-position body identity with a separate monotonic entity identity before allowing
+   structures to be rebuilt and detached repeatedly at the same coordinates;
+2. add horizontal velocity, material friction/restitution, and deterministic impulse response;
+3. add angular state, inertia-driven impulses, conservative rotated bounds, and replicated
+   orientation.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

@@ -1,6 +1,6 @@
 use destructible_fps::{
     BodyLimits, IVec3, Material, RigidBodyDescriptor, RigidBodyState, SampleWindow, Voxel, World,
-    broad_phase_pairs, step_rigid_body,
+    step_rigid_bodies,
 };
 use std::{collections::BTreeMap, error::Error, hint::black_box, time::Instant};
 
@@ -22,21 +22,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut maximum_pairs = 0_usize;
     let mut maximum_updated = 0_usize;
     let mut static_collisions = 0_usize;
+    let mut body_collisions = 0_usize;
 
     for _ in 0..ticks {
         let tick_started = Instant::now();
-        let pairs = broad_phase_pairs(&bodies, &states);
-        maximum_pairs = maximum_pairs.max(pairs.len());
-        let mut updated = 0_usize;
-        for (&body_id, body) in &bodies {
-            let state = states.get_mut(&body_id).ok_or("missing benchmark state")?;
-            let result = step_rigid_body(&world, body, state);
-            updated += usize::from(result.moved);
-            static_collisions += usize::from(result.collided_with_static);
+        let report = step_rigid_bodies(&world, &bodies, &mut states);
+        if report.broad_phase_saturated {
+            return Err("physics broad-phase pair budget saturated".into());
         }
-        maximum_updated = maximum_updated.max(updated);
+        maximum_pairs = maximum_pairs.max(report.broad_phase_pairs);
+        maximum_updated = maximum_updated.max(report.transitions.len());
+        static_collisions += report.static_collisions;
+        body_collisions += report.body_collisions;
         samples.record_ms(tick_started.elapsed().as_secs_f64() * 1_000.0);
-        black_box((&states, &pairs));
+        black_box((&states, report));
     }
 
     let elapsed = started.elapsed();
@@ -58,9 +57,41 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  maximum updated      {maximum_updated}");
     println!("  maximum broad pairs  {maximum_pairs}");
     println!("  static contacts      {static_collisions}");
+    println!("  body contacts        {body_collisions}");
     println!("  sleeping             {sleeping}/{body_count}");
     if sleeping != body_count {
         return Err("not every benchmark body settled within the requested ticks".into());
+    }
+    verify_stacks(&states, body_count)?;
+    Ok(())
+}
+
+fn verify_stacks(states: &StateMap, body_count: usize) -> Result<(), Box<dyn Error>> {
+    let mut heights = states
+        .values()
+        .map(|state| {
+            (
+                state.translation_um.x,
+                state.translation_um.z,
+                state.translation_um.y,
+            )
+        })
+        .collect::<Vec<_>>();
+    heights.sort_unstable();
+    for (index, column) in heights.chunks(BODIES_PER_COLUMN).enumerate() {
+        let expected_len = BODIES_PER_COLUMN.min(body_count - index * BODIES_PER_COLUMN);
+        if column.len() != expected_len {
+            return Err("benchmark stack grouping is incomplete".into());
+        }
+        for (level, &(_, _, height)) in column.iter().enumerate() {
+            let expected = i64::try_from(level + 1)? * destructible_fps::MICROMETERS_PER_VOXEL;
+            if height != expected {
+                return Err(format!(
+                    "body stack did not settle canonically: expected {expected}, got {height}"
+                )
+                .into());
+            }
+        }
     }
     Ok(())
 }

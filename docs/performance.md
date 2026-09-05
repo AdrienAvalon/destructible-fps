@@ -61,8 +61,8 @@ cargo run --release --bin destruction-benchmark -- --events 500
 
 The representative multi-material scene completed 500 server-authoritative destruction, structural
 analysis, body promotion, protocol-v3 fragmentation, reordering, decode, reassembly,
-client-application, and final-verification cycles at 21,637 events/s. Event latency was 0.012 ms
-p50, 0.217 ms p95, and 0.343 ms p99, or 2.0% of one 60 Hz frame budget. The run produced 847
+client-application, and final-verification cycles at 21,366 events/s. Event latency was 0.013 ms
+p50, 0.217 ms p95, and 0.372 ms p99, or 2.2% of one 60 Hz frame budget. The run produced 847
 application datagrams (0.527 MiB), fractured 13,009 voxels, detached 1,361 voxels into 32 active
 bodies, and ended with identical static-world and body-set state on server and client.
 
@@ -80,17 +80,17 @@ foundation path, computes mass/bounds, and reproduces the same 128-bit island fi
 
 | Measurement | Result |
 |---|---:|
-| Combined throughput | 243 analyses and promotions/s |
-| Topology analysis p50 | 2.616 ms |
-| Topology analysis p95 | 2.731 ms |
-| Topology analysis p99 | 2.771 ms |
-| Body promotion p50 | 1.458 ms |
-| Body promotion p95 | 1.529 ms |
-| Body promotion p99 | 1.549 ms |
-| Combined p50 | 4.076 ms |
-| Combined p95 | 4.262 ms |
-| Combined p99 | 4.314 ms |
-| Combined max | 4.330 ms |
+| Combined throughput | 244 analyses and promotions/s |
+| Topology analysis p50 | 2.621 ms |
+| Topology analysis p95 | 2.718 ms |
+| Topology analysis p99 | 2.737 ms |
+| Body promotion p50 | 1.466 ms |
+| Body promotion p95 | 1.514 ms |
+| Body promotion p99 | 1.538 ms |
+| Combined p50 | 4.091 ms |
+| Combined p95 | 4.191 ms |
+| Combined p99 | 4.244 ms |
+| Combined max | 4.245 ms |
 
 The promotion step revalidates the read-only island proof, canonical material voxels, six-neighbour
 connectivity and identity before computing fixed-unit centre of mass and diagonal inertia. The
@@ -110,8 +110,8 @@ The deterministic showcase first severed a fragile support to guarantee one repl
 breached the main facade. Body geometry was built by the same single-queue bounded background worker
 as chunk geometry, in local coordinates, and uploaded into a fixed 1,024-instance transform arena.
 The Vulkan run reported 1/1 body visible, 90/128 chunks visible, 91 world draws, and 129 shadow draws.
-With fixed-step motion enabled, GPU total was 0.137 ms p50, 0.158 ms p95, 0.195 ms p99, and 0.198 ms
-maximum across 2,426 completed samples, with zero dropped timestamp samples. The body reached the
+With fixed-step motion enabled, GPU total was 0.180 ms p50, 0.194 ms p95, 0.197 ms p99, and 0.202 ms
+maximum across 2,022 completed samples, with zero dropped timestamp samples. The body reached the
 static ground and the smoke gate reported 1/1 body sleeping. The scene is intentionally small: this
 validates the body shader, upload, culling, state replication, and draw paths, not the final
 active-body rendering budget.
@@ -124,20 +124,25 @@ Command:
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
 ```
 
-The fixture starts the full active-body limit in 256 vertical groups above a static voxel floor. It
-exercises integer gravity, swept floor queries, deterministic sleep, and sweep-and-prune candidate
-generation; settled bodies intentionally overlap because body-body response is the next solver gate.
+The fixture starts the full active-body limit in 256 four-body columns above a static voxel floor. It
+exercises integer gravity, swept static queries, exact voxel-column body contacts, bottom-up stacking,
+wake-aware sleep, and bounded sweep-and-prune candidate generation. Every column must finish at the
+four exact canonical heights or the benchmark fails.
 
 | Measurement | Result |
 |---|---:|
-| Tick p50 | 0.029 ms |
-| Tick p95 | 0.136 ms |
-| Tick p99 | 0.146 ms |
-| Tick max | 0.172 ms |
+| Tick p50 | 0.407 ms |
+| Tick p95 | 0.803 ms |
+| Tick p99 | 0.822 ms |
+| Tick max | 0.859 ms |
 | Maximum updated bodies | 1,024 |
-| Maximum broad-phase pairs | 1,536 |
+| Maximum broad-phase pairs | 768 |
+| Static contact resolutions | 7,680 |
+| Body contact resolutions | 60,416 |
 | Final sleeping bodies | 1,024/1,024 |
 
-This core-solver result is comfortably below the 12 ms server-work target but excludes body-body
-impulses, rotation, interest filtering, serialization, socket I/O, and other gameplay systems. Those
-costs require separate promotion evidence before the Stage 2 exit gate can pass.
+The broad phase reports saturation only on the 8,193rd candidate; the complete tentative tick is
+then discarded, so overload cannot commit a partial or tunnelling-prone result. This core-solver
+result is comfortably below the 12 ms server-work target but still excludes horizontal impulses,
+friction, restitution, rotation, interest filtering, serialization, socket I/O, and other gameplay
+systems. Those costs require separate promotion evidence before the Stage 2 exit gate can pass.

@@ -20,6 +20,7 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) albedo_roughness: vec4<f32>,
     @location(3) ambient_occlusion: f32,
+    @location(4) metallic: f32,
 };
 
 struct VertexOutput {
@@ -29,13 +30,14 @@ struct VertexOutput {
     @location(2) albedo_roughness: vec4<f32>,
     @location(3) ambient_occlusion: f32,
     @location(4) light_clip_position: vec4<f32>,
+    @location(5) @interpolate(flat) metallic: f32,
 };
 
 struct BodyInstanceInput {
-    @location(4) model_0: vec4<f32>,
-    @location(5) model_1: vec4<f32>,
-    @location(6) model_2: vec4<f32>,
-    @location(7) model_3: vec4<f32>,
+    @location(5) model_0: vec4<f32>,
+    @location(6) model_1: vec4<f32>,
+    @location(7) model_2: vec4<f32>,
+    @location(8) model_3: vec4<f32>,
 };
 
 fn body_model(input: BodyInstanceInput) -> mat4x4<f32> {
@@ -51,6 +53,7 @@ fn world_vertex(input: VertexInput) -> VertexOutput {
     output.albedo_roughness = input.albedo_roughness;
     output.ambient_occlusion = input.ambient_occlusion;
     output.light_clip_position = globals.light_view_projection * vec4<f32>(input.position, 1.0);
+    output.metallic = input.metallic;
     return output;
 }
 
@@ -65,6 +68,7 @@ fn body_vertex(input: VertexInput, instance: BodyInstanceInput) -> VertexOutput 
     output.albedo_roughness = input.albedo_roughness;
     output.ambient_occlusion = input.ambient_occlusion;
     output.light_clip_position = globals.light_view_projection * world_position;
+    output.metallic = input.metallic;
     return output;
 }
 
@@ -96,28 +100,65 @@ fn directional_shadow(light_clip_position: vec4<f32>, normal: vec3<f32>) -> f32 
     return textureSampleCompare(shadow_map, shadow_sampler, uv, projected.z - bias);
 }
 
+fn distribution_ggx(normal_dot_half: f32, roughness: f32) -> f32 {
+    let alpha = roughness * roughness;
+    let alpha_squared = alpha * alpha;
+    let denominator_term = normal_dot_half * normal_dot_half * (alpha_squared - 1.0) + 1.0;
+    return alpha_squared / max(3.14159265 * denominator_term * denominator_term, 0.000001);
+}
+
+fn geometry_schlick_ggx(normal_dot_direction: f32, roughness: f32) -> f32 {
+    let remapped = roughness + 1.0;
+    let k = remapped * remapped * 0.125;
+    return normal_dot_direction / max(normal_dot_direction * (1.0 - k) + k, 0.000001);
+}
+
+fn geometry_smith(normal_dot_view: f32, normal_dot_light: f32, roughness: f32) -> f32 {
+    return geometry_schlick_ggx(normal_dot_view, roughness)
+        * geometry_schlick_ggx(normal_dot_light, roughness);
+}
+
+fn fresnel_schlick(cosine: f32, reflectance_at_normal: vec3<f32>) -> vec3<f32> {
+    let grazing = pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+    return reflectance_at_normal + (vec3<f32>(1.0) - reflectance_at_normal) * grazing;
+}
+
 @fragment
 fn world_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(input.normal);
     let light_direction = normalize(-globals.sun_fog.xyz);
     let view_direction = normalize(globals.camera_time.xyz - input.world_position);
     let half_direction = normalize(light_direction + view_direction);
-    let roughness = input.albedo_roughness.w;
+    let roughness_variation = hash(floor(input.world_position * 4.0) + input.normal * 17.0);
+    let roughness = clamp(input.albedo_roughness.w + (roughness_variation - 0.5) * 0.08, 0.06, 1.0);
+    let metallic = clamp(input.metallic, 0.0, 1.0);
     let ambient_occlusion = clamp(input.ambient_occlusion, 0.35, 1.0);
     let albedo_variation = 0.90 + 0.16 * hash(floor(input.world_position * 2.0));
     let albedo = input.albedo_roughness.rgb * albedo_variation;
 
-    let diffuse = max(dot(normal, light_direction), 0.0);
+    let normal_dot_light = max(dot(normal, light_direction), 0.0);
+    let normal_dot_view = max(dot(normal, view_direction), 0.0);
+    let normal_dot_half = max(dot(normal, half_direction), 0.0);
+    let view_dot_half = max(dot(view_direction, half_direction), 0.0);
     let shadow = directional_shadow(input.light_clip_position, normal);
     let sky_ambient = mix(0.055, 0.19, normal.y * 0.5 + 0.5) * ambient_occlusion;
-    let specular_power = mix(96.0, 5.0, roughness);
-    let specular = pow(max(dot(normal, half_direction), 0.0), specular_power)
-        * mix(0.38, 0.025, roughness);
-    let rim = pow(1.0 - max(dot(normal, view_direction), 0.0), 3.0) * 0.055;
+    let reflectance_at_normal = mix(vec3<f32>(0.04), albedo, metallic);
+    let fresnel = fresnel_schlick(view_dot_half, reflectance_at_normal);
+    let distribution = distribution_ggx(normal_dot_half, roughness);
+    let geometry = geometry_smith(normal_dot_view, normal_dot_light, roughness);
+    let specular = distribution * geometry * fresnel
+        / max(4.0 * normal_dot_view * normal_dot_light, 0.0001);
+    let diffuse_weight = (vec3<f32>(1.0) - fresnel) * (1.0 - metallic);
     let direct_occlusion = mix(0.62, 1.0, ambient_occlusion);
-    var color = albedo * (
-        sky_ambient + diffuse * shadow * direct_occlusion * vec3<f32>(1.28, 1.12, 0.91)
-    ) + vec3<f32>((specular * shadow + rim) * direct_occlusion);
+    let sun_radiance = vec3<f32>(3.6, 3.15, 2.58);
+    let direct = (diffuse_weight * albedo / 3.14159265 + specular)
+        * sun_radiance * normal_dot_light * shadow * direct_occlusion;
+    let ambient_fresnel = fresnel_schlick(normal_dot_view, reflectance_at_normal);
+    let ambient_diffuse = albedo * sky_ambient * (1.0 - metallic);
+    let ambient_specular = ambient_fresnel
+        * mix(0.018, 0.105, 1.0 - roughness)
+        * ambient_occlusion;
+    var color = direct + ambient_diffuse + ambient_specular;
 
     let distance_from_camera = distance(globals.camera_time.xyz, input.world_position);
     let fog = 1.0 - exp(-distance_from_camera * globals.sun_fog.w);

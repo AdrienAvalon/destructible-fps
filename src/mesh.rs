@@ -4,6 +4,7 @@
 
 use crate::{BodyId, CHUNK_EDGE, IVec3, Material, RigidBodyDescriptor, Voxel, World};
 use bytemuck::{Pod, Zeroable};
+use core::mem::size_of;
 use std::collections::HashSet;
 
 #[repr(C)]
@@ -14,7 +15,11 @@ pub struct Vertex {
     /// Linear-ish RGB and perceptual roughness.
     pub albedo_roughness: [f32; 4],
     pub ambient_occlusion: f32,
+    /// Metalness for the renderer's Cook-Torrance material response.
+    pub metallic: f32,
 }
+
+const _: () = assert!(size_of::<Vertex>() == 48);
 
 #[derive(Debug, Default)]
 pub struct CpuMesh {
@@ -227,6 +232,7 @@ fn append_voxel(
                     corner,
                     occupied,
                 ),
+                metallic: base_color[4],
             });
         }
         mesh.indices
@@ -280,16 +286,16 @@ const fn add(left: IVec3, right: IVec3) -> IVec3 {
     )
 }
 
-const fn material_surface(material: Material) -> [f32; 4] {
+const fn material_surface(material: Material) -> [f32; 5] {
     match material {
-        Material::Air => [0.0, 0.0, 0.0, 1.0],
-        Material::Soil => [0.22, 0.095, 0.035, 0.96],
-        Material::Stone => [0.34, 0.36, 0.39, 0.88],
-        Material::Wood => [0.42, 0.18, 0.055, 0.72],
-        Material::Brick => [0.52, 0.095, 0.045, 0.84],
-        Material::Concrete => [0.42, 0.44, 0.46, 0.94],
-        Material::Steel => [0.32, 0.37, 0.43, 0.28],
-        Material::Glass => [0.18, 0.42, 0.50, 0.12],
+        Material::Air => [0.0, 0.0, 0.0, 1.0, 0.0],
+        Material::Soil => [0.22, 0.095, 0.035, 0.96, 0.0],
+        Material::Stone => [0.34, 0.36, 0.39, 0.88, 0.0],
+        Material::Wood => [0.42, 0.18, 0.055, 0.72, 0.0],
+        Material::Brick => [0.52, 0.095, 0.045, 0.84, 0.0],
+        Material::Concrete => [0.42, 0.44, 0.46, 0.94, 0.0],
+        Material::Steel => [0.32, 0.37, 0.43, 0.28, 0.92],
+        Material::Glass => [0.18, 0.42, 0.50, 0.12, 0.0],
     }
 }
 
@@ -306,6 +312,21 @@ mod tests {
 
         world.set_voxel(IVec3::new(1, 0, 0), Voxel::new(Material::Brick));
         assert_eq!(mesh_chunk(&world, IVec3::new(0, 0, 0)).exposed_faces(), 10);
+    }
+
+    #[test]
+    fn only_steel_uses_a_metallic_surface_response() {
+        assert!((material_surface(Material::Steel)[4] - 0.92).abs() < f32::EPSILON);
+        for material in [
+            Material::Soil,
+            Material::Stone,
+            Material::Wood,
+            Material::Brick,
+            Material::Concrete,
+            Material::Glass,
+        ] {
+            assert!(material_surface(material)[4].abs() < f32::EPSILON);
+        }
     }
 
     #[test]

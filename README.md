@@ -80,8 +80,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   mass centre;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
-- per-vertex voxel ambient occlusion, a 2,048² directional shadow map, procedural material
-  shading, distance fog, single-transfer tone mapping, and a crosshair;
+- per-vertex voxel ambient occlusion, a 2,048² directional shadow map, energy-aware Cook-Torrance
+  GGX materials with explicit steel metalness and procedural roughness variation, distance fog,
+  single-transfer tone mapping, and a crosshair;
 - non-blocking real-GPU timestamp queries and bounded CPU/GPU p50/p95/p99 frame telemetry;
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 

@@ -444,7 +444,8 @@ impl Renderer {
             0 => Float32x3,
             1 => Float32x3,
             2 => Float32x4,
-            3 => Float32
+            3 => Float32,
+            4 => Float32
         ];
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: size_of::<Vertex>() as wgpu::BufferAddress,
@@ -452,10 +453,10 @@ impl Renderer {
             attributes: &vertex_attributes,
         };
         let body_instance_attributes = wgpu::vertex_attr_array![
-            4 => Float32x4,
             5 => Float32x4,
             6 => Float32x4,
-            7 => Float32x4
+            7 => Float32x4,
+            8 => Float32x4
         ];
         let body_instance_layout = wgpu::VertexBufferLayout {
             array_stride: size_of::<BodyInstance>() as wgpu::BufferAddress,

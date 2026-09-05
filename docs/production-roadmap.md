@@ -58,7 +58,9 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
   large-world residency streaming remains);
 - conservative CPU chunk-frustum culling (delivered); hierarchical-Z occlusion, indirect drawing,
   and mesh-buffer arenas remain;
-- physically based material table, texture arrays, normal/roughness/metalness maps, and HDR pipeline;
+- energy-aware Cook-Torrance GGX direct lighting and explicit material metalness in the vertex
+  contract (delivered); texture arrays, scanned albedo/normal/roughness/metalness maps, image-based
+  lighting, and a full HDR pipeline remain;
 - cascaded sun shadows, local lights, temporal anti-aliasing, and measured dynamic resolution;
 - deterministic screenshot scenes and image-difference regression thresholds.
 

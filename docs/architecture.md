@@ -17,6 +17,14 @@ network, memory, and worst-case destruction measurements.
 
 This preserves believable outcomes without attempting an impossible atom-level simulation.
 
+The current compact renderer uses an energy-aware Cook-Torrance direct-light model: GGX normal
+distribution, Smith visibility and Schlick Fresnel share the sun contribution between diffuse and
+specular lobes. Metalness is explicit in the 48-byte vertex contract rather than inferred from
+colour or roughness; only steel is metallic in the current authored material table. Per-voxel
+ambient occlusion and bounded procedural albedo/roughness variation provide the interim surface
+detail. Texture arrays, measured material scans, normal maps and image-based lighting remain the
+asset-quality gate; the procedural model is a physically coherent baseline, not photorealism.
+
 ## Runtime ownership
 
 The dedicated server owns commands, damage, fracture, structural separation, rigid-body creation,

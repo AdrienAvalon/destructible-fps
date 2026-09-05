@@ -3,6 +3,26 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — Cook-Torrance material baseline
+
+Source state: parent `20bd942` plus the PBR baseline documented here. The former Blinn-style highlight
+was replaced by GGX distribution, Smith visibility, Schlick Fresnel and explicit diffuse/specular
+energy sharing. A separate metalness scalar expands the packed vertex from 44 to 48 bytes; the Rust
+layout is compile-time asserted and the wgpu locations were shifted coherently for body instances.
+Steel uses 0.92 metalness while the dielectric materials remain zero. Surface-scale roughness noise
+is bounded to avoid unstable highlights.
+
+```bash
+cargo run --release --bin playable-demo -- --showcase --smoke-seconds 8
+```
+
+The real RTX 4050 Vulkan run compiled the shader and rendered 128 chunks/43,924 exposed faces, one
+rigid body and two instanced players. Initial GPU setup took 2,019.1 ms and streaming took 38.4 ms.
+GPU-total time was 0.156 ms p50, 0.158 ms p95, 0.159 ms p99 and 0.172 ms maximum over 4,096 retained
+samples, with zero dropped timestamp samples. CPU/redraw work was 6.806 ms p99. The final view
+submitted 88 world draws and 130 shadow draws. The complete promotion passed 116 library tests,
+eight binary tests, and 42 integration tests in debug and release; strict Clippy was clean.
+
 ## 2026-09-05 — off-thread graphical delta meshing increment
 
 Source state: parent `d939452` plus the network meshing increment documented here. Applying a world

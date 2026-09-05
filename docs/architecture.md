@@ -93,8 +93,10 @@ simulates each contiguous input immediately and retains at most 128 commands. A 
 the exact position, velocity, grounded flag and integration remainders, removes the acknowledged
 prefix, and deterministically replays the remaining commands. Wrong-session, stale,
 impossible-acknowledgement and over-cap paths leave prediction unchanged. This simulation primitive
-is proven through real QUIC; graphical wiring and visual correction smoothing remain presentation
-work.
+is proven through real QUIC. The graphical client preserves its pre-reconciliation camera position
+for corrections up to two metres, exponentially halves that temporary offset every 80 ms, and snaps
+larger discontinuities immediately. Prediction and collision remain on the exact reconciled state;
+the offset is presentation-only and finite-input checked.
 
 Remote presentation owns one immutable six-face avatar mesh and a fixed 16-matrix GPU instance
 arena. Each accepted interpolated view rewrites only the compact transforms, excludes the local

@@ -38,6 +38,8 @@ use winit::{
 
 const FIXED_STEP_SECONDS: f32 = 1.0 / 60.0;
 const DEFAULT_SERVER: &str = "127.0.0.1:40000";
+const VISUAL_CORRECTION_HALF_LIFE_SECONDS: f32 = 0.08;
+const MAX_SMOOTHED_CORRECTION_VOXELS: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotPhase {
@@ -66,6 +68,7 @@ struct MultiplayerGame {
     next_input_sequence: u64,
     next_command_id: u64,
     view: Player,
+    visual_correction: Vec3,
     pressed: HashSet<KeyCode>,
     cursor_captured: bool,
     previous_frame: Instant,
@@ -141,6 +144,7 @@ impl MultiplayerGame {
             next_input_sequence: 1,
             next_command_id: 1,
             view: Player::default(),
+            visual_correction: Vec3::ZERO,
             pressed: HashSet::new(),
             cursor_captured: false,
             previous_frame: now,
@@ -404,6 +408,8 @@ impl MultiplayerGame {
                 "session locale {session_id} absente de la vue serveur"
             ));
         };
+        let visual_position_before_reconcile = self.view.position;
+        let was_predicting = self.prediction.is_some();
         if let Some(prediction) = &mut self.prediction {
             match prediction.reconcile(packet.server_tick, authoritative, self.replica.world()) {
                 Ok(report) => {
@@ -426,6 +432,22 @@ impl MultiplayerGame {
                 ClientPrediction::new(packet.server_tick, authoritative)
                     .map_err(|error| format!("prediction initiale: {error}"))?,
             );
+        }
+        if was_predicting {
+            let predicted_position = fixed_to_world(
+                self.prediction
+                    .as_ref()
+                    .ok_or_else(|| "prediction perdue pendant reconciliation".to_owned())?
+                    .state()
+                    .position_um,
+            );
+            self.visual_correction = continuity_correction(
+                visual_position_before_reconcile,
+                predicted_position,
+                MAX_SMOOTHED_CORRECTION_VOXELS,
+            );
+        } else {
+            self.visual_correction = Vec3::ZERO;
         }
         self.sync_local_view();
         Ok(())
@@ -573,8 +595,17 @@ impl MultiplayerGame {
                 .abs_diff(initial.x)
                 .max(position_um.z.abs_diff(initial.z)),
         );
-        self.view.position = fixed_to_world(position_um);
+        self.view.position = fixed_to_world(position_um) + self.visual_correction;
         self.view.velocity = fixed_to_world(prediction.state().velocity_um_per_second);
+    }
+
+    fn smooth_visual_correction(&mut self, delta_seconds: f32) {
+        self.visual_correction = decay_correction(
+            self.visual_correction,
+            delta_seconds,
+            VISUAL_CORRECTION_HALF_LIFE_SECONDS,
+        );
+        self.sync_local_view();
     }
 
     fn update_remote_players(&mut self) -> Result<(), String> {
@@ -602,10 +633,11 @@ impl MultiplayerGame {
     ) -> Result<(), String> {
         self.pump_network()?;
         let now = Instant::now();
-        self.accumulator += now
+        let frame_seconds = now
             .duration_since(self.previous_frame)
             .as_secs_f32()
             .min(0.1);
+        self.accumulator += frame_seconds;
         self.previous_frame = now;
         let mut steps = 0;
         while self.accumulator >= FIXED_STEP_SECONDS && steps < 6 {
@@ -613,6 +645,7 @@ impl MultiplayerGame {
             self.accumulator -= FIXED_STEP_SECONDS;
             steps += 1;
         }
+        self.smooth_visual_correction(frame_seconds);
         self.send_smoke_action()?;
         self.update_remote_players()?;
         match self.renderer.render(
@@ -668,6 +701,40 @@ impl MultiplayerGame {
             event_loop.exit();
         }
         Ok(())
+    }
+}
+
+fn continuity_correction(
+    visual_position_before: Vec3,
+    predicted_position_after: Vec3,
+    maximum_distance: f32,
+) -> Vec3 {
+    let correction = visual_position_before - predicted_position_after;
+    if !correction.is_finite()
+        || !maximum_distance.is_finite()
+        || maximum_distance <= 0.0
+        || correction.length_squared() > maximum_distance * maximum_distance
+    {
+        Vec3::ZERO
+    } else {
+        correction
+    }
+}
+
+fn decay_correction(correction: Vec3, delta_seconds: f32, half_life_seconds: f32) -> Vec3 {
+    if !correction.is_finite()
+        || !delta_seconds.is_finite()
+        || !half_life_seconds.is_finite()
+        || half_life_seconds <= 0.0
+    {
+        return Vec3::ZERO;
+    }
+    let retained = (-delta_seconds.max(0.0) / half_life_seconds).exp2();
+    let decayed = correction * retained;
+    if decayed.length_squared() < 0.000_001 {
+        Vec3::ZERO
+    } else {
+        decayed
     }
 }
 
@@ -907,6 +974,28 @@ mod tests {
                 z: -3 * MICROMETERS_PER_VOXEL,
             }),
             Vec3::new(2.0, 0.5, -3.0)
+        );
+    }
+
+    #[test]
+    fn small_reconciliation_preserves_visual_position_then_decays() {
+        let visual_before = Vec3::new(4.0, 2.0, -3.0);
+        let predicted_after = Vec3::new(3.5, 2.0, -3.25);
+        let correction = continuity_correction(visual_before, predicted_after, 2.0);
+        assert_eq!(predicted_after + correction, visual_before);
+        let decayed = decay_correction(correction, 0.08, 0.08);
+        assert!((decayed - correction * 0.5).length() < 0.000_01);
+    }
+
+    #[test]
+    fn large_or_invalid_reconciliation_snaps_safely() {
+        assert_eq!(
+            continuity_correction(Vec3::splat(10.0), Vec3::ZERO, 2.0),
+            Vec3::ZERO
+        );
+        assert_eq!(
+            decay_correction(Vec3::splat(f32::NAN), 0.016, 0.08),
+            Vec3::ZERO
         );
     }
 }

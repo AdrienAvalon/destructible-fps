@@ -3,6 +3,20 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — bounded local correction smoothing increment
+
+Source state: parent `9b4ce19` plus the presentation-only correction increment documented here.
+Reconciliation preserves camera continuity for finite offsets no larger than two metres, then halves
+the residual every 80 ms independently of frame rate. Larger discontinuities snap immediately to
+the authoritative prediction. Unit tests prove exact initial continuity, half-life decay, large-gap
+snapping and invalid-float rejection.
+
+Two release Vulkan clients ran simultaneously for nine seconds after this change. Sessions 1 and 2
+both installed their initial snapshot, rendered one remote player, applied the shared destruction
+delta, and moved 80,096,248 um and 22,700,000 um respectively before clean exit. The complete
+promotion passed 115 library tests, eight binary tests, and 42 integration tests in debug and release;
+strict Clippy was clean.
+
 ## 2026-09-05 — graphical late-join snapshot increment
 
 Source state: parent `5a79f19` plus the graphical snapshot increment documented here. Every loopback

@@ -56,7 +56,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
 - an eight-view remote-player interpolation buffer with a 100 ms target delay, exact integer
   interpolation, coherent join/leave boundaries, bounded history eviction, and safe edge clamping;
 - local player prediction with contiguous input sequencing, a 128-input ceiling, atomic authority
-  reconciliation, and deterministic replay of every input newer than the server acknowledgement;
+  reconciliation, deterministic replay of every input newer than the server acknowledgement, and
+  bounded visual correction smoothing with immediate snapping for large discontinuities;
 - a fixed-capacity instanced remote-player GPU path: one shared avatar mesh, at most one world draw
   and one shadow draw for all remote players, with the local session excluded;
 - a two-window loopback multiplayer demo connecting to the real 60 Hz development server, with
@@ -88,8 +89,8 @@ This is a **first playable engineering slice**, not a photorealistic or producti
 game. Oriented voxel collision, contact-generated torque, gyroscopic response, deeper
 constraint-island convergence, progressive structural stress, authenticated remote-authority
 exposure, trusted OIDC discovery/JWKS provisioning and certificate lifecycle, graphical remote/local
-player presentation, correction smoothing, adaptive
-retransmission and congestion control, audio, asset-quality PBR, temporal anti-aliasing, and
+first-person arms/weapon presentation, adaptive retransmission and congestion control, audio,
+asset-quality PBR, temporal anti-aliasing, and
 large-world residency streaming remain explicit later gates.
 
 The first server-side structural pipeline is now integrated. A deterministic bounded topology

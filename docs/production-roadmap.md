@@ -115,7 +115,8 @@ streaming, with no synchronous world meshing on the presentation thread.
   remeshing, rigid-body creation and body transforms to the real development process (slices
   delivered); graphical late-join snapshot bootstrap, missing-fragment repair, acknowledgement and
   ordered catch-up are delivered; asynchronous network remeshing, secure graphical transport,
-  correction smoothing, view authority and dynamic-body contact remain.
+  view authority and dynamic-body contact remain; bounded small-correction smoothing with safe
+  large-discontinuity snapping is delivered.
 
 Exit gate: removing a load-bearing member causes a repeatable progressive collapse; the worst-case
 fixture remains inside the 60 Hz server budget and converges bit-for-bit on replicas.
@@ -148,8 +149,8 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
   QUIC convergence, plus a 100 ms bounded deterministic remote interpolation buffer and exact
   128-input local reconciliation and a fixed-capacity instanced remote-player GPU path (delivered;
   live loopback graphical movement and permanent-world delta wiring delivered; secure QUIC graphical
-  wiring, correction smoothing and spatial delta baselines remain); graphical late-join snapshot
-  bootstrap and ordered catch-up are delivered for loopback;
+  wiring and spatial delta baselines remain); graphical late-join snapshot, ordered catch-up and
+  bounded correction smoothing are delivered for loopback;
 - standalone secure authority with bounded configuration/credential files, exact PEM cardinality,
   Unix permission checks, static-JWKS expiry, signal-aware shutdown, and a four-case external-process
   matrix (delivered for loopback; online refresh and remote policy remain);

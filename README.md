@@ -101,9 +101,11 @@ The Linux demo now combines the authoritative core with a real-time first-person
   mass centre;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
 - server-authorized rifle and explosive impacts rendered from the replicated world;
+- five attributed CC0 scanned PBR materials at real-world scale, two bounded offline-cooked texture
+  arrays with full mip chains, explicit-gradient triplanar projection and body-local normal mapping;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map with 3×3 PCF filtering,
-  energy-aware Cook-Torrance GGX, stable per-material procedural albedo/roughness/metalness and
-  micro-normal synthesis, an integrity-derived fracture/aggregate/crack response for masonry, and
+  energy-aware Cook-Torrance GGX, procedural steel/glass and an integrity-derived
+  fracture/aggregate/crack response for masonry, and
   render-only facade, mineral-core, aggregate-chip and sparse reinforcement responses through
   exposed breach thickness,
   screen-footprint detail fading, a view-correct atmospheric sky, altitude haze, single-transfer
@@ -113,9 +115,11 @@ The Linux demo now combines the authoritative core with a real-time first-person
 
 This is a **first playable engineering slice**, not yet a photorealistic or production multiplayer
 game. The first realistic-material, atmosphere, and smooth hybrid-terrain foundations are live, but
-the new static masonry silhouette and layered cut shader are still a coarse procedural foundation.
+the static masonry silhouette and layered cut shader are still a coarse procedural foundation.
+Mixed exact/derived junctions now share pinned lattice corners to remove visible cracks and detached
+edge ribbons; signed-direction ray tests cover the reported breach defect.
 Smooth detached fracture bodies, true sub-voxel interiors and reinforcement geometry, calibrated
-authored or scanned assets, vegetation, reflections, temporal anti-aliasing and post-processing
+authored geometry, material blending, vegetation, reflections, temporal anti-aliasing and post-processing
 remain visual gates. Exact convex contact manifolds,
 gyroscopic response, deeper constraint-island convergence, progressive structural stress,
 remote-authority exposure, automated certificate issuance, first-person arms/weapon presentation,
@@ -172,6 +176,8 @@ cargo test --test secure_transport
 cargo test --test secure_authority
 cargo test --test secure_server_process
 cargo test oidc::tests
+# Actual GPU validation (not covered by the ordinary headless matrix):
+cargo test --test material_projection -- --ignored --nocapture
 cargo run --release --bin destruction-benchmark -- --events 500
 cargo run --release --bin structural-benchmark -- --iterations 100
 cargo run --release --bin physics-benchmark -- --bodies 1024 --ticks 300
@@ -363,6 +369,14 @@ policy, replay cache, and principal mapping. These dependencies are permissively
 and replace fragile platform-specific boilerplate; game rules, destruction, replication, admission
 policy, meshing, controller, and shaders remain repository-owned.
 
+`miniz_oxide` (MIT OR Zlib OR Apache-2.0, portable Rust with its small `adler2` dependency) decodes
+the fixed 53.33 MiB embedded PBR payload under a hard output limit, only once at renderer startup.
+It avoids shipping a runtime JPEG decoder or making asset network requests. The initial pack is
+34.64 MiB, with approximately 194 ms measured release decode time on this workstation; this is a
+startup cost, not frame-loop work. The public CC0 source pins, cooker versions, physical scales,
+offline reproduction commands and remaining compression work are documented in
+[`assets/materials/README.md`](assets/materials/README.md).
+
 ## Engineering targets
 
 - 60 Hz authoritative simulation for nearby gameplay;
@@ -376,3 +390,6 @@ policy, meshing, controller, and shaders remain repository-owned.
 The runtime architecture is documented in [`docs/architecture.md`](docs/architecture.md). The
 complete path from this engineering slice to a distributable game, including measurable promotion
 gates and performance budgets, lives in [`docs/production-roadmap.md`](docs/production-roadmap.md).
+The expanded active-goal acceptance contract is [`docs/game-contract.md`](docs/game-contract.md):
+it includes cumulative wood damage, explosive masonry breaches, failure of overloaded remaining
+foundations, actual runtime photorealism, sustained performance and cross-platform multiplayer.

@@ -60,6 +60,7 @@ const FRACTURE_VISUAL_HALO_RADIUS: i32 = 6;
 /// A damaged masonry voxel can switch a cut surface within the visual halo from exact faces to
 /// Surface Nets. One additional voxel covers the derived-cell and neighboring exact-face samples.
 pub(crate) const FRACTURE_RENDER_DEPENDENCY_RADIUS_VOXELS: i32 = FRACTURE_VISUAL_HALO_RADIUS + 1;
+const _: () = assert!(2 * FRACTURE_RENDER_DEPENDENCY_RADIUS_VOXELS < CHUNK_EDGE);
 
 #[derive(Clone, Copy, Debug)]
 struct DerivedSurfacePoint {
@@ -383,15 +384,20 @@ fn derived_surface_point(world: &World, cell: IVec3) -> Option<DerivedSurfacePoi
 
     let sample_positions = CORNERS.map(|offset| add(cell, offset));
     let samples = sample_positions.map(|position| world.voxel(position));
+    let derived = core::array::from_fn::<_, 8, _>(|index| {
+        uses_derived_surface_at(world, sample_positions[index], samples[index])
+    });
+    let touches_exact = samples
+        .iter()
+        .zip(derived)
+        .any(|(voxel, derived)| voxel.is_solid() && !derived);
     let mut position_sum = [0.0_f32; 3];
     let mut normal_sum = [0.0_f32; 3];
     let mut first_normal = [0.0_f32; 3];
     let mut crossings = 0_u8;
     for (left_index, right_index) in EDGES {
-        let left_derived =
-            uses_derived_surface_at(world, sample_positions[left_index], samples[left_index]);
-        let right_derived =
-            uses_derived_surface_at(world, sample_positions[right_index], samples[right_index]);
+        let left_derived = derived[left_index];
+        let right_derived = derived[right_index];
         let left_air = !samples[left_index].is_solid();
         let right_air = !samples[right_index].is_solid();
         if !(left_derived && right_air || right_derived && left_air) {
@@ -438,14 +444,22 @@ fn derived_surface_point(world: &World, cell: IVec3) -> Option<DerivedSurfacePoi
     }
     let divisor = f32::from(crossings);
     let normal = normalize_or(normal_sum, first_normal);
-    Some(DerivedSurfacePoint {
-        position: [
+    // The dual cell's shared lattice corner lies on every adjacent exact cube face. Pin mixed
+    // cells there: a cap on the exact side alone leaves a gap to an inset Surface Nets vertex.
+    let position = if touches_exact {
+        [
+            (cell.x + 1) as f32,
+            (cell.y + 1) as f32,
+            (cell.z + 1) as f32,
+        ]
+    } else {
+        [
             position_sum[0] / divisor,
             position_sum[1] / divisor,
             position_sum[2] / divisor,
-        ],
-        normal,
-    })
+        ]
+    };
+    Some(DerivedSurfacePoint { position, normal })
 }
 
 const fn is_natural(material: Material) -> bool {
@@ -1332,6 +1346,64 @@ mod tests {
                 "surface seam must share exact vertices"
             );
         }
+    }
+
+    #[test]
+    fn hybrid_junction_has_no_view_through_gap_in_any_signed_direction() {
+        for face in &FACES {
+            for material in [Material::Stone, Material::Brick] {
+                let neighbor = face.neighbor;
+                let mut world = World::default();
+                world.set_voxel(IVec3::new(0, 0, 0), Voxel::new(Material::Concrete));
+                world.set_voxel(
+                    neighbor,
+                    Voxel {
+                        material,
+                        integrity: 200,
+                    },
+                );
+                let vertices = world
+                    .chunk_positions()
+                    .into_iter()
+                    .map(|chunk| mesh_chunk(&world, chunk))
+                    .collect::<Vec<_>>();
+                let direction = Vec3::from_array(face.normal);
+                let transverse = if neighbor.z == 0 { Vec3::Z } else { Vec3::X };
+                // Just inside the derived voxel at its join to the architectural surface.
+                let target = Vec3::splat(0.5) + direction * 0.51;
+                let origin = target + transverse * 3.0;
+                assert!(
+                    vertices
+                        .iter()
+                        .any(|mesh| mesh.indices.chunks_exact(3).any(|triangle| {
+                            let a = Vec3::from_array(mesh.vertices[triangle[0] as usize].position);
+                            let b = Vec3::from_array(mesh.vertices[triangle[1] as usize].position);
+                            let c = Vec3::from_array(mesh.vertices[triangle[2] as usize].position);
+                            ray_hits_triangle(origin, -transverse, a, b, c)
+                        })),
+                    "hybrid surface must occlude a ray just beyond the shared exact edge: {neighbor:?} {material:?}"
+                );
+            }
+        }
+    }
+
+    fn ray_hits_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
+        let ab = b - a;
+        let ac = c - a;
+        let cross = direction.cross(ac);
+        let determinant = ab.dot(cross);
+        if determinant.abs() < 1e-6 {
+            return false;
+        }
+        let inverse = determinant.recip();
+        let offset = origin - a;
+        let barycentric_u = offset.dot(cross) * inverse;
+        let offset_cross = offset.cross(ab);
+        let barycentric_v = direction.dot(offset_cross) * inverse;
+        (0.0..=1.0).contains(&barycentric_u)
+            && barycentric_v >= 0.0
+            && barycentric_u + barycentric_v <= 1.0
+            && ac.dot(offset_cross) * inverse >= 0.0
     }
 
     #[test]

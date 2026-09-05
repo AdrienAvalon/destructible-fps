@@ -10,6 +10,7 @@ pub mod destruction;
 pub mod generator;
 pub mod host_attestation;
 pub mod material;
+pub mod material_library;
 pub mod mesh;
 pub mod mesh_scheduler;
 pub mod network;

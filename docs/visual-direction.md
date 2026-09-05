@@ -27,13 +27,17 @@ Generation prompt (built-in image generation):
 
 - stable material identity crosses CPU meshing into the GPU without changing voxel, physics or wire
   formats;
-- brick bond/mortar, concrete aggregate/staining, stone strata, soil moisture/grit, wood grain,
-  steel brushing/rust and glass grime are synthesized in material-local coordinates;
+- five CC0 Poly Haven scans supply brick, concrete, stone, soil and wood albedo/roughness/GL normals
+  at their documented physical tile scales; steel/glass and cut overlays remain procedural;
+- offline source hashes and pinned cooking tools reproduce a fixed embedded package; two 1,024²
+  texture arrays have eleven linear-light, normal-aware mip levels and bounded trilinear filtering;
+- explicit-gradient signed triplanar projection removes per-vertex plane changes on curved surfaces;
+  surface-gradient blending preserves smooth geometric normals when the normal map is flat;
 - detached bodies preserve their material projection while moving instead of sampling world-locked
   textures;
 - screen-footprint fading reduces distant procedural shimmer;
-- Cook-Torrance GGX consumes the synthesized albedo, roughness, metalness and finite-difference
-  micro-normal;
+- Cook-Torrance GGX consumes scanned or synthesized albedo, roughness, metalness and transformed
+  surface normals, with inverse-transpose support for scaled instances;
 - the sky reconstructs each view ray from the inverse view-projection matrix and shares its
   atmosphere with distance haze;
 - a fixed 3×3 PCF kernel softens the existing bounded 2,048² directional shadow map.
@@ -42,8 +46,9 @@ Generation prompt (built-in image generation):
 - each natural chunk uses a fixed 17³-cell cache, adaptive quad diagonals, bit-identical seams in
   all six directions, and conservative face/edge/corner invalidation after edits;
 - brick and concrete below a fixed authoritative-integrity threshold reuse the bounded derived mesh
-  to retreat static breach edges, while a unique exact-side cap closes every derived/architecture
-  transition including chunk boundaries;
+  to retreat static breach edges; mixed cells pin their derived vertex to the shared lattice corner
+  so the unique exact-side cap actually meets the derived surface instead of leaving white gaps and
+  detached facade ribbons; signed-direction ray regressions cover the joint;
 - exact integer integrity is converted only after meshing into a render-only GPU damage ratio;
   deterministic aggregate, fracture, soot and crack synthesis changes damaged masonry and detached
   debris without adding a replicated field or altering collision;
@@ -57,8 +62,10 @@ Generation prompt (built-in image generation):
 - deterministic quarry banks make the smoother silhouette visible without changing the building,
   spawn, authoritative shot corridor, voxel fingerprints, physics, or network formats.
 
-The generated concept is not shipped as a runtime texture. The initial runtime remains dependency
-free and deterministic at the visual-input boundary.
+The generated concept is not shipped as a runtime texture. The game loads only the fixed local
+cooked pack, never the upstream JPEGs or live asset endpoints. See `../assets/materials/README.md`
+for provenance, reproduction and resource bounds. The initial 1K scans still visibly repeat on
+large surfaces; material blending, authored scale variation and proper geometry remain necessary.
 
 ## Promotion order
 
@@ -69,8 +76,9 @@ free and deterministic at the visual-input boundary.
 2. Layered destruction (render-only cut-depth foundation delivered): replace the procedural layer
    approximation with authored facade, reinforcement, insulation and interior geometry; generate
    bounded local rubble and dust from authoritative fracture inputs.
-3. Asset/material pipeline: versioned texture arrays, calibrated color/normal/roughness/metalness,
-   mip generation, compression and aggressive LOD with deterministic fallbacks.
+3. Asset/material pipeline (five scans, versioned arrays, bounded offline cooking and normal-aware
+   mips delivered): add GPU block compression, material blending, larger libraries and residency/LOD
+   tiers with deterministic fallbacks.
 4. Lighting/post: cascaded sun shadows, image-based sky lighting, reflection probes, HDR exposure,
    temporal anti-aliasing, contact refinement and quality tiers.
 5. World dressing: instanced vegetation, decals, drainage/puddles, terrain blending, props and sound

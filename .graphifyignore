@@ -1,3 +1,4 @@
 # Graphify 0.9.40 classifies JSON as code but emits no AST symbols for it. Keep
 # configuration examples outside the code graph to avoid perpetual stale scans.
 config/*.json
+assets/materials/sources.json

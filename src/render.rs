@@ -5,6 +5,10 @@
 use crate::{
     BodyId, CHUNK_EDGE, FixedMicrometers3, IVec3, MAX_SERVER_PEERS, Material, PLAYER_HEIGHT_UM,
     PLAYER_RADIUS_UM, ReplicatedPlayerState, Voxel, World,
+    material_library::{
+        MATERIAL_TEXTURE_BYTES, MATERIAL_TEXTURE_EDGE, MATERIAL_TEXTURE_LAYERS,
+        MATERIAL_TEXTURE_MIPS, MaterialLibrary,
+    },
     mesh::{CpuBodyMesh, CpuMesh, Vertex, mesh_chunk},
     physics::{FIXED_QUATERNION_SCALE, MICROMETERS_PER_VOXEL, RigidBodyState},
     replication::MAX_ACTIVE_BODIES,
@@ -268,6 +272,7 @@ pub struct Renderer {
     player_instances: Vec<BodyInstance>,
     globals_bind_group: wgpu::BindGroup,
     shadow_sampling_bind_group: wgpu::BindGroup,
+    material_bind_group: wgpu::BindGroup,
     gpu_profiler: Option<GpuProfiler>,
     chunks: HashMap<IVec3, GpuMesh>,
     bodies: HashMap<BodyId, GpuBody>,
@@ -429,10 +434,15 @@ impl Renderer {
                 },
             ],
         });
+        let (material_layout, material_bind_group) = create_material_library(&device, &queue)?;
         let world_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("world pipeline layout"),
-                bind_group_layouts: &[Some(&globals_layout), Some(&shadow_sampling_layout)],
+                bind_group_layouts: &[
+                    Some(&globals_layout),
+                    Some(&shadow_sampling_layout),
+                    Some(&material_layout),
+                ],
                 immediate_size: 0,
             });
         let globals_pipeline_layout =
@@ -697,6 +707,7 @@ impl Renderer {
             player_instances: Vec::with_capacity(MAX_SERVER_PEERS),
             globals_bind_group,
             shadow_sampling_bind_group,
+            material_bind_group,
             gpu_profiler,
             chunks: HashMap::new(),
             bodies: HashMap::new(),
@@ -1093,6 +1104,7 @@ impl Renderer {
             pass.set_pipeline(&self.world_pipeline);
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
             pass.set_bind_group(1, &self.shadow_sampling_bind_group, &[]);
+            pass.set_bind_group(2, &self.material_bind_group, &[]);
             for chunk in &visible_chunks {
                 pass.set_vertex_buffer(0, chunk.vertex.slice(..));
                 pass.set_index_buffer(chunk.index.slice(..), wgpu::IndexFormat::Uint32);
@@ -1268,6 +1280,137 @@ fn body_transform_and_bounds(
 
 fn non_zero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
+}
+
+fn create_material_library(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(wgpu::BindGroupLayout, wgpu::BindGroup), String> {
+    let started = std::time::Instant::now();
+    let library = MaterialLibrary::embedded().map_err(|error| error.to_string())?;
+    let decoded_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    let texture = |label, format, data| {
+        device
+            .create_texture_with_data(
+                queue,
+                &wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: MATERIAL_TEXTURE_EDGE,
+                        height: MATERIAL_TEXTURE_EDGE,
+                        depth_or_array_layers: MATERIAL_TEXTURE_LAYERS,
+                    },
+                    mip_level_count: MATERIAL_TEXTURE_MIPS,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                data,
+            )
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            })
+    };
+    let color = texture(
+        "scanned sRGB color and linear roughness",
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        library.color_roughness(),
+    );
+    let normal = texture(
+        "scanned linear normal and metalness",
+        wgpu::TextureFormat::Rgba8Unorm,
+        library.normal_metalness(),
+    );
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("trilinear anisotropic scanned materials"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        anisotropy_clamp: 8,
+        ..Default::default()
+    });
+    let scales = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("scanned physical tile scales"),
+        contents: bytemuck::cast_slice(&library.scales),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let layout = material_library_layout(device);
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scanned material library"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&color),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&normal),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: scales.as_entire_binding(),
+            },
+        ],
+    });
+    println!(
+        "Materiaux PBR Poly Haven: {MATERIAL_TEXTURE_LAYERS} couches {MATERIAL_TEXTURE_EDGE}px, \
+         {MATERIAL_TEXTURE_MIPS} mips; pack {} octets, GPU {MATERIAL_TEXTURE_BYTES} octets; \
+         decodage {decoded_ms:.1} ms, preparation/envoi CPU {:.1} ms",
+        MaterialLibrary::packed_bytes(),
+        started
+            .elapsed()
+            .as_secs_f64()
+            .mul_add(1_000.0, -decoded_ms),
+    );
+    Ok((layout, bind_group))
+}
+
+fn material_library_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("scanned material library layout"),
+        entries: &[
+            texture_entry(0),
+            texture_entry(1),
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
 }
 
 fn create_depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::TextureView {

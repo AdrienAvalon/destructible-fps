@@ -2,10 +2,12 @@
 
 ## Product contract
 
-The destination is a native first-person construction game in which terrain and buildings can be
-created, fractured, detached, and persisted while several players observe the same authoritative
-result. Visual realism, systemic destruction, low latency, and broad hardware support are separate
-budgets: none may silently consume another.
+The destination is a photorealistic native multiplayer FPS with construction and weapon-dependent,
+material-aware destruction. Terrain, buildings, props and constructed elements can be created,
+damaged, fractured, detached and persisted while all players observe the same authoritative result.
+The requirement-by-requirement definition of success is
+[`game-contract.md`](game-contract.md). Visual realism, systemic destruction, low latency and broad
+hardware support are separate budgets: none may silently consume another.
 
 The engine remains purpose-built where that creates a durable advantage: sparse world storage,
 destruction, structural analysis, replication, interest management, meshing, content cooking, and
@@ -59,8 +61,9 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
 - conservative CPU chunk-frustum culling (delivered); hierarchical-Z occlusion, indirect drawing,
   and mesh-buffer arenas remain;
 - energy-aware Cook-Torrance GGX direct lighting, explicit material identity and metalness in the
-  vertex contract, screen-filtered procedural material albedo/roughness/metalness/micro-normal
-  synthesis, and a view-correct procedural atmosphere (delivered); texture arrays, scanned maps,
+  vertex contract, five attributed scanned PBR materials in versioned offline-cooked texture arrays,
+  normal-aware mips and explicit-gradient body-local triplanar projection, procedural steel/glass
+  and cut layers, and a view-correct atmosphere (delivered); GPU block compression, material blending,
   image-based lighting, reflections, and a full HDR pipeline remain;
 - 3×3 PCF sun-shadow filtering (delivered); cascaded sun shadows, local lights, temporal
   anti-aliasing, and measured dynamic resolution remain;
@@ -68,9 +71,9 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
   six-direction seam proofs, adaptive diagonals and corner-aware remeshing (delivered for static
   terrain), plus integrity-thresholded derived brick/concrete breach edges, a fixed render-only GPU
   damage channel, unique exact-side transition ownership, and bounded cross-chunk damage-halo cuts
-  with local-depth shell/core/aggregate/reinforcement shading (delivered as a coarse static fracture
-  pass); true sub-voxel layered geometry, smooth detached fracture surfaces and mesh-buffer
-  deduplication remain;
+  with local-depth shell/core/aggregate/reinforcement shading and pinned mixed-cell junctions
+  (delivered as a coarse static fracture pass); true sub-voxel layered geometry, smooth detached
+  fracture surfaces and mesh-buffer deduplication remain;
 - deterministic screenshot scenes and image-difference regression thresholds.
 
 Exit gate: the representative breach scene stays within the client budgets while remeshing and
@@ -239,9 +242,9 @@ documented tools and source assets.
 ### Stage 6 — photorealistic environments
 
 - calibrated physically based materials and physically plausible sun, sky, exposure, and atmosphere
-  (procedural material/atmosphere foundation, hybrid natural terrain and coarse integrity-driven
-  masonry fracture plus layered cross-section shading delivered; calibration, authored geometry,
-  scanned inputs and HDR exposure remain);
+  (scanned material/procedural atmosphere foundation, hybrid natural terrain and coarse
+  integrity-driven masonry fracture plus layered cross-section shading delivered; calibration,
+  authored geometry, material blending and HDR exposure remain);
 - terrain blending, decals, vegetation, weather, water, particles, volumetric dust, and destruction
   residue;
 - scalable indirect lighting/reflections with explicit quality tiers and stable temporal behavior;
@@ -286,17 +289,21 @@ are resolved, and launch/rollback ownership is documented.
 
 ## Immediate execution queue
 
-The next three bounded increments are:
+The immediate priority is the playable visual/destruction experience requested by the user:
 
-1. add automated certificate issuance, Windows service DACL checks, production OIDC issuer/root
-   provisioning, and complete the partially executable
-   [`remote attack/failure matrix`](remote-exposure-gate.md) before enabling an explicit
-   non-loopback policy;
-2. extend the delivered oriented per-voxel dynamic contact and rotated vertical support with
-   continuous multi-contact manifolds, full vertical impulse exchange, gyroscopic response, and
-   deeper collision-island convergence;
-3. extend the delivered trace replay, four-client fairness and adaptive repair into seeded stochastic
-   profiles, pacing/congestion control, and the 32-headless-client load gate;
+1. validate the delivered scanned PBR material slice, bounded offline cooking and stable surface
+   projection against moving runtime views; follow with material blending and GPU compression;
+   compare actual intact/breached images and frame distributions (VIS-01, TOOLS-01, PERF-01);
+2. implement weapon-specific penetration/explosion fixtures and credible structural/fracture behavior
+   in the same two-client build/breach loop (FPS-01, DEST-01/02/03, PHYS-01, BUILD-01, SYNC-01);
+3. advance authored industrial content, lighting, temporal stability, rubble/dust and first-person
+   presentation until the runtime scene approaches the visual reference (VIS-01, FPS-01).
+
+Before exposing a non-loopback server, automated certificate issuance, platform service permissions,
+production OIDC trust provisioning and the [`remote attack/failure matrix`](remote-exposure-gate.md)
+remain mandatory. Full contact manifolds, vertical impulse exchange, gyroscopic response, seeded
+network impairment profiles, pacing/congestion control and the 32-client load gate remain tracked
+under their owning stages. None is removed from the final game contract.
 
 Each increment lands with focused tests, the complete repository validation suite, a real-GPU smoke,
 updated evidence, and a coherent commit. A stage advances only when its exit gate is demonstrated.

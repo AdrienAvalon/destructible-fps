@@ -1581,7 +1581,7 @@ is a shading and silhouette approximation, not actual facade/rebar geometry. A d
 
 The same halo is part of the remeshing contract. Masonry edits invalidate seven voxels in each axis
 (six for classification plus one derived-cell/exact-face dependency); other topology edits invalidate
-two. Since both radii are shorter than the 16-voxel chunk edge, one isolated edit still reaches no
+two. Since each inclusive diameter fits inside the 16-voxel chunk edge, one isolated edit reaches no
 more than eight chunks. A regression constructs damage in chunk zero and proves that the newly
 layered cut in chunk one is both scheduled and regenerated. Glass remains on the exact, sentinel-only
 path. The 512-chunk bounded queues and off-thread immutable-snapshot worker remain unchanged.
@@ -1624,3 +1624,93 @@ was absent from render invalidation. The seven-voxel masonry radius and cross-ch
 close that finding. Graphify then reported 2,259 nodes, 6,345 post-build edges, zero unverified code
 nodes and a fresh index; `dirty_chunks` reaches only the two rendering demos and their tests, with no
 directed path to `AuthoritativeServer`.
+
+## 2026-09-05 — scanned materials and repaired hybrid breach junctions
+
+Source state: base `be5b6c2` plus this material/junction lot and the network test-startup correction.
+Five attributed CC0 Poly Haven scans now supply physically scaled soil, stone, wood, brick and
+concrete inputs. Two fixed texture arrays carry sRGB albedo/linear roughness and linear GL
+normal/metalness, with eleven normal-aware, linear-light mip levels. Explicit-gradient triplanar
+projection replaces interpolated per-vertex planar UVs, and inverse-transpose transforms support
+rotating debris and non-uniformly scaled instances. The production WGSL helpers are tested on the
+actual Vulkan GPU, not merely duplicated in CPU math.
+
+The reported white gaps and detached facade ribbons were geometry junction defects: an exact-side
+cap did not reach an inset Surface Nets vertex. Pinning mixed exact/derived cells to the common
+lattice corner closes the visible joint. Six signed-direction ray fixtures cover stone and damaged
+brick next to concrete. This is a raster closure, not a collision-ready manifold proof. The
+seven-voxel masonry invalidation neighborhood now enumerates at most eight resulting chunks
+directly instead of hashing 3,375 voxel offsets. Signed-boundary reference enumeration and extreme
+coordinates prove equivalent invalidation; one cell's classification is cached instead of repeated
+at both ends of every edge. Voxel damage, collision, fingerprints and wire formats are unchanged.
+
+The package is 36,320,919 bytes; decoded/GPU texel storage is fixed at 55,924,040 bytes. Dimensions,
+physical scales, bounded decompression and SHA-256 integrity are validated before use. Default asset
+cooking is offline; explicit public fetching checks origins before redirects, disables ambient
+proxies and validates source hashes before the bounded authoring decoder runs. The final pinned
+cooker recreated the pack byte-for-byte with exit zero; all six numerical/download tests passed.
+Full provenance and reproduction details live in `../assets/materials/README.md`.
+
+Final debug and release matrices passed 202 library, 11 binary and 71 ordinary integration tests.
+The GPU-specific integration is explicitly ignored in headless matrices and passed separately on
+the RTX 4050 in both profiles. Formatting, Clippy with denied warnings, dedicated network, secure
+transport/authority/process and OIDC checks also passed.
+
+One repeated release matrix exposed an early four-client test-server exit. Its stderr had been
+discarded, so the original cause cannot be established retrospectively. The test had a concrete
+port-reservation race: it dropped its temporary socket before the child bound the same address.
+It now starts the real server on port zero, waits for its bounded flushed `READY` record and retains
+the actual owned address before creating proxies; stderr is visible. A new regression keeps three
+servers alive and proves their announced sockets are distinct and cannot be rebound. The corrected
+four-client impairment test passed ten additional consecutive release runs without relaxing its
+convergence/repair assertions. Other older fixed-port launch helpers remain separate work.
+
+Headless release fixtures on the Intel Core i7-13700H:
+
+| Fixture | Result |
+|---|---:|
+| Destruction, 500 events, p50 / p95 / p99 | 0.013 / 0.228 / 0.387 ms |
+| Structural analysis + promotion, 8,192 voxels, p50 / p95 / p99 | 4.217 / 4.258 / 4.293 ms |
+| Physics, 1,024 bodies × 300 ticks, p50 / p95 / p99 | 0.553 / 1.192 / 1.245 ms |
+| Snapshot encode + decode + install, p50 / p95 / p99 | 11.929 / 12.141 / 13.337 ms |
+| Snapshot wire size | 1,181 frames / 1.351 MiB |
+
+The final graphics runs used the NVIDIA GeForce RTX 4050 Laptop, driver 610.57.04, Vulkan,
+1,440×900 actual captured pixels, release build and the 98,078-voxel breached world with 48,684
+quads, one body and two player instances. Each ran twelve seconds after compilation/cooking finished,
+without screenshot capture during the timed repeat. Graphics clocks were not locked. Both retained
+the last 4,096 timestamp samples with zero drops and ended with the body asleep.
+
+| Measurement | Breach close-up | Moving orbit |
+|---|---:|---:|
+| CPU frame wall time p50 / p95 / p99 | 1.654 / 6.936 / 8.440 ms | 1.372 / 1.679 / 7.291 ms |
+| GPU shadows p50 / p95 / p99 | 0.068 / 0.068 / 0.068 ms | 0.070 / 0.072 / 0.072 ms |
+| GPU world + HUD p50 / p95 / p99 | 0.660 / 0.665 / 0.667 ms | 0.672 / 0.692 / 0.696 ms |
+| GPU total p50 / p95 / p99 | 0.738 / 0.743 / 0.744 ms | 0.752 / 0.774 / 0.778 ms |
+| GPU total maximum | 0.757 ms | 0.791 ms |
+| Initial chunk streaming | 48.4 ms | 52.5 ms |
+| Startup asset decode | 193.3 ms | 202.2 ms |
+| CPU upload preparation/enqueue | 10.9 ms | 11.0 ms |
+| Process peak RSS (`getrusage(RUSAGE_CHILDREN)`) | 266,272 KiB | 267,476 KiB |
+| Final world / shadow draws | 72 / 130 | 93 / 130 |
+
+The CPU metric encloses surface acquisition and presentation: it is wall time, not isolated active
+CPU execution. The earlier capture-linked close-up measured CPU p99 16.797 ms and GPU p99 1.274 ms;
+the ordinary five-second startup smoke measured 33.577 ms and 3.690 ms respectively. Those runs are
+not discarded: cadence and cold-start variability remain unresolved, and concurrent authoring was
+not excluded from the earlier capture pass. The later warm repeats do not prove the full client
+budget. Upload timing is CPU enqueue time, not GPU transfer completion; texel bytes are not total
+peak VRAM. Allocation counts and sustained active-combat memory/latency remain unmeasured here.
+
+Actual close-up and moving-orbit captures were inspected locally outside Git. The large breach
+ribbons and foundation gaps are gone; tiled walls, coarse geometry, plain glazing, suspended but
+connected authored elements and incomplete lighting remain visibly non-photoreal. Full load
+redistribution and progressive collapse, volumetric reinforcement, rubble/dust, weapon-specific
+penetration, authored content, temporal reconstruction and multi-OS validation remain active gates
+in `game-contract.md` rather than being claimed from this texture increment.
+
+Claude's initial analysis informed explicit derivatives, inverse-transpose normals, cooker pinning
+and GPU orientation tests. Its final review invocation failed (helper exit 75, underlying exit 1,
+102 seconds), so there is no successful final independent review for this lot; Codex retained local
+source review and the validation above. Graphify finished fresh with 2,324 nodes, 6,471 post-build
+edges, zero unverified code nodes and zero dangling endpoints. WGSL remains outside its AST coverage.

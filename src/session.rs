@@ -326,21 +326,29 @@ pub fn dirty_chunks(changes: &[VoxelChange]) -> Vec<IVec3> {
             .any(|material| matches!(material, Material::Brick | Material::Concrete));
         // Ordinary topology can change a neighboring masonry classification, whose derived cells
         // add one more voxel of dependency. A masonry change can additionally toggle cut surfaces
-        // throughout the bounded visual halo. Both radii are shorter than CHUNK_EDGE, so one
+        // throughout the bounded visual halo. Each diameter fits within CHUNK_EDGE, so one
         // isolated change still invalidates at most 2^3 chunks.
         let radius = if touches_masonry {
             FRACTURE_RENDER_DEPENDENCY_RADIUS_VOXELS
         } else {
             2
         };
-        for x in -radius..=radius {
-            for y in -radius..=radius {
-                for z in -radius..=radius {
-                    chunks.insert(chunk_position(IVec3::new(
-                        change.position.x.saturating_add(x),
-                        change.position.y.saturating_add(y),
-                        change.position.z.saturating_add(z),
-                    )));
+        let minimum = chunk_position(IVec3::new(
+            change.position.x.saturating_sub(radius),
+            change.position.y.saturating_sub(radius),
+            change.position.z.saturating_sub(radius),
+        ));
+        let maximum = chunk_position(IVec3::new(
+            change.position.x.saturating_add(radius),
+            change.position.y.saturating_add(radius),
+            change.position.z.saturating_add(radius),
+        ));
+        // Enumerate the resulting chunks directly instead of hashing 15^3 voxel samples on the
+        // client's receive path. The closed integer bounding range yields the identical set.
+        for x in minimum.x..=maximum.x {
+            for y in minimum.y..=maximum.y {
+                for z in minimum.z..=maximum.z {
+                    chunks.insert(IVec3::new(x, y, z));
                 }
             }
         }
@@ -477,5 +485,47 @@ mod tests {
                 .any(|vertex| vertex.fracture_depth >= 0.0),
             "damage in chunk zero must refresh the layered cut surface in chunk one"
         );
+    }
+
+    #[test]
+    fn direct_chunk_invalidation_matches_voxel_enumeration_at_signed_boundaries() {
+        for material in [Material::Brick, Material::Wood] {
+            let radius = if material == Material::Brick {
+                FRACTURE_RENDER_DEPENDENCY_RADIUS_VOXELS
+            } else {
+                2
+            };
+            for x in -17_i32..=17 {
+                let position = IVec3::new(x, x + 5, -x - 6);
+                let change = VoxelChange {
+                    position,
+                    before: Voxel::new(material),
+                    after: Voxel::AIR,
+                };
+                let mut reference = HashSet::new();
+                for dx in -radius..=radius {
+                    for dy in -radius..=radius {
+                        for dz in -radius..=radius {
+                            reference.insert(chunk_position(IVec3::new(
+                                x + dx,
+                                position.y + dy,
+                                position.z + dz,
+                            )));
+                        }
+                    }
+                }
+                let actual = dirty_chunks(&[change]);
+                assert!(actual.len() <= 8);
+                assert_eq!(actual.into_iter().collect::<HashSet<_>>(), reference);
+            }
+        }
+        for value in [i32::MIN, i32::MAX] {
+            let chunks = dirty_chunks(&[VoxelChange {
+                position: IVec3::new(value, value, value),
+                before: Voxel::new(Material::Concrete),
+                after: Voxel::AIR,
+            }]);
+            assert!(!chunks.is_empty() && chunks.len() <= 8);
+        }
     }
 }

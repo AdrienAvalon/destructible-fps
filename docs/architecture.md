@@ -7,7 +7,7 @@ The world is authoritative on dedicated servers and every gameplay-relevant frac
 for all interested clients. Performance claims are accepted only with captured frame, simulation,
 network, memory, and worst-case destruction measurements.
 
-"Everything is destructible" is implemented at bounded physical resolutions:
+The target represents "everything is destructible" at bounded physical resolutions:
 
 1. terrain uses a sparse volumetric representation and can form craters or tunnels;
 2. load-bearing structures use a material constraint graph;
@@ -15,15 +15,21 @@ network, memory, and worst-case destruction measurements.
 4. settled or distant debris is merged into static clusters;
 5. dust, chips, and non-gameplay fragments are deterministic cosmetic effects.
 
-This preserves believable outcomes without attempting an impossible atom-level simulation.
+These are target representations, not a statement that every subsystem is delivered. Current
+structural analysis follows connectivity to foundations/anchors; it does not yet redistribute loads
+or fail an overloaded remaining support. Debris merging and cosmetic dust are also later gates.
 
 The current compact renderer uses an energy-aware Cook-Torrance direct-light model: GGX normal
 distribution, Smith visibility and Schlick Fresnel share the sun contribution between diffuse and
-specular lobes. Metalness is explicit in the 48-byte vertex contract rather than inferred from
-colour or roughness; only steel is metallic in the current authored material table. Per-voxel
-ambient occlusion and bounded procedural albedo/roughness variation provide the interim surface
-detail. Texture arrays, measured material scans, normal maps and image-based lighting remain the
-asset-quality gate; the procedural model is a physically coherent baseline, not photorealism.
+specular lobes. The 60-byte vertex contract explicitly carries metalness, material identity, damage
+and local fracture depth. Five scanned CC0 dielectric materials now use offline-cooked albedo,
+roughness and normal arrays; steel and glass retain the procedural path. Material-local triplanar
+projection uses explicit gradients from the uniform fragment entry, signed right-handed frames and
+surface-gradient normal blending. Inverse-transpose transforms preserve normals on both rotating
+debris and non-uniformly scaled player instances. Per-voxel ambient occlusion, macro variation and
+procedural cut layers remain. See `../assets/materials/README.md` for the fixed memory/decode
+contract. Image-based lighting, material blending, authored fracture geometry and temporal image
+stability remain visual gates; scanned maps alone do not establish photorealism.
 
 ## Runtime ownership
 

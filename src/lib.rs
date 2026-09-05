@@ -57,6 +57,7 @@ pub use telemetry::{DistributionSummary, SampleWindow};
 pub use transport::{
     ClientControlMessage, ControlCodecError, MAX_UDP_DATAGRAM_BYTES, ServerControlMessage,
     decode_client_control, decode_server_control, encode_client_hello, encode_explosion_request,
-    encode_repair_request, encode_server_welcome, encode_snapshot_request, is_delta_datagram,
+    encode_repair_request, encode_server_welcome, encode_snapshot_ack,
+    encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
 };
 pub use world::{CHUNK_EDGE, IVec3, VoxelChange, World, WorldError, WorldStats, chunk_position};

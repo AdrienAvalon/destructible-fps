@@ -51,12 +51,14 @@ repair request for a future sequence cannot force snapshot work. The retention h
 queue, repairs per tick, and shared send-attempt budget are all fixed. An expired-history miss is
 observable and remains fail-closed while a canonical snapshot is framed below the MTU, hashed
 against mixed/corrupt fragments, and paced at 16 frames per peer per tick. The client retains only
-one four-MiB-bounded
-snapshot; a newer retry supersedes an incomplete one. Live deltas are withheld from that peer and
-their shared encoded buffers enter a per-transfer queue capped at 256 packets and 8 MiB. After the
-snapshot is emitted, that queue is replayed in order before live delivery resumes. A missing or
-overflowed catch-up delta stalls rather than silently skipping state. Process tests cover a
-lost snapshot fragment with whole-snapshot retry and a moving body with post-snapshot catch-up.
+one four-MiB-bounded snapshot and reports missing fragments in fixed 64-bit windows. The server
+retains the immutable encoded frames, retransmits only those selected fragments under the shared
+egress budget, and waits for a matching snapshot-install acknowledgement. Live deltas are withheld
+from that peer and their shared encoded buffers enter a per-transfer queue capped at 256 packets and
+8 MiB. Only after the acknowledgement is that queue replayed in order before live delivery resumes.
+A missing or overflowed catch-up delta stalls rather than silently skipping state. Process tests
+cover selective repair of a lost snapshot fragment, explicit install acknowledgement, and a moving
+body with post-snapshot catch-up.
 These sessions are deliberately loopback-only and unauthenticated; the snapshot hash is an integrity
 check, not a MAC, and the transport provides no confidentiality, identity, packet authenticity, or
 congestion control. It must not be exposed beyond the developer machine.
@@ -129,9 +131,9 @@ Gate: destroying a load-bearing member produces a repeatable progressive collaps
   process test (delivered for unauthenticated loopback only);
 - exact short-gap repair from a count-and-byte-bounded delta history, prioritized before new
   simulation, with deliberate whole-sequence loss and convergence coverage (delivered);
-- canonical bounded snapshots, corruption rejection, paced transfer, retry after a deliberately
-  lost fragment, atomic install, and retained-delta catch-up during active body motion (delivered
-  for loopback; selective fragment ACKs remain);
+- canonical bounded snapshots, corruption rejection, paced transfer, selective bitmap repair after
+  a deliberately lost fragment, acknowledged atomic install, and retained-delta catch-up during
+  active body motion (delivered for loopback);
 - encrypted client authentication and session negotiation;
 - unreliable sequenced deltas plus reliable snapshot/control channels;
 - loss, duplication, reordering, latency, and bandwidth simulation;

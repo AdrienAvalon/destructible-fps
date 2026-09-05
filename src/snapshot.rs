@@ -23,6 +23,7 @@ pub const MAX_SNAPSHOT_BODY_VOXELS: usize = 262_144;
 pub const MAX_SNAPSHOT_DATAGRAM_BYTES: usize = 1_200;
 
 pub struct AuthoritativeSnapshot {
+    snapshot_id: u64,
     world: World,
     bodies: BTreeMap<BodyId, RigidBodyDescriptor>,
     body_states: BTreeMap<BodyId, RigidBodyState>,
@@ -31,6 +32,11 @@ pub struct AuthoritativeSnapshot {
 }
 
 impl AuthoritativeSnapshot {
+    #[must_use]
+    pub const fn snapshot_id(&self) -> u64 {
+        self.snapshot_id
+    }
+
     /// Atomically validates and installs this snapshot into a client replica.
     ///
     /// # Errors
@@ -345,7 +351,8 @@ impl SnapshotAssembler {
         if snapshot_payload_hash(&payload) != complete.payload_hash {
             return Err(SnapshotCodecError::PayloadHashMismatch);
         }
-        let snapshot = decode_payload(&payload)?;
+        let mut snapshot = decode_payload(&payload)?;
+        snapshot.snapshot_id = complete.snapshot_id;
         self.last_completed_snapshot_id = complete.snapshot_id;
         Ok(Some(snapshot))
     }
@@ -355,6 +362,36 @@ impl SnapshotAssembler {
         self.active
             .as_ref()
             .map_or(0, |pending| pending.received_bytes)
+    }
+
+    #[must_use]
+    pub fn active_snapshot_id(&self) -> Option<u64> {
+        self.active.as_ref().map(|pending| pending.snapshot_id)
+    }
+
+    /// Returns at most 64 fixed bitmap windows describing every currently missing fragment.
+    #[must_use]
+    pub fn missing_fragment_windows(&self) -> Vec<(u16, u64)> {
+        let Some(pending) = &self.active else {
+            return Vec::new();
+        };
+        let mut windows = Vec::with_capacity(pending.fragments.len().div_ceil(64));
+        for base in (0..pending.fragments.len()).step_by(64) {
+            let mut missing = 0_u64;
+            for (offset, fragment) in pending.fragments
+                [base..pending.fragments.len().min(base + 64)]
+                .iter()
+                .enumerate()
+            {
+                if fragment.is_none() {
+                    missing |= 1_u64 << offset;
+                }
+            }
+            if missing != 0 {
+                windows.push((u16::try_from(base).unwrap_or(u16::MAX), missing));
+            }
+        }
+        windows
     }
 }
 
@@ -526,17 +563,27 @@ fn decode_payload(payload: &[u8]) -> Result<AuthoritativeSnapshot, SnapshotCodec
             actual: payload.len(),
         });
     }
-    world.set_tick(world_tick);
-    if world.fingerprint() != expected_world_fingerprint {
-        return Err(SnapshotCodecError::PayloadHashMismatch);
-    }
+    validate_world_fingerprint(&mut world, world_tick, expected_world_fingerprint)?;
     Ok(AuthoritativeSnapshot {
+        snapshot_id: 0,
         world,
         bodies,
         body_states,
         next_body_id,
         next_sequence,
     })
+}
+
+const fn validate_world_fingerprint(
+    world: &mut World,
+    world_tick: u64,
+    expected: u128,
+) -> Result<(), SnapshotCodecError> {
+    world.set_tick(world_tick);
+    if world.fingerprint() != expected {
+        return Err(SnapshotCodecError::PayloadHashMismatch);
+    }
+    Ok(())
 }
 
 fn encode_voxel(bytes: &mut Vec<u8>, position: crate::IVec3, voxel: Voxel) {
@@ -733,6 +780,28 @@ mod tests {
         assert_eq!(replica.bodies(), authority.bodies());
         assert_eq!(replica.body_states(), authority.body_states());
         assert_eq!(replica.next_body_id(), authority.next_body_id());
+    }
+
+    #[test]
+    fn missing_fragment_windows_are_bounded_and_exact() {
+        let authority = AuthoritativeServer::new(demo_world());
+        let frames = encode_snapshot_frames(7, &authority, MAX_SNAPSHOT_DATAGRAM_BYTES)
+            .expect("snapshot frames");
+        assert!(frames.len() > 65);
+        let mut assembler = SnapshotAssembler::default();
+        for (index, frame) in frames.iter().enumerate() {
+            if index != 0 && index != 65 {
+                assert!(
+                    assembler
+                        .push(frame)
+                        .expect("valid incomplete snapshot")
+                        .is_none()
+                );
+            }
+        }
+
+        assert_eq!(assembler.active_snapshot_id(), Some(7));
+        assert_eq!(assembler.missing_fragment_windows(), vec![(0, 1), (64, 2)]);
     }
 
     #[test]

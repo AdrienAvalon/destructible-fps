@@ -105,9 +105,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - count-and-byte-bounded recent-delta history, bounded repair queue, prioritized exact
   retransmission, and a process test that deliberately loses one sequence (delivered);
 - canonical four-MiB-bounded snapshots, MTU-safe framing, one-transfer client assembly, paced
-  per-peer emission, whole-transfer retry after a lost fragment, atomic install, shared-buffer
-  per-transfer catch-up capped at 256 packets/eight MiB, and ordered return to live delivery
-  (delivered for loopback);
+  per-peer emission, fixed-window selective retransmission after a lost fragment, acknowledged
+  atomic install, shared-buffer per-transfer catch-up capped at 256 packets/eight MiB, and ordered
+  return to live delivery (delivered for loopback);
 - authenticated encrypted session negotiation and protocol-version agreement;
 - unreliable sequenced gameplay channel plus reliable control, inventory, and snapshot streams;
 - entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
@@ -195,8 +195,8 @@ are resolved, and launch/rollback ownership is documented.
 
 The next three bounded increments are:
 
-1. add a deterministic latency/loss/jitter/reorder/duplication harness, snapshot fragment
-   acknowledgements, and selective retransmission instead of whole-snapshot retry;
+1. add a deterministic latency/loss/jitter/reorder/duplication harness with acknowledgement
+   retry/timeout cases and explicit per-channel bandwidth evidence;
 2. design authenticated encrypted session negotiation and packet replay protection before any
    non-loopback exposure;
 3. add horizontal velocity, material friction/restitution, and deterministic impulse response,

@@ -2,7 +2,8 @@ use destructible_fps::{
     AuthoritativeServer, ClientReplica, ExplosionCommand, IVec3, OrderedDeltaInbox,
     ServerControlMessage, SnapshotAssembler, World, decode_frame, decode_server_control,
     demo_world, encode_client_hello, encode_explosion_request, encode_repair_request,
-    encode_snapshot_request, is_delta_datagram, is_snapshot_datagram,
+    encode_snapshot_ack, encode_snapshot_fragments_request, encode_snapshot_request,
+    is_delta_datagram, is_snapshot_datagram,
 };
 use std::{
     io,
@@ -225,8 +226,8 @@ fn missing_retained_delta_falls_back_to_a_process_snapshot() {
                 &server_address.to_string(),
                 "--max-ticks",
                 "300",
-                "--exit-after-snapshots",
-                "2",
+                "--exit-after-catchups",
+                "1",
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -247,8 +248,8 @@ fn missing_retained_delta_falls_back_to_a_process_snapshot() {
     let mut snapshot = None;
     let mut received_snapshot_frames = 0_usize;
     let mut dropped_snapshot_frame = false;
-    let mut retried_snapshot = false;
-    let retry_at = Instant::now() + Duration::from_millis(1_200);
+    let mut requested_missing_fragments = false;
+    let repair_at = Instant::now() + Duration::from_millis(1_200);
     let mut buffer = [0_u8; 1_201];
     while Instant::now() < deadline && snapshot.is_none() {
         loop {
@@ -271,11 +272,26 @@ fn missing_retained_delta_falls_back_to_a_process_snapshot() {
                 Err(error) => panic!("snapshot receive failed: {error}"),
             }
         }
-        if !retried_snapshot && Instant::now() >= retry_at {
-            socket
-                .send_to(&encode_snapshot_request(session), server_address)
-                .expect("retry incomplete snapshot fallback");
-            retried_snapshot = true;
+        if !requested_missing_fragments && Instant::now() >= repair_at {
+            let snapshot_id = assembler
+                .active_snapshot_id()
+                .expect("incomplete snapshot has an active ID");
+            let missing = assembler.missing_fragment_windows();
+            assert!(!missing.is_empty());
+            for (base_fragment, missing_mask) in missing {
+                socket
+                    .send_to(
+                        &encode_snapshot_fragments_request(
+                            session,
+                            snapshot_id,
+                            base_fragment,
+                            missing_mask,
+                        ),
+                        server_address,
+                    )
+                    .expect("request only missing snapshot fragments");
+            }
+            requested_missing_fragments = true;
         }
         if snapshot.is_none() {
             thread::sleep(Duration::from_millis(1));
@@ -288,11 +304,15 @@ fn missing_retained_delta_falls_back_to_a_process_snapshot() {
         )
     });
     assert!(dropped_snapshot_frame);
-    assert!(retried_snapshot);
+    assert!(requested_missing_fragments);
+    let snapshot_id = snapshot.snapshot_id();
     let mut replica = ClientReplica::new(World::default());
     snapshot
         .install_into(&mut replica)
         .expect("atomic process snapshot install");
+    socket
+        .send_to(&encode_snapshot_ack(session, snapshot_id), server_address)
+        .expect("acknowledge installed process snapshot");
     assert_eq!(replica.world().fingerprint(), demo_world().fingerprint());
     assert_eq!(replica.next_body_id(), 1);
 
@@ -363,6 +383,7 @@ fn process_snapshot_catches_up_motion_before_returning_to_live_deltas() {
         receive_joining_stream(
             &joining_socket,
             server_address,
+            joining_session,
             &mut snapshot_assembler,
             &mut joining_replica,
             &mut joining_inbox,
@@ -382,6 +403,7 @@ fn process_snapshot_catches_up_motion_before_returning_to_live_deltas() {
         receive_joining_stream(
             &joining_socket,
             server_address,
+            joining_session,
             &mut snapshot_assembler,
             &mut joining_replica,
             &mut joining_inbox,
@@ -442,6 +464,7 @@ fn discard_available(socket: &UdpSocket) {
 fn receive_joining_stream(
     socket: &UdpSocket,
     server: SocketAddr,
+    session: u64,
     snapshot_assembler: &mut SnapshotAssembler,
     replica: &mut ClientReplica,
     inbox: &mut Option<OrderedDeltaInbox>,
@@ -457,11 +480,15 @@ fn receive_joining_stream(
                         .push(datagram)
                         .expect("valid moving-world snapshot")
                     {
+                        let snapshot_id = snapshot.snapshot_id();
                         let next_sequence = snapshot.next_sequence();
                         snapshot
                             .install_into(replica)
                             .expect("install moving-world snapshot");
                         *inbox = Some(OrderedDeltaInbox::new(next_sequence));
+                        socket
+                            .send_to(&encode_snapshot_ack(session, snapshot_id), server)
+                            .expect("acknowledge installed moving-world snapshot");
                     }
                 } else if is_delta_datagram(datagram)
                     && let Some(inbox) = inbox

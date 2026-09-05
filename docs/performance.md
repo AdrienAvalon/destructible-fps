@@ -51,7 +51,7 @@ samples with zero drops, rendered 90/128 chunks and one replicated body, and exi
 
 ## 2026-09-05 — bounded snapshot repair baseline
 
-Source state: parent `d1d5876` plus the snapshot transport change documented in this section.
+Source state: commit `90ec6d0` plus the selective snapshot-repair change documented here.
 
 Command:
 
@@ -65,31 +65,34 @@ detached body, and its moving fixed-point state. Each canonical snapshot occupie
 
 | Measurement | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| Server encode and frame | 3.817 ms | 4.032 ms | 4.498 ms | 4.498 ms |
-| Client reassemble and decode | 4.399 ms | 4.541 ms | 4.851 ms | 4.851 ms |
-| Client semantic validate and install | 0.300 ms | 0.303 ms | 0.323 ms | 0.323 ms |
-| End-to-end in-memory work | 8.501 ms | 8.740 ms | 9.673 ms | 9.673 ms |
+| Server encode and frame | 3.809 ms | 3.874 ms | 4.346 ms | 4.346 ms |
+| Client reassemble and decode | 4.396 ms | 4.485 ms | 4.719 ms | 4.719 ms |
+| Client semantic validate and install | 0.303 ms | 0.314 ms | 0.317 ms | 0.317 ms |
+| End-to-end in-memory work | 8.509 ms | 8.648 ms | 9.371 ms | 9.371 ms |
 
 The encoder has a four-MiB payload ceiling; the client retains only one transfer. The server emits
 at most 16 snapshot frames per peer per tick and retains at most 256 catch-up packets or 8 MiB per
-transfer. Encoded delta buffers are reference-counted so same-tick snapshot clients, catch-up queues,
-and the global short-gap history share bytes instead of cloning them. Snapshot work requires its own
-session-bound control request; a future delta-repair sequence is rejected as a snapshot trigger. A
-transfer that exceeds its packet/byte catch-up budget stalls fail-closed and requires a throttled
-newer snapshot.
+transfer. Encoded snapshot and delta buffers are reference-counted so retransmission, same-tick
+snapshot clients, catch-up queues, and the global short-gap history share bytes instead of cloning
+them. Snapshot work requires its own session-bound control request; a future delta-repair sequence
+is rejected as a snapshot trigger. After paced emission the server retains the transfer until a
+matching install acknowledgement and serves only fragments selected through fixed 64-bit missing
+windows under the same egress budget. A transfer that exceeds its packet/byte catch-up budget stalls
+fail-closed and requires a throttled newer snapshot.
 
 An initial 64-frame/tick experiment caused the loopback receiver to miss 37 of 864 accepted
 datagrams; reducing the burst to 16 delivered the same initial-world snapshot completely in 58
-server ticks. The process tests additionally discard one snapshot frame and recover with a newer
-whole snapshot, then create a moving authoritative body and prove ordered catch-up before returning
-that client to live deltas. This is reliable loopback milestone evidence, not congestion-controlled
-Internet transport; selective fragment acknowledgements remain the next bandwidth optimization.
+server ticks. The process tests additionally discard one snapshot frame, selectively request that
+single fragment, install and acknowledge the completed snapshot, then create a moving authoritative
+body and prove ordered catch-up before returning that client to live deltas. This is reliable
+loopback milestone evidence, not congestion-controlled Internet transport; deterministic impairment,
+acknowledgement retry/timeout policy, and remote transport remain later gates.
 
-The final promotion passed 52 library tests, three binary tests, and 21 integration tests in both
+The final promotion passed 54 library tests, three binary tests, and 21 integration tests in both
 debug and release. The unchanged destruction, structural, and 1,024-body physics fixtures reported
-0.395 ms, 4.278 ms, and 0.908 ms p99 respectively. The five-second Vulkan showcase on the RTX 4050
-Laptop completed 2,614 GPU samples with zero drops: CPU frame-work p99 was 11.669 ms and GPU-total
-p99 was 0.194 ms at 1,440×900.
+0.390 ms, 4.050 ms, and 0.852 ms p99 respectively. The five-second Vulkan smoke on the RTX 4050
+Laptop completed 2,192 GPU samples with zero drops: CPU frame-work p99 was 13.822 ms and GPU-total
+p99 was 0.212 ms at 1,440×900.
 
 ## 2026-09-05 — Stage 1 telemetry baseline
 

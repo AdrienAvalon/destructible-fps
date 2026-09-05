@@ -46,6 +46,10 @@ pub struct NetworkTickReport {
     pub snapshot_request_drops: usize,
     pub snapshot_catchup_stalls: usize,
     pub snapshot_catchups_completed: usize,
+    pub snapshot_fragment_requests_served: usize,
+    pub snapshot_fragments_retransmitted: usize,
+    pub snapshot_acks_accepted: usize,
+    pub invalid_snapshot_controls: usize,
     pub commands_applied: usize,
     pub commands_rejected: usize,
     pub outbound_attempts: usize,
@@ -98,10 +102,24 @@ struct QueuedCommand {
 }
 
 #[derive(Clone, Copy)]
+enum RecoveryRequest {
+    Delta(u64),
+    Snapshot,
+    SnapshotFragments {
+        snapshot_id: u64,
+        base_fragment: u16,
+        missing_mask: u64,
+    },
+    SnapshotAck {
+        snapshot_id: u64,
+    },
+}
+
+#[derive(Clone, Copy)]
 struct QueuedRepair {
     source: SocketAddr,
     session_id: u64,
-    missing_sequence: Option<u64>,
+    request: RecoveryRequest,
 }
 
 struct RetainedDelta {
@@ -118,16 +136,24 @@ struct CatchupDelta {
 
 enum SnapshotTransferStage {
     Snapshot { next_frame: usize },
+    AwaitingAck,
     Catchup { next_sequence: u64 },
     Stalled,
 }
 
 struct SnapshotTransfer {
+    snapshot_id: u64,
     frames: Arc<[Vec<u8>]>,
     snapshot_next_sequence: u64,
     stage: SnapshotTransferStage,
     catchup: VecDeque<CatchupDelta>,
     catchup_bytes: usize,
+}
+
+struct CachedSnapshot {
+    snapshot_id: u64,
+    next_sequence: u64,
+    frames: Arc<[Vec<u8>]>,
 }
 
 pub struct DedicatedServer {
@@ -263,6 +289,30 @@ impl DedicatedServer {
                 ClientControlMessage::SnapshotRequest { session_id } => {
                     self.enqueue_snapshot(source, session_id, report);
                 }
+                ClientControlMessage::SnapshotFragmentsRequest {
+                    session_id,
+                    snapshot_id,
+                    base_fragment,
+                    missing_mask,
+                } => self.enqueue_recovery(
+                    source,
+                    session_id,
+                    RecoveryRequest::SnapshotFragments {
+                        snapshot_id,
+                        base_fragment,
+                        missing_mask,
+                    },
+                    report,
+                ),
+                ClientControlMessage::SnapshotAck {
+                    session_id,
+                    snapshot_id,
+                } => self.enqueue_recovery(
+                    source,
+                    session_id,
+                    RecoveryRequest::SnapshotAck { snapshot_id },
+                    report,
+                ),
             }
         }
         Ok(())
@@ -329,30 +379,32 @@ impl DedicatedServer {
         missing_sequence: u64,
         report: &mut NetworkTickReport,
     ) {
-        let Some(peer) = self.peers.get_mut(&source) else {
-            report.rejected_sessions += 1;
-            return;
-        };
-        if peer.session_id != session_id || missing_sequence == 0 {
+        if missing_sequence == 0 {
             report.rejected_sessions += 1;
             return;
         }
-        peer.last_seen_tick = self.tick;
-        if self.repairs.len() >= MAX_QUEUED_REPAIRS {
-            report.repair_queue_drops += 1;
-            return;
-        }
-        self.repairs.push_back(QueuedRepair {
+        self.enqueue_recovery(
             source,
             session_id,
-            missing_sequence: Some(missing_sequence),
-        });
+            RecoveryRequest::Delta(missing_sequence),
+            report,
+        );
     }
 
     fn enqueue_snapshot(
         &mut self,
         source: SocketAddr,
         session_id: u64,
+        report: &mut NetworkTickReport,
+    ) {
+        self.enqueue_recovery(source, session_id, RecoveryRequest::Snapshot, report);
+    }
+
+    fn enqueue_recovery(
+        &mut self,
+        source: SocketAddr,
+        session_id: u64,
+        request: RecoveryRequest,
         report: &mut NetworkTickReport,
     ) {
         let Some(peer) = self.peers.get_mut(&source) else {
@@ -371,13 +423,13 @@ impl DedicatedServer {
         self.repairs.push_back(QueuedRepair {
             source,
             session_id,
-            missing_sequence: None,
+            request,
         });
     }
 
     fn process_repairs(&mut self, report: &mut NetworkTickReport) {
         let mut snapshot_attempted = false;
-        let mut snapshot_cache: Option<(u64, Arc<[Vec<u8>]>)> = None;
+        let mut snapshot_cache = None;
         for _ in 0..MAX_REPAIRS_PER_TICK {
             let Some(repair) = self.repairs.pop_front() else {
                 break;
@@ -390,22 +442,44 @@ impl DedicatedServer {
                 report.rejected_sessions += 1;
                 continue;
             }
-            if let Some(missing_sequence) = repair.missing_sequence {
-                if let Some(retained) = self
-                    .retained_deltas
-                    .iter()
-                    .find(|packet| packet.sequence == missing_sequence)
-                {
-                    if send_packet_frames(&self.socket, &retained.frames, repair.source, report) {
-                        report.repairs_served += 1;
+            match repair.request {
+                RecoveryRequest::SnapshotFragments {
+                    snapshot_id,
+                    base_fragment,
+                    missing_mask,
+                } => {
+                    self.process_snapshot_fragments(
+                        repair.source,
+                        snapshot_id,
+                        base_fragment,
+                        missing_mask,
+                        report,
+                    );
+                    continue;
+                }
+                RecoveryRequest::SnapshotAck { snapshot_id } => {
+                    self.process_snapshot_ack(repair.source, snapshot_id, report);
+                    continue;
+                }
+                RecoveryRequest::Delta(missing_sequence) => {
+                    if let Some(retained) = self
+                        .retained_deltas
+                        .iter()
+                        .find(|packet| packet.sequence == missing_sequence)
+                    {
+                        if send_packet_frames(&self.socket, &retained.frames, repair.source, report)
+                        {
+                            report.repairs_served += 1;
+                        }
+                        continue;
                     }
-                    continue;
+                    report.repair_misses += 1;
+                    if missing_sequence >= self.authority.next_sequence() {
+                        report.snapshot_request_drops += 1;
+                        continue;
+                    }
                 }
-                report.repair_misses += 1;
-                if missing_sequence >= self.authority.next_sequence() {
-                    report.snapshot_request_drops += 1;
-                    continue;
-                }
+                RecoveryRequest::Snapshot => {}
             }
             let transfer_is_active = self
                 .snapshot_transfers
@@ -426,24 +500,9 @@ impl DedicatedServer {
             }
             if !snapshot_attempted {
                 snapshot_attempted = true;
-                if let Some(next_snapshot_id) = self.next_snapshot_id.checked_add(1) {
-                    match encode_snapshot_frames(
-                        self.next_snapshot_id,
-                        &self.authority,
-                        APPLICATION_MTU,
-                    ) {
-                        Ok(frames) => {
-                            let snapshot_next_sequence = self.authority.next_sequence();
-                            self.next_snapshot_id = next_snapshot_id;
-                            snapshot_cache = Some((snapshot_next_sequence, frames.into()));
-                        }
-                        Err(_error) => report.snapshot_build_failures += 1,
-                    }
-                } else {
-                    report.snapshot_build_failures += 1;
-                }
+                snapshot_cache = self.build_snapshot(report);
             }
-            let Some((snapshot_next_sequence, frames)) = &snapshot_cache else {
+            let Some(snapshot) = &snapshot_cache else {
                 continue;
             };
             if let Some(peer) = self.peers.get_mut(&repair.source) {
@@ -452,13 +511,110 @@ impl DedicatedServer {
             self.snapshot_transfers.insert(
                 repair.source,
                 SnapshotTransfer {
-                    frames: Arc::clone(frames),
-                    snapshot_next_sequence: *snapshot_next_sequence,
+                    snapshot_id: snapshot.snapshot_id,
+                    frames: Arc::clone(&snapshot.frames),
+                    snapshot_next_sequence: snapshot.next_sequence,
                     stage: SnapshotTransferStage::Snapshot { next_frame: 0 },
                     catchup: VecDeque::new(),
                     catchup_bytes: 0,
                 },
             );
+        }
+    }
+
+    fn build_snapshot(&mut self, report: &mut NetworkTickReport) -> Option<CachedSnapshot> {
+        let Some(next_snapshot_id) = self.next_snapshot_id.checked_add(1) else {
+            report.snapshot_build_failures += 1;
+            return None;
+        };
+        let frames =
+            match encode_snapshot_frames(self.next_snapshot_id, &self.authority, APPLICATION_MTU) {
+                Ok(frames) => frames,
+                Err(_error) => {
+                    report.snapshot_build_failures += 1;
+                    return None;
+                }
+            };
+        let snapshot = CachedSnapshot {
+            snapshot_id: self.next_snapshot_id,
+            next_sequence: self.authority.next_sequence(),
+            frames: frames.into(),
+        };
+        self.next_snapshot_id = next_snapshot_id;
+        Some(snapshot)
+    }
+
+    fn process_snapshot_fragments(
+        &self,
+        source: SocketAddr,
+        snapshot_id: u64,
+        base_fragment: u16,
+        missing_mask: u64,
+        report: &mut NetworkTickReport,
+    ) {
+        let Some(transfer) = self.snapshot_transfers.get(&source) else {
+            report.invalid_snapshot_controls += 1;
+            return;
+        };
+        let base = usize::from(base_fragment);
+        if snapshot_id == 0
+            || transfer.snapshot_id != snapshot_id
+            || base % 64 != 0
+            || missing_mask == 0
+        {
+            report.invalid_snapshot_controls += 1;
+            return;
+        }
+        let requested = usize::try_from(missing_mask.count_ones()).unwrap_or(64);
+        if (0..64).any(|offset| {
+            missing_mask & (1_u64 << offset) != 0
+                && base.saturating_add(offset) >= transfer.frames.len()
+        }) {
+            report.invalid_snapshot_controls += 1;
+            return;
+        }
+        if send_selected_snapshot_frames(
+            &self.socket,
+            &transfer.frames,
+            source,
+            base,
+            missing_mask,
+            report,
+        ) {
+            report.snapshot_fragment_requests_served += 1;
+            report.snapshot_fragments_retransmitted = report
+                .snapshot_fragments_retransmitted
+                .saturating_add(requested);
+        }
+    }
+
+    fn process_snapshot_ack(
+        &mut self,
+        source: SocketAddr,
+        snapshot_id: u64,
+        report: &mut NetworkTickReport,
+    ) {
+        let Some(transfer) = self.snapshot_transfers.get_mut(&source) else {
+            report.invalid_snapshot_controls += 1;
+            return;
+        };
+        if snapshot_id == 0 || transfer.snapshot_id != snapshot_id {
+            report.invalid_snapshot_controls += 1;
+            return;
+        }
+        match transfer.stage {
+            SnapshotTransferStage::AwaitingAck => {
+                transfer.stage = SnapshotTransferStage::Catchup {
+                    next_sequence: transfer.snapshot_next_sequence,
+                };
+                report.snapshot_acks_accepted += 1;
+            }
+            SnapshotTransferStage::Catchup { .. } => {
+                report.snapshot_acks_accepted += 1;
+            }
+            SnapshotTransferStage::Snapshot { .. } | SnapshotTransferStage::Stalled => {
+                report.invalid_snapshot_controls += 1;
+            }
         }
     }
 
@@ -480,9 +636,7 @@ impl DedicatedServer {
                         report,
                     ) {
                         if end == transfer.frames.len() {
-                            transfer.stage = SnapshotTransferStage::Catchup {
-                                next_sequence: transfer.snapshot_next_sequence,
-                            };
+                            transfer.stage = SnapshotTransferStage::AwaitingAck;
                             report.snapshot_fallbacks_served += 1;
                         } else {
                             transfer.stage = SnapshotTransferStage::Snapshot { next_frame: end };
@@ -522,7 +676,7 @@ impl DedicatedServer {
                         true
                     }
                 }
-                SnapshotTransferStage::Stalled => true,
+                SnapshotTransferStage::AwaitingAck | SnapshotTransferStage::Stalled => true,
             };
             if keep {
                 self.snapshot_transfers.insert(source, transfer);
@@ -584,7 +738,8 @@ impl DedicatedServer {
             let expected = transfer.catchup.back().map_or_else(
                 || {
                     Some(match transfer.stage {
-                        SnapshotTransferStage::Snapshot { .. } => transfer.snapshot_next_sequence,
+                        SnapshotTransferStage::Snapshot { .. }
+                        | SnapshotTransferStage::AwaitingAck => transfer.snapshot_next_sequence,
                         SnapshotTransferStage::Catchup { next_sequence } => next_sequence,
                         SnapshotTransferStage::Stalled => sequence,
                     })
@@ -677,6 +832,39 @@ fn send_packet_frames(
     }
     let mut complete = true;
     for frame in frames {
+        report.outbound_attempts += 1;
+        match socket.send_to(frame, destination) {
+            Ok(length) if length == frame.len() => report.outbound_datagrams += 1,
+            Ok(_) | Err(_) => {
+                report.outbound_drops += 1;
+                complete = false;
+            }
+        }
+    }
+    complete
+}
+
+fn send_selected_snapshot_frames(
+    socket: &UdpSocket,
+    frames: &[Vec<u8>],
+    destination: SocketAddr,
+    base: usize,
+    missing_mask: u64,
+    report: &mut NetworkTickReport,
+) -> bool {
+    let requested = usize::try_from(missing_mask.count_ones()).unwrap_or(64);
+    if requested > MAX_OUTBOUND_DATAGRAMS_PER_TICK.saturating_sub(report.outbound_attempts) {
+        report.outbound_drops = report.outbound_drops.saturating_add(requested);
+        return false;
+    }
+    let mut complete = true;
+    for offset in 0..64 {
+        if missing_mask & (1_u64 << offset) == 0 {
+            continue;
+        }
+        let Some(frame) = frames.get(base.saturating_add(offset)) else {
+            return false;
+        };
         report.outbound_attempts += 1;
         match socket.send_to(frame, destination) {
             Ok(length) if length == frame.len() => report.outbound_datagrams += 1,
@@ -940,6 +1128,7 @@ mod tests {
         server.snapshot_transfers.insert(
             source,
             SnapshotTransfer {
+                snapshot_id: 1,
                 frames: vec![vec![0]].into(),
                 snapshot_next_sequence: 1,
                 stage: SnapshotTransferStage::Snapshot { next_frame: 0 },
@@ -963,6 +1152,39 @@ mod tests {
         assert!(transfer.catchup.is_empty());
         assert_eq!(transfer.catchup_bytes, 0);
         assert_eq!(report.snapshot_catchup_stalls, 1);
+    }
+
+    #[test]
+    fn snapshot_controls_require_matching_bounded_transfer_state() {
+        let mut server = DedicatedServer::bind("127.0.0.1:0", World::default()).expect("server");
+        let source = SocketAddr::from(([127, 0, 0, 1], 24_002));
+        server.snapshot_transfers.insert(
+            source,
+            SnapshotTransfer {
+                snapshot_id: 5,
+                frames: vec![vec![0]].into(),
+                snapshot_next_sequence: 3,
+                stage: SnapshotTransferStage::AwaitingAck,
+                catchup: VecDeque::new(),
+                catchup_bytes: 0,
+            },
+        );
+        let mut report = NetworkTickReport::default();
+
+        server.process_snapshot_fragments(source, 5, 0, 1, &mut report);
+        server.process_snapshot_fragments(source, 5, 1, 1, &mut report);
+        server.process_snapshot_ack(source, 4, &mut report);
+        server.process_snapshot_ack(source, 5, &mut report);
+
+        let transfer = server.snapshot_transfers.get(&source).expect("transfer");
+        assert!(matches!(
+            transfer.stage,
+            SnapshotTransferStage::Catchup { next_sequence: 3 }
+        ));
+        assert_eq!(report.snapshot_fragment_requests_served, 1);
+        assert_eq!(report.snapshot_fragments_retransmitted, 1);
+        assert_eq!(report.snapshot_acks_accepted, 1);
+        assert_eq!(report.invalid_snapshot_controls, 2);
     }
 
     #[test]

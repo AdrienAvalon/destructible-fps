@@ -10,11 +10,15 @@ const WELCOME_KIND: u8 = 2;
 const EXPLOSION_KIND: u8 = 3;
 const REPAIR_REQUEST_KIND: u8 = 4;
 const SNAPSHOT_REQUEST_KIND: u8 = 5;
+const SNAPSHOT_FRAGMENTS_REQUEST_KIND: u8 = 6;
+const SNAPSHOT_ACK_KIND: u8 = 7;
 const HELLO_BYTES: usize = 14;
 const WELCOME_BYTES: usize = 22;
 const EXPLOSION_BYTES: usize = 40;
 const REPAIR_REQUEST_BYTES: usize = 22;
 const SNAPSHOT_REQUEST_BYTES: usize = 14;
+const SNAPSHOT_FRAGMENTS_REQUEST_BYTES: usize = 32;
+const SNAPSHOT_ACK_BYTES: usize = 22;
 pub const MAX_UDP_DATAGRAM_BYTES: usize = 1_200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +36,16 @@ pub enum ClientControlMessage {
     },
     SnapshotRequest {
         session_id: u64,
+    },
+    SnapshotFragmentsRequest {
+        session_id: u64,
+        snapshot_id: u64,
+        base_fragment: u16,
+        missing_mask: u64,
+    },
+    SnapshotAck {
+        session_id: u64,
+        snapshot_id: u64,
     },
 }
 
@@ -104,6 +118,32 @@ pub fn encode_snapshot_request(session_id: u64) -> Vec<u8> {
 }
 
 #[must_use]
+pub fn encode_snapshot_fragments_request(
+    session_id: u64,
+    snapshot_id: u64,
+    base_fragment: u16,
+    missing_mask: u64,
+) -> Vec<u8> {
+    let mut bytes = control_prefix(
+        SNAPSHOT_FRAGMENTS_REQUEST_KIND,
+        SNAPSHOT_FRAGMENTS_REQUEST_BYTES,
+    );
+    push_u64(&mut bytes, session_id);
+    push_u64(&mut bytes, snapshot_id);
+    push_u16(&mut bytes, base_fragment);
+    push_u64(&mut bytes, missing_mask);
+    bytes
+}
+
+#[must_use]
+pub fn encode_snapshot_ack(session_id: u64, snapshot_id: u64) -> Vec<u8> {
+    let mut bytes = control_prefix(SNAPSHOT_ACK_KIND, SNAPSHOT_ACK_BYTES);
+    push_u64(&mut bytes, session_id);
+    push_u64(&mut bytes, snapshot_id);
+    bytes
+}
+
+#[must_use]
 pub fn encode_server_welcome(nonce: u64, session_id: u64) -> Vec<u8> {
     let mut bytes = control_prefix(WELCOME_KIND, WELCOME_BYTES);
     push_u64(&mut bytes, nonce);
@@ -148,6 +188,22 @@ pub fn decode_client_control(bytes: &[u8]) -> Result<ClientControlMessage, Contr
             require_length(bytes, SNAPSHOT_REQUEST_BYTES)?;
             Ok(ClientControlMessage::SnapshotRequest {
                 session_id: cursor.take_u64(),
+            })
+        }
+        SNAPSHOT_FRAGMENTS_REQUEST_KIND => {
+            require_length(bytes, SNAPSHOT_FRAGMENTS_REQUEST_BYTES)?;
+            Ok(ClientControlMessage::SnapshotFragmentsRequest {
+                session_id: cursor.take_u64(),
+                snapshot_id: cursor.take_u64(),
+                base_fragment: cursor.take_u16(),
+                missing_mask: cursor.take_u64(),
+            })
+        }
+        SNAPSHOT_ACK_KIND => {
+            require_length(bytes, SNAPSHOT_ACK_BYTES)?;
+            Ok(ClientControlMessage::SnapshotAck {
+                session_id: cursor.take_u64(),
+                snapshot_id: cursor.take_u64(),
             })
         }
         kind => Err(ControlCodecError::InvalidKind(kind)),
@@ -322,6 +378,28 @@ mod tests {
         assert_eq!(
             decode_client_control(&snapshot),
             Ok(ClientControlMessage::SnapshotRequest { session_id: 9 })
+        );
+
+        let fragments = encode_snapshot_fragments_request(9, 12, 64, 0x21);
+        assert_eq!(fragments.len(), SNAPSHOT_FRAGMENTS_REQUEST_BYTES);
+        assert_eq!(
+            decode_client_control(&fragments),
+            Ok(ClientControlMessage::SnapshotFragmentsRequest {
+                session_id: 9,
+                snapshot_id: 12,
+                base_fragment: 64,
+                missing_mask: 0x21,
+            })
+        );
+
+        let ack = encode_snapshot_ack(9, 12);
+        assert_eq!(ack.len(), SNAPSHOT_ACK_BYTES);
+        assert_eq!(
+            decode_client_control(&ack),
+            Ok(ClientControlMessage::SnapshotAck {
+                session_id: 9,
+                snapshot_id: 12,
+            })
         );
     }
 

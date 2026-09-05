@@ -3,6 +3,21 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-05 — server-side network explosion envelope
+
+Source state: parent `c1c4f06` plus the authority-policy increment documented here. Before calling the
+generic destruction primitive, the network authority now rejects zero/oversized radii, zero or
+radius-incoherent energy, energy above 50,000 units, and targets farther than 120 metres from the
+authoritative eye position. Squared distance uses saturating 128-bit arithmetic. Unit tests cover
+both shipped weapon profiles, excessive energy and extreme range; an authority-core regression
+proves the invalid command increments rejection rather than mutation.
+
+Two release Vulkan clients then completed the full graphical smoke against the real release server.
+Both installed snapshots, moved, rendered the other player, applied the policy-approved destruction
+delta and completed its background mesh job before clean exit at authority tick 900. The complete
+promotion passed 119 library tests, eight binary tests, and 42 integration tests in debug and release;
+strict Clippy was clean.
+
 ## 2026-09-05 — Cook-Torrance material baseline
 
 Source state: parent `20bd942` plus the PBR baseline documented here. The former Blinn-style highlight

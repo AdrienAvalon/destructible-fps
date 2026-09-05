@@ -47,6 +47,14 @@ fingerprint, and the active-body fingerprint mixes entity ID, geometry, and dyna
 persistent server must durably store the ID high-water mark with its world snapshot before it may
 restore and allocate another body.
 
+Network explosion requests cross an additional authority policy before the generic destruction
+primitive: radius is limited to eight voxels, energy is non-zero and capped by both `2,000 * r²` and
+50,000 units, and the target voxel centre must be within 120 metres of the authoritative player's
+eye. Distance is evaluated with saturating 128-bit integer squares, so hostile extreme coordinates
+cannot overflow into acceptance. This prevents arbitrary remote world edits and oversized weapon
+profiles. It is not yet server-side aim validation: view orientation, ray obstruction, fire cadence,
+ammunition and lag-compensated hit history remain part of the complete combat gate.
+
 The first real transport slice now separates a generic `AuthorityCore<PeerId>` from its thin
 nonblocking UDP process adapter. The core owns the world, sessions, commands, repairs, snapshots,
 simulation, and retained replication state; it never owns or calls a socket. A fixed versioned

@@ -45,6 +45,8 @@ The Linux demo now combines the authoritative core with a real-time first-person
   material costs, bounded coordinates, face-support and occupancy checks, conservative dynamic-body
   exclusion, six-metre authoritative-player reach, integer line-of-sight traversal, and ordinary
   fingerprinted world deltas shared by local, UDP, and authenticated QUIC clients;
+- server-side network explosion envelopes limiting radius, radius-scaled energy and eye-to-target
+  range before either loopback or authenticated QUIC authority may mutate the world;
 - fixed-micrometre server player movement which retains only the newest sequenced unit-vector input,
   simulates once per 60 Hz tick, expires stale intent, and handles gravity, jumping, bounded terminal
   velocity, swept static-voxel contact, fall recovery, and 16 distinct recyclable spawn slots

@@ -160,6 +160,9 @@ fixture remains inside the 60 Hz server budget and converges bit-for-bit on repl
 - broader entity/component snapshots, acknowledgements, delta baselines, and bounded repair;
 - spatial interest management for players, active fractures, projectiles, and persistent edits;
 - graphical client prediction/reconciliation and bounded lag compensation;
+- server-side network explosion radius, radius-scaled energy, and 120-metre authoritative-player
+  range policy (delivered); view-ray, obstruction, cadence, ammunition, and lag-history validation
+  remain;
 - configurable stochastic and trace-replay impairment plus a 32-client process harness;
 - fixed-profile bounded loss/jitter/reorder/duplication proxy with delta/snapshot repair, ACK retry,
   and per-channel byte accounting (delivered for one real client and one server process);

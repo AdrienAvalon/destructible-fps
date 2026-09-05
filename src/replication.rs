@@ -151,6 +151,11 @@ pub enum CommandError {
     ZeroRadius,
     RadiusTooLarge(u16),
     EnergyTooLarge(u32),
+    InvalidNetworkExplosionProfile {
+        radius_voxels: u16,
+        peak_energy: u32,
+    },
+    ExplosionOutOfReach(IVec3),
     InvalidBuildMaterial(crate::Material),
     BuildCoordinateOutOfRange(IVec3),
     BuildPositionOccupied(IVec3),
@@ -193,6 +198,19 @@ impl fmt::Display for CommandError {
             }
             Self::EnergyTooLarge(energy) => {
                 write!(formatter, "explosion energy {energy} exceeds 1,000,000")
+            }
+            Self::InvalidNetworkExplosionProfile {
+                radius_voxels,
+                peak_energy,
+            } => write!(
+                formatter,
+                "network explosion profile radius {radius_voxels}, energy {peak_energy} is not allowed"
+            ),
+            Self::ExplosionOutOfReach(position) => {
+                write!(
+                    formatter,
+                    "explosion target {position:?} is outside player reach"
+                )
             }
             Self::InvalidBuildMaterial(material) => {
                 write!(formatter, "material {material:?} cannot be placed")

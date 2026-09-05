@@ -21,6 +21,9 @@ pub const MAX_QUEUED_COMMANDS: usize = 256;
 pub const MAX_QUEUED_REPAIRS: usize = 64;
 pub const MAX_RECEIVED_DATAGRAMS_PER_TICK: usize = 64;
 pub const MAX_SIMULATED_COMMANDS_PER_TICK: usize = 32;
+pub const MAX_NETWORK_EXPLOSION_RADIUS_VOXELS: u16 = 8;
+pub const MAX_NETWORK_EXPLOSION_PEAK_ENERGY: u32 = 50_000;
+pub const MAX_NETWORK_EXPLOSION_REACH_UM: i64 = 120 * MICROMETERS_PER_VOXEL;
 pub const MAX_REPAIRS_PER_TICK: usize = 16;
 pub const MAX_OUTBOUND_DATAGRAMS_PER_TICK: usize = 4_096;
 pub const MAX_RETAINED_DELTA_PACKETS: usize = 64;
@@ -959,8 +962,13 @@ where
             };
             let result = match queued.command {
                 GameplayCommand::Explosion(command) => self
-                    .authority
-                    .execute_explosion(queued.session_id, command)
+                    .players
+                    .get(&queued.session_id)
+                    .ok_or(crate::CommandError::MissingAuthoritativePlayer(
+                        queued.session_id,
+                    ))
+                    .and_then(|player| validate_network_explosion(player, command))
+                    .and_then(|()| self.authority.execute_explosion(queued.session_id, command))
                     .map(|(packet, _report)| packet),
                 GameplayCommand::Build(command) => self
                     .players
@@ -1319,6 +1327,47 @@ fn send_selected_snapshot_frames<PeerId: Copy>(
     complete
 }
 
+fn validate_network_explosion(
+    player: &AuthoritativePlayer,
+    command: ExplosionCommand,
+) -> Result<(), crate::CommandError> {
+    let radius = u32::from(command.radius_voxels);
+    let energy_for_radius = radius.saturating_mul(radius).saturating_mul(2_000);
+    let maximum_energy = energy_for_radius.min(MAX_NETWORK_EXPLOSION_PEAK_ENERGY);
+    if command.radius_voxels == 0
+        || command.radius_voxels > MAX_NETWORK_EXPLOSION_RADIUS_VOXELS
+        || command.peak_energy == 0
+        || command.peak_energy > maximum_energy
+    {
+        return Err(crate::CommandError::InvalidNetworkExplosionProfile {
+            radius_voxels: command.radius_voxels,
+            peak_energy: command.peak_energy,
+        });
+    }
+    let eye = player.build_context().eye_position_um;
+    let scale = i128::from(MICROMETERS_PER_VOXEL);
+    let half_voxel = scale / 2;
+    let target = [
+        i128::from(command.center.x) * scale + half_voxel,
+        i128::from(command.center.y) * scale + half_voxel,
+        i128::from(command.center.z) * scale + half_voxel,
+    ];
+    let delta = [
+        target[0] - i128::from(eye.x),
+        target[1] - i128::from(eye.y),
+        target[2] - i128::from(eye.z),
+    ];
+    let squared_distance = delta
+        .into_iter()
+        .map(|axis| axis.saturating_mul(axis))
+        .fold(0_i128, i128::saturating_add);
+    let reach = i128::from(MAX_NETWORK_EXPLOSION_REACH_UM);
+    if squared_distance > reach * reach {
+        return Err(crate::CommandError::ExplosionOutOfReach(command.center));
+    }
+    Ok(())
+}
+
 pub struct OrderedDeltaInbox {
     assembler: FrameAssembler,
     complete: BTreeMap<u64, DeltaPacket>,
@@ -1419,6 +1468,65 @@ mod tests {
             body_assignments: Vec::new(),
             body_updates: Vec::new(),
         }
+    }
+
+    #[test]
+    fn network_explosions_have_bounded_weapon_profiles() {
+        let player = AuthoritativePlayer::default();
+        assert!(
+            validate_network_explosion(
+                &player,
+                ExplosionCommand {
+                    command_id: 1,
+                    center: crate::IVec3::new(0, 1, 0),
+                    radius_voxels: 2,
+                    peak_energy: 7_500,
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_network_explosion(
+                &player,
+                ExplosionCommand {
+                    command_id: 2,
+                    center: crate::IVec3::new(0, 1, 0),
+                    radius_voxels: 6,
+                    peak_energy: 42_000,
+                }
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_network_explosion(
+                &player,
+                ExplosionCommand {
+                    command_id: 3,
+                    center: crate::IVec3::new(0, 1, 0),
+                    radius_voxels: 2,
+                    peak_energy: MAX_NETWORK_EXPLOSION_PEAK_ENERGY,
+                }
+            ),
+            Err(crate::CommandError::InvalidNetworkExplosionProfile { .. })
+        ));
+    }
+
+    #[test]
+    fn network_explosions_cannot_target_beyond_the_player_envelope() {
+        let player = AuthoritativePlayer::default();
+        let far = crate::IVec3::new(0, 1, 1_000);
+        assert!(matches!(
+            validate_network_explosion(
+                &player,
+                ExplosionCommand {
+                    command_id: 1,
+                    center: far,
+                    radius_voxels: 2,
+                    peak_energy: 7_500,
+                }
+            ),
+            Err(crate::CommandError::ExplosionOutOfReach(position)) if position == far
+        ));
     }
 
     #[test]
@@ -1531,6 +1639,35 @@ mod tests {
         assert_eq!(report.commands_applied, 1);
         assert!(!output_lengths.is_empty());
         assert!(output_lengths.into_iter().all(|bytes| bytes <= 1_100));
+    }
+
+    #[test]
+    fn authority_core_rejects_an_unbounded_network_explosion_profile() {
+        let mut server = AuthorityCore::new(crate::demo_world(), 1_100).expect("authority core");
+        let principal = AuthenticatedPrincipal::new(
+            std::num::NonZeroU64::new(93).expect("non-zero test principal"),
+        );
+        let mut report = server.begin_tick();
+        assert!(server.admit_authenticated(1_u8, 17, 19, principal, &mut report));
+        server.ingest_datagram(
+            1,
+            &crate::encode_explosion_request(
+                19,
+                ExplosionCommand {
+                    command_id: 1,
+                    center: crate::IVec3::new(0, 1, 0),
+                    radius_voxels: MAX_NETWORK_EXPLOSION_RADIUS_VOXELS,
+                    peak_energy: MAX_NETWORK_EXPLOSION_PEAK_ENERGY + 1,
+                },
+            ),
+            &mut |_destination, _payload| true,
+            &mut report,
+        );
+        let report = server
+            .complete_tick(&mut |_destination, _payload| true, report)
+            .expect("bounded authority tick");
+        assert_eq!(report.commands_applied, 0);
+        assert_eq!(report.commands_rejected, 1);
     }
 
     #[test]

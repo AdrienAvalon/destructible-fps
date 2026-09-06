@@ -2,7 +2,8 @@
 use super::WorldKind;
 use destructible_fps::{
     FixedMicrometers3, IVec3,
-    ballistics::fine::{PenetrationProbe, probe_static_rifle},
+    ballistics::{FixedRay, fine::probe_static_rifle},
+    convex::{ConvexQueryBudget, ConvexQueryLimits, InspectionGeometry, SceneOwner},
     world::{
         geometry::RefinedWorld,
         query::{PhysicalBox, QueryBudget, QueryLimits, overlaps_solid, ray::TraceLimits},
@@ -73,7 +74,7 @@ pub fn verify_stage(kind: WorldKind, world: &RefinedWorld, stage: usize) -> Resu
 }
 
 #[allow(clippy::cast_possible_truncation)]
-pub fn camera(world: &RefinedWorld, origin: Vec3, direction: Vec3) -> Result<String, String> {
+pub fn camera(scene: &InspectionGeometry, origin: Vec3, direction: Vec3) -> Result<String, String> {
     if !origin.is_finite() || origin.abs().max_element() > 16_384.0 {
         return Err("invalid inspection probe camera".into());
     }
@@ -82,35 +83,110 @@ pub fn camera(world: &RefinedWorld, origin: Vec3, direction: Vec3) -> Result<Str
     let coordinates = origin
         .to_array()
         .map(|v| (f64::from(v) * 1_000_000.0).round() as i64);
-    let result = probe_static_rifle(
-        world,
+    let ray = FixedRay::new(
         FixedMicrometers3 {
             x: coordinates[0],
             y: coordinates[1],
             z: coordinates[2],
         },
         aim,
-        TraceLimits::default(),
+        120_000_000,
     )
     .map_err(|e| e.to_string())?;
-    Ok(summary(&result))
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn summary(result: &PenetrationProbe) -> String {
-    let contact = result.trace.chords.first().map_or_else(
+    let mut budget =
+        ConvexQueryBudget::new(ConvexQueryLimits::default()).map_err(|e| e.to_string())?;
+    let trace = scene
+        .trace(&ray, TraceLimits::default(), &mut budget)
+        .map_err(|e| e.to_string())?;
+    let contact = trace.chords.first().map_or_else(
         || "no static material".to_owned(),
-        |c| {
-            let distance = result.trace.length_um as f64 * c.material.entry.numerator() as f64
-                / c.material.entry.denominator() as f64
+        |hit| {
+            let distance = trace.length_um as f64 * hit.entry.numerator() as f64
+                / hit.entry.denominator() as f64
                 / 1_000_000.0;
-            format!("{:?} at {distance:.4}m", c.material.leaf.voxel().material)
+            format!(
+                "{:?} {:?} at {distance:.4}m",
+                hit.owner, hit.material.material
+            )
         },
     );
-    format!(
-        "Fine point-ray probe | {contact} | remaining {}/750000000 micro-work | read-only, no damage",
-        result.remaining_micro_work
-    )
+    Ok(format!(
+        "Composite point-ray | {contact} | read-only, no damage or penetration simulation"
+    ))
+}
+
+pub fn verify_convex(scene: &InspectionGeometry) -> Result<(), String> {
+    let started = Instant::now();
+    for (index, fragment) in scene.fragments().iter().enumerate() {
+        let origin = fragment.origin();
+        let base = [origin.x, origin.y, origin.z].map(|v| i64::from(v) * 1_000_000);
+        let count = i64::try_from(fragment.vertices().len()).map_err(|e| e.to_string())?;
+        let centre: [i64; 3] = std::array::from_fn(|axis| {
+            base[axis]
+                + fragment
+                    .vertices()
+                    .iter()
+                    .map(|v| i64::from(v[axis]) * 1_000_000)
+                    .sum::<i64>()
+                    / (256 * count)
+        });
+        let top = fragment.bounds().maximum_scaled()[1] / 256 + 250_000;
+        let ray = FixedRay::new(
+            FixedMicrometers3 {
+                x: centre[0],
+                y: top,
+                z: centre[2],
+            },
+            [0, -1, 0],
+            4_000_000,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut convex =
+            ConvexQueryBudget::new(ConvexQueryLimits::default()).map_err(|e| e.to_string())?;
+        let trace = scene
+            .trace(&ray, TraceLimits::default(), &mut convex)
+            .map_err(|e| e.to_string())?;
+        if !trace
+            .chords
+            .iter()
+            .any(|hit| hit.owner == SceneOwner::Fragment(index))
+        {
+            return Err(format!("composite trace omitted rendered fragment {index}"));
+        }
+        let inner = PhysicalBox::from_micrometers(centre, centre.map(|v| v + 1))
+            .map_err(|e| e.to_string())?;
+        let mut world = QueryBudget::new(QueryLimits::default()).map_err(|e| e.to_string())?;
+        let mut convex =
+            ConvexQueryBudget::new(ConvexQueryLimits::default()).map_err(|e| e.to_string())?;
+        if !scene
+            .overlaps(inner, &mut world, &mut convex)
+            .map_err(|e| e.to_string())?
+        {
+            return Err(format!(
+                "composite overlap omitted rendered fragment {index}"
+            ));
+        }
+        let start = PhysicalBox::from_micrometers(
+            [centre[0], top, centre[2]],
+            [centre[0] + 1, top + 1, centre[2] + 1],
+        )
+        .map_err(|e| e.to_string())?;
+        let mut world = QueryBudget::new(QueryLimits::default()).map_err(|e| e.to_string())?;
+        let mut convex =
+            ConvexQueryBudget::new(ConvexQueryLimits::default()).map_err(|e| e.to_string())?;
+        let sweep = scene
+            .sweep_axis(start, 1, -4_000_000, &mut world, &mut convex)
+            .map_err(|e| e.to_string())?;
+        if !sweep.contact || sweep.displacement_um <= -4_000_000 {
+            return Err(format!("composite sweep omitted rendered fragment {index}"));
+        }
+    }
+    println!(
+        "FINE_CONVEX_PROBE fragments={} cpu_ms={:.6} (same rendered source; point-rays, overlaps, translation sweeps)",
+        scene.fragments().len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
 }
 
 #[cfg(test)]

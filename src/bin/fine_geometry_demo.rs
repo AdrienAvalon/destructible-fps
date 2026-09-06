@@ -1,11 +1,13 @@
 //! Actual Vulkan fine-geometry inspection. Authored stages, not fine multiplayer gameplay.
 #![allow(clippy::cast_precision_loss)]
 use destructible_fps::{
+    convex::{InspectionGeometry, fixture::industrial_scene},
+    mesh::CpuBodyMesh,
     mesh::fine::{
         FineMeshLimits, MAX_FINE_MESH_CHUNKS,
         finishes::SurfaceFinishes,
         fixture::{
-            STAGE_NAMES, industrial_patch_positions, industrial_reference_world, inspection_world,
+            STAGE_NAMES, industrial_oblique_base, industrial_patch_positions, inspection_world,
         },
         hybrid_dirty_chunks,
     },
@@ -15,6 +17,8 @@ use destructible_fps::{
     world::geometry::RefinedWorld,
 };
 
+#[path = "fine_geometry_demo/fixed.rs"]
+mod fixed;
 #[path = "fine_geometry_demo/probe.rs"]
 mod probe;
 #[path = "fine_geometry_demo/stream.rs"]
@@ -50,6 +54,8 @@ struct Scene {
     renderer: Renderer,
     worker: MeshScheduler,
     worlds: Vec<Arc<RefinedWorld>>,
+    geometry: Vec<InspectionGeometry>,
+    fixed_meshes: Option<Vec<CpuBodyMesh>>,
     finishes: Option<Arc<SurfaceFinishes>>,
     stream: Stream,
     kind: WorldKind,
@@ -70,6 +76,8 @@ impl Scene {
     fn new(
         window: Arc<Window>,
         worlds: Vec<Arc<RefinedWorld>>,
+        geometry: Vec<InspectionGeometry>,
+        fixed_meshes: Vec<CpuBodyMesh>,
         kind: WorldKind,
         smoke: Option<Duration>,
         view: View,
@@ -91,7 +99,7 @@ impl Scene {
         let fingerprints = std::array::from_fn(|i| worlds[i].fingerprint());
         let finishes = if kind == WorldKind::Industrial {
             Some(Arc::new(
-                destructible_fps::mesh::fine::fixture::reference_surface_finishes(&worlds[0])
+                destructible_fps::mesh::fine::fixture::oblique_surface_finishes(&worlds[0])
                     .map_err(|e| e.to_string())?,
             ))
         } else {
@@ -101,23 +109,30 @@ impl Scene {
         println!(
             "FINE_FINISHES fingerprint={finishes_fingerprint:032x} (render-only, source integrity unchanged)"
         );
+        let mut stream = Stream::new(
+            chunks,
+            dirty,
+            fingerprints,
+            if kind == WorldKind::Industrial {
+                1
+            } else {
+                MAX_FINE_MESH_CHUNKS
+            },
+            finishes_fingerprint,
+        )?;
+        stream.reserve_fixed_geometry(
+            fixed_meshes.iter().map(|m| m.mesh.vertices.len()).sum(),
+            fixed_meshes.iter().map(|m| m.mesh.indices.len()).sum(),
+        )?;
         Ok(Self {
             renderer: pollster::block_on(Renderer::new(Arc::clone(&window)))?,
             window,
             worker: MeshScheduler::new(),
             worlds,
+            geometry,
+            fixed_meshes: Some(fixed_meshes),
             finishes,
-            stream: Stream::new(
-                chunks,
-                dirty,
-                fingerprints,
-                if kind == WorldKind::Industrial {
-                    1
-                } else {
-                    MAX_FINE_MESH_CHUNKS
-                },
-                finishes_fingerprint,
-            )?,
+            stream,
             kind,
             desired: 0,
             presented: [0; 4],
@@ -144,6 +159,15 @@ impl Scene {
             if let Some((stage, report, elapsed)) = delivery.complete {
                 // Probe the same immutable snapshot whose complete meshes were just installed.
                 probe::verify_stage(self.kind, &self.worlds[stage], stage)?;
+                if let Some(meshes) = self.fixed_meshes.take() {
+                    self.renderer.upload_body_meshes(meshes)?;
+                }
+                probe::verify_convex(&self.geometry[stage])?;
+                println!(
+                    "FINE_COMPOSITE stage={stage} fingerprint={:032x} fragments={} (authored static, not simulated bodies)",
+                    self.geometry[stage].fingerprint(),
+                    self.geometry[stage].fragments().len()
+                );
                 self.probed[stage] = true;
                 let world_fingerprint = self.worlds[stage].fingerprint();
                 println!(
@@ -250,6 +274,8 @@ impl Scene {
 struct App {
     scene: Option<Scene>,
     worlds: Option<Vec<Arc<RefinedWorld>>>,
+    geometry: Option<Vec<InspectionGeometry>>,
+    fixed_meshes: Option<Vec<CpuBodyMesh>>,
     smoke: Option<Duration>,
     kind: WorldKind,
     view: View,
@@ -271,6 +297,8 @@ impl ApplicationHandler for App {
                 Scene::new(
                     Arc::new(w),
                     self.worlds.take().ok_or("missing inspection worlds")?,
+                    self.geometry.take().ok_or("missing composite geometry")?,
+                    self.fixed_meshes.take().ok_or("missing fixed meshes")?,
                     self.kind,
                     self.smoke,
                     self.view,
@@ -320,7 +348,7 @@ impl ApplicationHandler for App {
                         KeyCode::KeyP if !event.repeat && s.stream.idle() => {
                             if let Some(stage) = s.stream.displayed {
                                 let (origin, direction) = s.camera();
-                                result = probe::camera(&s.worlds[stage], origin, direction)
+                                result = probe::camera(&s.geometry[stage], origin, direction)
                                     .map(|summary| s.window.set_title(&summary));
                             }
                         }
@@ -389,14 +417,41 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|i| {
             match kind {
                 WorldKind::Inspection => inspection_world(i),
-                WorldKind::Industrial => industrial_reference_world(i),
+                WorldKind::Industrial => industrial_oblique_base(i),
             }
             .map(Arc::new)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let geometry = worlds
+        .iter()
+        .map(|world| {
+            if kind == WorldKind::Industrial {
+                industrial_scene(Arc::clone(world))
+            } else {
+                InspectionGeometry::new(Arc::clone(world), Vec::new())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let started = Instant::now();
+    let (geometry, fixed_meshes) = fixed::PreparedGeometry::new(&worlds, geometry)?.into_parts();
+    println!(
+        "FINE_CONVEX_MESH cpu_ms={:.6} fragments={} vertices={} indices={}",
+        started.elapsed().as_secs_f64() * 1000.0,
+        fixed_meshes.len(),
+        fixed_meshes
+            .iter()
+            .map(|m| m.mesh.vertices.len())
+            .sum::<usize>(),
+        fixed_meshes
+            .iter()
+            .map(|m| m.mesh.indices.len())
+            .sum::<usize>()
+    );
     let mut app = App {
         scene: None,
         worlds: Some(worlds),
+        geometry: Some(geometry),
+        fixed_meshes: Some(fixed_meshes),
         smoke,
         kind,
         view,

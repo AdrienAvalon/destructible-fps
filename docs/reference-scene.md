@@ -1,10 +1,14 @@
 # Ruined-factory reference scene
 
+Historical receipt for `cedb136`. The native industrial viewer now uses the
+[oblique inspection scene](convex-inspection.md); `industrial_reference_world` remains the unchanged
+regression fixture documented below. These measurements and images belong to that earlier build.
+
 This is an authored native geometry foundation, **not photorealistic visual acceptance** and not
 fine weapon, structural-collapse or multiplayer integration. The full game goal remains open.
 
-`fine-geometry-demo --world industrial --view approach|wide|fracture` and the corresponding mesh
-benchmark now use `industrial_reference_world`. The older `industrial_inspection_world` is kept
+At that historical revision, `fine-geometry-demo --world industrial --view approach|wide|fracture`
+and the corresponding mesh benchmark used `industrial_reference_world`. The older `industrial_inspection_world` is kept
 unchanged as a frozen material/geometry regression fixture. Neither a generated concept nor a
 Blender-only asset demonstration counts as output of this scene.
 

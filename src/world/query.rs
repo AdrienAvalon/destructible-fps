@@ -264,7 +264,7 @@ pub fn sweep_axis(
     })
 }
 
-fn visit_solids(
+pub(crate) fn visit_solids(
     world: &impl StaticGeometry,
     bounds: PhysicalBox,
     budget: &mut QueryBudget,

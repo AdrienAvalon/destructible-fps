@@ -21,9 +21,9 @@ clients may predict reversible motion and cosmetic debris only.
 
 ## Immediate priority — photorealistic renderer and industrial map
 
-User direction: finish the in-flight Claude-helper repair and validate the current exact material
-probe, then prioritize **visible native rendering and map quality**, ahead of the next large fine
-weapon/authority expansion. The full physics/destruction/multiplayer contract remains intact.
+Current user direction: prioritize **visible native rendering and map quality**, ahead of the next
+large fine weapon/authority expansion. The earlier Claude-helper/probe task is historical, not a
+prerequisite to reopen. The full physics/destruction/multiplayer contract remains intact.
 Do not turn completion of additional infrastructure primitives into a prerequisite for showing
 meaningful visual progress. The point-ray probe is an inspection tool, not completed fine combat.
 
@@ -58,9 +58,13 @@ Keep the existing prototype as a technical baseline, not as visual acceptance.
 The [ruined-factory reference scene](reference-scene.md) now has supported broken storeys, grounded
 collapse masses and an irregular physical soil/paving edge, separately from the frozen legacy
 fixture. Initial native inspection still fails the visual gate: the rubble reads as stepped ramps.
-The next geometry proof must establish an oblique broken slab with coherent rendering and physical
-queries, then asymmetric multi-scale accumulation. Do not polish the axis-aligned steps indefinitely
-or substitute a shader-normal adjustment for a real silhouette change.
+The [oblique geometry increment](convex-inspection.md) introduces closed quantized slabs sharing
+their source with rendered triangles, material rays and translating box contacts. The old stepped
+apron is absent from this native scene, while its regression fixture is retained. This remains a
+technical geometry milestone, not photorealistic acceptance: sparse authored pieces on congruent
+supports still read as placed props. Next prioritize coherent multi-scale rubble, genuinely
+irregular contacts/supports and surface detail in the complete reference composition, without
+hiding coarse colliders or adding indestructible decorative gameplay cover.
 
 The next scene must combine layered industrial architecture (slabs, columns, reveals and broken
 material thickness), supported multi-scale rubble, coherent terrain transitions and vegetation,

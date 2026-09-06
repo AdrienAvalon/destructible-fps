@@ -19,6 +19,16 @@ pub struct SegmentParameter {
     denominator: i64,
 }
 impl SegmentParameter {
+    /// Internal bridge for other exact geometry queries, after clipping to the submitted segment.
+    pub(crate) const fn bounded(numerator: i64, denominator: i64) -> Option<Self> {
+        if denominator <= 0 || numerator < 0 || numerator > denominator {
+            return None;
+        }
+        Some(Self {
+            numerator,
+            denominator,
+        })
+    }
     const ZERO: Self = Self {
         numerator: 0,
         denominator: 1,

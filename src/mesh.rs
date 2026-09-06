@@ -571,7 +571,7 @@ fn surface_crossing_t(voxel: Voxel) -> f32 {
     ((density - 0.5) / density.max(f32::EPSILON)).clamp(0.08, 0.5)
 }
 
-fn voxel_damage(voxel: Voxel) -> f32 {
+pub(crate) fn voxel_damage(voxel: Voxel) -> f32 {
     1.0 - f32::from(voxel.integrity) / f32::from(u8::MAX)
 }
 
@@ -780,7 +780,7 @@ const fn add(left: IVec3, right: IVec3) -> IVec3 {
     )
 }
 
-const fn material_surface(material: Material) -> [f32; 5] {
+pub(crate) const fn material_surface(material: Material) -> [f32; 5] {
     match material {
         Material::Air => [0.0, 0.0, 0.0, 1.0, 0.0],
         Material::Soil => [0.22, 0.095, 0.035, 0.96, 0.0],

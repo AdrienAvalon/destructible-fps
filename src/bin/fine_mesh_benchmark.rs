@@ -4,9 +4,9 @@ use destructible_fps::{
     mesh::fine::{
         FineMeshBatch, FineMeshLimits, FineMeshReport,
         finishes::SurfaceFinishes,
-        fixture::reference_surface_finishes,
+        fixture::oblique_surface_finishes,
         fixture::{
-            STAGE_NAMES, industrial_patch_positions, industrial_reference_world, inspection_world,
+            STAGE_NAMES, industrial_oblique_base, industrial_patch_positions, inspection_world,
         },
         hybrid_dirty_chunks, mesh_fine_chunks, mesh_hybrid_chunks_with_finishes,
     },
@@ -38,14 +38,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !(1..=1000).contains(&iterations) {
         return Err("iterations must be1..=1000".into());
     }
+    if industrial {
+        benchmark_convex(iterations)?;
+    }
     for (stage, name) in STAGE_NAMES.iter().enumerate() {
         let world = if industrial {
-            industrial_reference_world(stage)?
+            industrial_oblique_base(stage)?
         } else {
             inspection_world(stage)?
         };
         let finishes = if industrial {
-            Some(reference_surface_finishes(&world)?)
+            Some(oblique_surface_finishes(&world)?)
         } else {
             None
         };
@@ -99,6 +102,34 @@ fn main() -> Result<(), Box<dyn Error>> {
             samples.summary().ok_or("missing measurements")?
         );
     }
+    Ok(())
+}
+
+fn benchmark_convex(iterations: usize) -> Result<(), Box<dyn Error>> {
+    let fragments = destructible_fps::convex::fixture::industrial_fragments()?;
+    let mut samples = SampleWindow::new(iterations);
+    for iteration in 0..iterations {
+        let start = Instant::now();
+        let meshes: Vec<_> = fragments
+            .iter()
+            .enumerate()
+            .map(|(index, fragment)| fragment.body_mesh(index as u64 + 1))
+            .collect();
+        samples.record_ms(start.elapsed().as_secs_f64() * 1000.0);
+        if iteration == 0 {
+            println!(
+                "FINE_CONVEX_MESH fragments={} vertices={} indices={} (fixed geometry, separate from voxel jobs)",
+                fragments.len(),
+                meshes.iter().map(|m| m.mesh.vertices.len()).sum::<usize>(),
+                meshes.iter().map(|m| m.mesh.indices.len()).sum::<usize>()
+            );
+        }
+        black_box(meshes);
+    }
+    println!(
+        "FINE_CONVEX_MESH_TIMING {:?}",
+        samples.summary().ok_or("missing convex measurements")?
+    );
     Ok(())
 }
 

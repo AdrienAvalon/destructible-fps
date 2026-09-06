@@ -7,7 +7,9 @@ use glam::{Mat4, Vec3, Vec4};
 #[path = "material_projection/soil.rs"]
 mod soil;
 
-const OUTPUT_BYTES: u64 = (43 + 512 * 8 + 128 * 5 + soil::SAMPLES * soil::STRIDE + 40 * 4) * 16;
+const CUT_SCALE_SAMPLES: u64 = 128;
+const OUTPUT_BYTES: u64 =
+    (43 + 512 * 8 + 128 * 5 + soil::SAMPLES * soil::STRIDE + 40 * 4 + CUT_SCALE_SAMPLES) * 16;
 const WORLD_SHADER: &str = concat!(
     include_str!("../src/shaders/color.wgsl"),
     include_str!("../src/shaders/world.wgsl")
@@ -61,7 +63,8 @@ fn validate_material_projection() {
         let p = vec3<f32>(f32(i32(index) - 64) * 16.0, 1.4, f32(index % 9u) * 0.3);
         let n = normalize(vec3<f32>(0.1, 1.0, -0.2));
         let near = sample_cut_core(material, p, n, 0.001);
-        let far = sample_cut_core(material, p, n, 1.0);
+        // A 2 cm pixel must already resolve only the material mean, not large blotches.
+        let far = sample_cut_core(material, p, n, 0.02);
         let left = sample_cut_core(material, p - vec3<f32>(0.0001, 0.0, 0.0), n, 0.001);
         let right = sample_cut_core(material, p + vec3<f32>(0.0001, 0.0, 0.0), n, 0.001);
         let offset = 4139u + index * 5u;
@@ -73,6 +76,15 @@ fn validate_material_projection() {
         results[offset + 4u] = select(vec4<f32>(0.0), vec4<f32>(1.0), vec4<bool>(
             explicit_cut_core(marker, 4u), explicit_cut_core(marker, 5u),
             explicit_cut_core(marker, 1u), explicit_cut_core(marker, 6u)));
+        // Physical metre offsets probe the production function without reproducing its noise.
+        // At 2 mm footprint the finer grain is filtered, leaving the aggregate's spatial scale.
+        let probe = vec3<f32>(f32(index / 2u) * 0.037 - 1.17, 1.4, f32(index % 9u) * 0.013);
+        let center = sample_cut_core(material, probe, n, 0.002);
+        let centimetre = sample_cut_core(material, probe + vec3<f32>(0.01, 0.0, 0.0), n, 0.002);
+        let metre = sample_cut_core(material, probe + vec3<f32>(1.0, 0.0, 0.0), n, 0.002);
+        let submillimetre = sample_cut_core(material, probe + vec3<f32>(0.0001, 0.0, 0.0), n, 0.002);
+        results[arrayLength(&results) - 128u + index] = vec4<f32>(
+            center.albedo.r, centimetre.albedo.r, metre.albedo.r, submillimetre.albedo.r);
     }
     for (var index = 0u; index < 512u; index = index + 1u) {
         let materials = array<u32, 8>(1u, 1u, 4u, 5u, 2u, 3u, 6u, 7u);
@@ -258,7 +270,8 @@ fn production_shader_preserves_signed_projection_and_transformed_normals() {
     validate_environment(&values);
     validate_weathering(&values);
     validate_cut_cores(&values);
-    soil::validate(&values);
+    // Soil owns the original fixed-layout prefix; the appended cut-scale probes are separate.
+    soil::validate(&values[..values.len() - usize::try_from(CUT_SCALE_SAMPLES).unwrap()]);
     let normals = [
         Vec3::X,
         Vec3::NEG_X,
@@ -297,7 +310,7 @@ fn production_shader_preserves_signed_projection_and_transformed_normals() {
 }
 
 fn validate_cut_cores(values: &[[f32; 4]]) {
-    let mut range = (f32::MAX, f32::MIN);
+    let mut ranges = [(f32::MAX, f32::MIN); 2];
     for index in 0..128 {
         let offset = 4139 + index * 5;
         let near = values[offset];
@@ -306,24 +319,56 @@ fn validate_cut_cores(values: &[[f32; 4]]) {
             near.iter()
                 .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
         );
-        assert!((0.87..=0.97).contains(&near[3]));
+        assert!((0.91..=0.97).contains(&near[3]));
         assert_vector(values[offset + 2], Vec4::ZERO);
         assert!(
             values[offset + 3].iter().all(|v| v.abs() < 0.01),
             "core seam {index}"
         );
         let expected = if index % 2 == 0 {
-            Vec4::new(0.2325, 0.08875, 0.03975, 0.92)
+            Vec4::new(0.255, 0.155, 0.105, 0.94)
         } else {
-            Vec4::new(0.245, 0.2325, 0.1975, 0.92)
+            Vec4::new(0.265, 0.255, 0.23, 0.94)
         };
         assert_vector(far, expected);
         let selected = f32::from(index % 5 == 0);
         assert_vector(values[offset + 4], Vec4::new(selected, selected, 0.0, 0.0));
+        let range = &mut ranges[index % 2];
         range.0 = range.0.min(near[0]);
         range.1 = range.1.max(near[0]);
     }
-    assert!(range.1 - range.0 > 0.05);
+    for range in ranges {
+        assert!(
+            (0.015..=0.085).contains(&(range.1 - range.0)),
+            "cut core must retain bounded mineral contrast: {range:?}"
+        );
+    }
+    validate_cut_scale(values);
+}
+
+fn validate_cut_scale(values: &[[f32; 4]]) {
+    let start = values.len() - usize::try_from(CUT_SCALE_SAMPLES).unwrap();
+    let mut squared_differences = [[0.0_f32; 3]; 2];
+    for (index, probe) in values[start..].iter().enumerate() {
+        assert!(probe.iter().all(|value| value.is_finite()));
+        for (sum, offset) in squared_differences[index % 2].iter_mut().zip(&probe[1..]) {
+            *sum += (probe[0] - offset).powi(2);
+        }
+    }
+    for [centimetre, metre, submillimetre] in squared_differences {
+        assert!(metre > 0.001, "cut aggregate must not be flat");
+        assert!(
+            (0.45..=1.8).contains(&(centimetre / metre)),
+            "1 cm should decorrelate aggregate almost as much as 1 m: {centimetre}/{metre}"
+        );
+        assert!(
+            submillimetre < centimetre * 0.005,
+            "100 micrometres should remain smooth relative to 1 cm: {submillimetre}/{centimetre}"
+        );
+        println!(
+            "cut aggregate squared differences: 1 cm={centimetre}, 1 m={metre}, 100 um={submillimetre}"
+        );
+    }
 }
 
 fn validate_weathering(values: &[[f32; 4]]) {

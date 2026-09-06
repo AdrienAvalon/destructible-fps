@@ -6,6 +6,7 @@
 pub mod ballistics;
 pub mod certificate_attestation;
 pub mod character;
+pub mod convex;
 pub mod deployment_policy;
 pub mod destruction;
 pub mod elasticity;

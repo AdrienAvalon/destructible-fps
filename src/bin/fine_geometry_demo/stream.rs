@@ -84,6 +84,7 @@ pub struct Stream {
     candidate: Option<Candidate>,
     pending: Option<Pending>,
     resident: BTreeMap<IVec3, (usize, usize)>,
+    fixed_geometry: (usize, usize),
 }
 pub struct Delivery {
     pub meshes: Vec<(IVec3, CpuMesh)>,
@@ -118,7 +119,25 @@ impl Stream {
             candidate: None,
             pending: None,
             resident: BTreeMap::new(),
+            fixed_geometry: (0, 0),
         })
+    }
+
+    pub fn reserve_fixed_geometry(
+        &mut self,
+        vertices: usize,
+        indices: usize,
+    ) -> Result<(), String> {
+        if self.pending.is_some()
+            || !self.resident.is_empty()
+            || self.fixed_geometry != (0, 0)
+            || vertices > MAX_SCENE_VERTICES
+            || indices > MAX_SCENE_INDICES
+        {
+            return Err("invalid fixed geometry reservation".into());
+        }
+        self.fixed_geometry = (vertices, indices);
+        Ok(())
     }
 
     pub const fn idle(&self) -> bool {
@@ -275,7 +294,7 @@ impl Stream {
         }
         let (total_v, total_i) = counts
             .values()
-            .fold((0_usize, 0_usize), |(v, i), (nv, ni)| (v + nv, i + ni));
+            .fold(self.fixed_geometry, |(v, i), (nv, ni)| (v + nv, i + ni));
         if counts.len() > MAX_SCENE_CHUNKS
             || total_v > MAX_SCENE_VERTICES
             || total_i > MAX_SCENE_INDICES
@@ -451,6 +470,23 @@ mod tests {
         assert!(delivery.meshes.is_empty());
         assert_eq!(s.displayed, Some(0));
         assert_eq!(s.request(2).unwrap().unwrap().0, 2);
+    }
+
+    #[test]
+    fn fixed_convex_reservation_participates_in_the_same_resident_cap() {
+        let mut s = stream();
+        assert!(s.reserve_fixed_geometry(MAX_SCENE_VERTICES + 1, 0).is_err());
+        s.reserve_fixed_geometry(MAX_SCENE_VERTICES - 1, 0).unwrap();
+        assert!(s.reserve_fixed_geometry(1, 0).is_err());
+        let (_, chunks) = s.request(0).unwrap().unwrap();
+        assert!(s.reserve_fixed_geometry(1, 0).is_err());
+        let before = s.resident.clone();
+        assert_eq!(
+            s.complete(0, result(0, chunks, 2)).err().as_deref(),
+            Some("inspection resident output budget")
+        );
+        assert_eq!(s.resident, before);
+        assert_eq!(s.displayed, None);
     }
 
     #[test]

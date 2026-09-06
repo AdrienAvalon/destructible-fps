@@ -408,17 +408,19 @@ fn explicit_cut_core(marker: f32, material: u32) -> bool {
 fn sample_cut_core(material: u32, position: vec3<f32>, normal: vec3<f32>, footprint: f32) -> SurfaceSample {
     let frame = projection_frame(dominant_axis(normal), normal);
     let uv = projection_uv(position, frame);
-    let coarse = weather_noise(uv * 9.0 + vec2<f32>(17.2, -6.3));
-    let grain_weight = 1.0 - smoothstep(0.002, 0.02, footprint);
-    let grain = (weather_noise(uv * 120.0) - 0.5) * grain_weight;
-    let aggregate = mix(0.25, smoothstep(0.48, 0.78, coarse), 1.0 - smoothstep(0.04, 0.25, footprint));
+    // UVs are metres: roughly 1 cm aggregate and 3 mm grain, filtered to their mean
+    // before either becomes unresolved. Keep mineral contrast below the exterior scan.
+    let aggregate_weight = 1.0 - smoothstep(0.002, 0.008, footprint);
+    let aggregate = (weather_noise(uv * 96.0 + vec2<f32>(17.2, -6.3)) - 0.5) * aggregate_weight;
+    let grain_weight = 1.0 - smoothstep(0.0004, 0.0018, footprint);
+    let grain = (weather_noise(uv * 320.0) - 0.5) * grain_weight;
     var surface: SurfaceSample;
-    surface.albedo = mix(vec3<f32>(0.19, 0.065, 0.028), vec3<f32>(0.36, 0.16, 0.075), aggregate);
+    surface.albedo = vec3<f32>(0.255, 0.155, 0.105) + aggregate * vec3<f32>(0.07, 0.05, 0.035);
     if material == 5u {
-        surface.albedo = mix(vec3<f32>(0.20, 0.19, 0.16), vec3<f32>(0.38, 0.36, 0.31), aggregate);
+        surface.albedo = vec3<f32>(0.265, 0.255, 0.23) + aggregate * vec3<f32>(0.055, 0.05, 0.04);
     }
-    surface.albedo = surface.albedo * (1.0 + grain * 0.22);
-    surface.roughness = 0.92 + grain * 0.08;
+    surface.albedo = surface.albedo * (1.0 + grain * 0.06);
+    surface.roughness = 0.94 + grain * 0.04;
     surface.metallic = 0.0;
     // Do not inherit the exterior scan's mortar grooves or paint fictitious steel reinforcement.
     surface.local_normal = normal;

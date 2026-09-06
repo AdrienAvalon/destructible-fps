@@ -58,6 +58,14 @@ pub fn industrial_inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn
 /// # Errors
 /// Refuses invalid stages, source conflicts or exceeded authoring/geometry budgets.
 pub fn industrial_reference_world(stage: usize) -> Result<RefinedWorld, Box<dyn Error>> {
+    collapse_apron::install(&industrial_oblique_base(stage)?)
+}
+
+/// Exact voxel portion of the oblique reference scene. The old stepped apron is absent,
+/// not hidden under unrelated smooth meshes. Add convex solids through `InspectionGeometry`.
+/// # Errors
+/// Refuses invalid stages or any bounded source construction failure.
+pub fn industrial_oblique_base(stage: usize) -> Result<RefinedWorld, Box<dyn Error>> {
     let world = install_wall(
         &crate::WorldPreset::Industrial.build(),
         stage,
@@ -69,8 +77,22 @@ pub fn industrial_reference_world(stage: usize) -> Result<RefinedWorld, Box<dyn 
     let world = hardstand::install(&world)?;
     let world = bay::install(&world, stage)?;
     let world = hardstand::reclaim(&world)?;
-    let world = cross_section::install(&world)?;
-    collapse_apron::install(&world)
+    cross_section::install(&world)
+}
+
+/// Cut finishes for the voxel portion of the new convex scene; fragments own their face finishes.
+/// # Errors
+/// Refuses stale or oversized finish sources.
+pub fn oblique_surface_finishes(
+    world: &RefinedWorld,
+) -> Result<super::finishes::SurfaceFinishes, super::FineMeshError> {
+    use super::finishes::{FinishPolicy, SurfaceFinishes};
+    let mut policies: Vec<_> = bay::cut_top_cells(world)
+        .into_iter()
+        .map(|cell| (cell, FinishPolicy::CutTop))
+        .collect();
+    policies.sort_unstable_by_key(|entry| entry.0);
+    SurfaceFinishes::with_policies(world, &policies)
 }
 
 /// Immutable cut appearance for the reference scene, independent of physical material IDs.

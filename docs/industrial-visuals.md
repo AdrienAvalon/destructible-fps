@@ -56,6 +56,11 @@ and reproduced a floating-marker raster defect missed by the earlier compute-onl
 The correction preserves a flat cut classification while retaining the continuous wall-depth
 gradient. This does not remove the remaining stepped geometry or close the photorealistic gate.
 
+The [oblique inspection revision](convex-inspection.md) replaces that native apron with true closed
+convex solids and validates their shared render/ray/contact geometry. It removes those stair-step
+slabs but does not close the visual gate: the first sparse arrangement and its supported wedges
+remain too regular. Assess complete native views and movement, not an isolated geometric proof.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after

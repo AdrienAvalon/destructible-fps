@@ -1,6 +1,24 @@
 use super::{LocalBox, RefinedVolume, VOLUME_EDGE, VolumeError, VolumeLeaf, WorkBudget, group_end};
 
 impl RefinedVolume {
+    // Shared physical-query consumer. Visits include air and group work. A visitor can observe
+    // a prefix before exhaustion, so it must stage results locally and discard them on error.
+    pub(crate) fn visit_solid_bounded(
+        &self,
+        bounds: LocalBox,
+        maximum_visits: usize,
+        mut visit: impl FnMut(VolumeLeaf) -> bool,
+    ) -> Result<usize, VolumeError> {
+        if !(1..=3 * super::MAX_VOLUME_LEAVES).contains(&maximum_visits) {
+            return Err(VolumeError::InvalidLimits);
+        }
+        let mut work = WorkBudget::new(maximum_visits);
+        self.visit_overlaps(bounds, &mut work, |leaf, _| {
+            Ok(!leaf.voxel().is_solid() || visit(leaf))
+        })?;
+        Ok(work.visited)
+    }
+
     /// Exact solid overlap with interval skipping, early exit and a caller-visible budget.
     /// # Errors
     /// Rejects zero/excessive work budgets or exhaustion; never converts exhaustion into empty

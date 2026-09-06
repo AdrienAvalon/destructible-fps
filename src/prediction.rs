@@ -1,8 +1,11 @@
 //! Bounded local character prediction and authoritative reconciliation.
 
+#[cfg(test)]
+use crate::World;
 use crate::{
     AuthoritativePlayer, AuthoritativePlayerState, FixedMicrometers3, PlayerInputCommand,
-    PlayerInputError, PlayerStateCodecError, PlayerStepReport, ReplicatedPlayerState, World,
+    PlayerInputError, PlayerStateCodecError, PlayerStepReport, ReplicatedPlayerState,
+    world::query::{GeometryQueryError, StaticGeometry},
 };
 use core::fmt;
 use std::collections::VecDeque;
@@ -29,6 +32,7 @@ pub struct PredictionReconcileReport {
 pub enum ClientPredictionError {
     Input(PlayerInputError),
     State(PlayerStateCodecError),
+    Geometry(GeometryQueryError),
     InvalidServerTick,
     InputSequenceExhausted,
     NonSequentialInput { expected: u64, received: u64 },
@@ -44,6 +48,7 @@ impl fmt::Display for ClientPredictionError {
         match self {
             Self::Input(error) => error.fmt(formatter),
             Self::State(error) => error.fmt(formatter),
+            Self::Geometry(error) => error.fmt(formatter),
             Self::InvalidServerTick => write!(formatter, "prediction server tick must be non-zero"),
             Self::InputSequenceExhausted => write!(formatter, "client input sequence exhausted"),
             Self::NonSequentialInput { expected, received } => write!(
@@ -97,6 +102,12 @@ impl From<PlayerStateCodecError> for ClientPredictionError {
     }
 }
 
+impl From<GeometryQueryError> for ClientPredictionError {
+    fn from(value: GeometryQueryError) -> Self {
+        Self::Geometry(value)
+    }
+}
+
 /// Local controlled-player state with a fixed two-second unacknowledged-input ceiling at 60 Hz.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientPrediction {
@@ -143,7 +154,7 @@ impl ClientPrediction {
     pub fn predict(
         &mut self,
         input: PlayerInputCommand,
-        world: &World,
+        world: &impl StaticGeometry,
     ) -> Result<ClientPredictionStep, ClientPredictionError> {
         let expected = self
             .last_produced_input
@@ -160,7 +171,7 @@ impl ClientPrediction {
         }
         let mut player = self.player;
         player.accept_input(input)?;
-        let simulation = player.step(world);
+        let simulation = player.step(world)?;
         let state = player.state();
         self.player = player;
         self.pending_inputs.push_back(input);
@@ -183,7 +194,7 @@ impl ClientPrediction {
         &mut self,
         server_tick: u64,
         authoritative: ReplicatedPlayerState,
-        world: &World,
+        world: &impl StaticGeometry,
     ) -> Result<PredictionReconcileReport, ClientPredictionError> {
         authoritative.validate()?;
         if authoritative.session_id != self.session_id {
@@ -220,8 +231,11 @@ impl ClientPrediction {
             .take_while(|input| input.input_sequence <= authoritative.last_input_sequence)
             .count();
         for input in self.pending_inputs.iter().skip(acknowledged_inputs) {
+            // Keep the authority's identical per-step query allowance. The bounded128-input
+            // history caps aggregate work at128 * QueryLimits::default(), not an underfunded
+            // shared allowance which could refuse a sequence of otherwise valid server ticks.
             player.accept_input(*input)?;
-            let _step = player.step(world);
+            let _step = player.step(world)?;
         }
         let state = player.state();
         let correction_um = FixedMicrometers3 {
@@ -314,7 +328,7 @@ mod tests {
                 ..PlayerInputCommand::default()
             };
             server.accept_input(input).expect("server input");
-            let _server_step = server.step(&world);
+            let _server_step = server.step(&world).unwrap();
             client.predict(input, &world).expect("client prediction");
             if input_sequence == 3 {
                 state_at_three = server.state();
@@ -347,7 +361,7 @@ mod tests {
             prediction.predict(input, &original).unwrap();
             if input_sequence <= 3 {
                 server.accept_input(input).unwrap();
-                let _ = server.step(&original);
+                let _ = server.step(&original).unwrap();
             }
         }
         let report = prediction
@@ -364,7 +378,7 @@ mod tests {
                 ..PlayerInputCommand::default()
             };
             server.accept_input(input).unwrap();
-            let _ = server.step(&replacement);
+            let _ = server.step(&replacement).unwrap();
             if input_sequence == 7 {
                 prediction.predict(input, &replacement).unwrap();
             }

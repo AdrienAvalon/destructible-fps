@@ -5,6 +5,10 @@ bounded static-geometry transaction/checkpoint component. It advances DEST-01/02
 it does **not** activate fine geometry in the playable server, physical consumers, renderer or
 live network protocol. The current demo still has metre-cell destruction and is not photorealistic.
 
+Subsequent integration: [`static-collision.md`](static-collision.md) now connects shared exact
+queries to the real authoritative character and client prediction. Fine body/structural consumers,
+the full authority, live transport and rendering remain behind the typed migration boundary.
+
 ## A compile-time migration boundary
 
 `WorldStorage<G>` contains the existing chunk map, immutable chunk references, dense two-byte
@@ -116,10 +120,12 @@ work, physics, rendering and durable storage. This is not a 60-Hz combat accepta
 Cells are the first occupied coordinates in canonical order, including ground; these clustered,
 simple bores do not represent dispersed worst-case edits or maximum-leaf pages.
 
-The next gate is a shared world-space exact query/collision path, then fine topology/body mass
-and inertia, and finally authoritative damage plus existing snapshot/delta transport migration
-and asynchronous rendering. Until those agree, keep the compile-time boundary and do not pass
-partial geometry through coarse material/occupancy proxies.
+The shared world-space overlap/axis-sweep and character path is now documented in
+[`static-collision.md`](static-collision.md). Remaining gates include fine topology/body mass and
+inertia, other collision/cover consumers, bounded replay scheduling and fine-world liveness, then
+authoritative damage plus existing snapshot/delta transport migration and asynchronous rendering.
+Until those agree, keep the compile-time boundary and do not pass partial geometry through coarse
+material/occupancy proxies.
 
 ## Contradictory review disposition
 

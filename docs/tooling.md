@@ -170,6 +170,11 @@ client must be reviewed, version-compatible and disabled in distributed/default 
 
 ## CPU profiling without loosening host protections
 
+`character-benchmark --ticks 10000 --fine` exercises the actual fixed-step character solver on
+16 maximum-leaf floor pages, reporting bounded geometry work and a final movement checksum to
+compare with uniform mode. It uses the existing executable and no new dependency or profiler
+privilege. See [`static-collision.md`](static-collision.md) for limits, workload and evidence.
+
 The isolated `volume-benchmark --iterations 500` measures candidate fine-volume edits, boundary
 extraction and strict codec round trips, with bounded geometry/work counters. Its formerly refused
 off-grid box now completes with the rectangular-run representation. The companion

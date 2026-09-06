@@ -978,6 +978,11 @@ impl MultiplayerGame {
                     );
                 }
                 Err(ClientPredictionError::StaleServerTick { .. }) => return Ok(()),
+                Err(ClientPredictionError::Geometry(error)) => {
+                    self.last_status =
+                        format!("mouvement suspendu, attente correction serveur: {error}");
+                    return Ok(());
+                }
                 Err(error) => return Err(format!("reconciliation refusee: {error}")),
             }
         } else {
@@ -1037,9 +1042,15 @@ impl MultiplayerGame {
         let Some(prediction) = &mut self.prediction else {
             return Ok(());
         };
-        prediction
-            .predict(input, self.replica.world())
-            .map_err(|error| format!("prediction locale refusee: {error}"))?;
+        match prediction.predict(input, self.replica.world()) {
+            Ok(_) => {}
+            Err(ClientPredictionError::Geometry(error)) => {
+                self.last_status =
+                    format!("mouvement suspendu, attente correction serveur: {error}");
+                return Ok(());
+            }
+            Err(error) => return Err(format!("prediction locale refusee: {error}")),
+        }
         self.transport
             .send(encode_player_input(session_id, input))
             .map_err(|error| format!("envoi input: {error}"))?;

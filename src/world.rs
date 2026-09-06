@@ -3,6 +3,7 @@ use core::fmt;
 use std::{collections::HashMap, collections::hash_map::Entry, sync::Arc};
 
 pub mod geometry;
+pub mod query;
 
 /// Uniform-only geometry keeps the existing dense two-byte cells and no extension allocation.
 #[derive(Clone, Default)]

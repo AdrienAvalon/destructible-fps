@@ -87,6 +87,9 @@ pub struct NetworkTickReport {
     pub players_simulated: usize,
     pub players_moved: usize,
     pub player_collisions: usize,
+    pub player_geometry_failures: usize,
+    pub player_recoveries: usize,
+    pub player_recovery_deferred: usize,
     pub expired_player_inputs: usize,
     pub player_spawn_rejections: usize,
     pub player_state_broadcasts: usize,
@@ -627,7 +630,9 @@ where
     fn available_player_spawn_slot(&self) -> Option<u8> {
         (0..u8::try_from(MAX_SERVER_PEERS).ok()?).find(|slot| {
             self.peers.values().all(|peer| peer.spawn_slot != *slot)
-                && player_for_spawn_slot(*slot).is_clear_of_static_world(self.authority.world())
+                && player_for_spawn_slot(*slot)
+                    .is_clear_of_static_world(self.authority.world())
+                    .is_ok_and(|clear| clear)
         })
     }
 
@@ -1089,13 +1094,65 @@ where
     }
 
     fn simulate_players(&mut self, report: &mut NetworkTickReport) {
-        for player in self.players.values_mut() {
-            let step = player.step(self.authority.world());
-            report.players_simulated += 1;
-            report.players_moved += usize::from(step.moved);
-            report.player_collisions += usize::from(step.collided);
-            report.expired_player_inputs += usize::from(step.input_expired);
+        let mut recover = Vec::new();
+        for (&session_id, player) in &mut self.players {
+            match player.step(self.authority.world()) {
+                Ok(step) => {
+                    report.players_simulated += 1;
+                    report.players_moved += usize::from(step.moved);
+                    report.player_collisions += usize::from(step.collided);
+                    report.expired_player_inputs += usize::from(step.input_expired);
+                }
+                Err(error) => {
+                    report.player_geometry_failures += 1;
+                    if matches!(
+                        error,
+                        crate::world::query::GeometryQueryError::InitialOverlap
+                            | crate::world::query::GeometryQueryError::UnsafeSpawn
+                            | crate::world::query::GeometryQueryError::WorldBounds
+                    ) {
+                        recover.push(session_id);
+                    }
+                }
+            }
         }
+        // At most 16 failed players and 16 declared spawn slots, never an unbounded search.
+        for session_id in recover {
+            self.recover_player(session_id, report);
+        }
+    }
+
+    fn recover_player(&mut self, session_id: u64, report: &mut NetworkTickReport) {
+        let Some(slot) = (0..u8::try_from(MAX_SERVER_PEERS).unwrap_or_default()).find(|slot| {
+            self.peers
+                .values()
+                .all(|peer| peer.session_id == session_id || peer.spawn_slot != *slot)
+                && player_for_spawn_slot(*slot)
+                    .is_clear_of_static_world(self.authority.world())
+                    .is_ok_and(|clear| clear)
+        }) else {
+            // No unproved teleport: explicitly wait for geometry to permit a safe declared spawn.
+            report.player_recovery_deferred += 1;
+            return;
+        };
+        let Some(player) = self.players.get_mut(&session_id) else {
+            return;
+        };
+        let last_input_sequence = player.state().last_input_sequence;
+        let mut recovered = player_for_spawn_slot(slot);
+        recovered.restore_authoritative_state(crate::AuthoritativePlayerState {
+            last_input_sequence,
+            ..recovered.state()
+        });
+        *player = recovered;
+        for peer in self
+            .peers
+            .values_mut()
+            .filter(|peer| peer.session_id == session_id)
+        {
+            peer.spawn_slot = slot;
+        }
+        report.player_recoveries += 1;
     }
 
     fn broadcast_player_states(
@@ -1589,6 +1646,9 @@ impl Default for OrderedDeltaInbox {
 }
 
 #[cfg(test)]
+mod player_recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1598,7 +1658,7 @@ mod tests {
         for slot in 0..u8::try_from(MAX_SERVER_PEERS).unwrap() {
             let mut player = player_for_spawn_slot(slot);
             let initial = player.state().position_um;
-            assert!(player.is_clear_of_static_world(&world));
+            assert!(player.is_clear_of_static_world(&world).unwrap());
             for input_sequence in 1..=720 {
                 let pos = player.state().position_um;
                 let (x, z) = if pos.x.abs() > 100_000 {
@@ -1617,8 +1677,8 @@ mod tests {
                         sprint: false,
                     })
                     .unwrap();
-                let _ = player.step(&world);
-                assert!(player.is_clear_of_static_world(&world));
+                let _ = player.step(&world).unwrap();
+                assert!(player.is_clear_of_static_world(&world).unwrap());
             }
             let final_position = player.state().position_um;
             assert_ne!(final_position, initial);

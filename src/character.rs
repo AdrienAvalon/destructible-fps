@@ -1,6 +1,14 @@
 //! Fixed-step server-authoritative player movement and construction context.
 
-use crate::{FixedMicrometers3, IVec3, MICROMETERS_PER_VOXEL, SERVER_PHYSICS_HZ, World};
+use crate::{
+    FixedMicrometers3, MICROMETERS_PER_VOXEL, SERVER_PHYSICS_HZ,
+    world::query::{
+        GeometryQueryError, PhysicalBox, QueryBudget, QueryLimits, QueryStats, StaticGeometry,
+        overlaps_solid, sweep_axis,
+    },
+};
+#[cfg(test)]
+use crate::{IVec3, World};
 use core::fmt;
 
 pub const PLAYER_RADIUS_UM: i64 = 300_000;
@@ -16,7 +24,6 @@ const JUMP_SPEED_UM_PER_SECOND: i64 = 8_250_000;
 const GRAVITY_UM_PER_SECOND_PER_TICK: i64 = 400_000;
 const MAX_FALL_SPEED_UM_PER_SECOND: i64 = -50_000_000;
 const VELOCITY_RESPONSE_DIVISOR: i64 = 5;
-const COLLISION_EPSILON_UM: i64 = 1_000;
 const FALL_RESET_Y_UM: i64 = -30 * MICROMETERS_PER_VOXEL;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -68,6 +75,7 @@ pub struct PlayerStepReport {
     pub moved: bool,
     pub collided: bool,
     pub input_expired: bool,
+    pub geometry: QueryStats,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,9 +188,19 @@ impl AuthoritativePlayer {
         }
     }
 
-    #[must_use]
-    pub fn is_clear_of_static_world(&self, world: &World) -> bool {
-        !collides(world, self.state.position_um)
+    /// Proves clearance using full character bounds, without treating a failed query as air.
+    /// # Errors
+    /// Reports invalid physical bounds or exhausted query work.
+    pub fn is_clear_of_static_world(
+        &self,
+        world: &impl StaticGeometry,
+    ) -> Result<bool, GeometryQueryError> {
+        let mut budget = QueryBudget::new(QueryLimits::default())?;
+        Ok(!overlaps_solid(
+            world,
+            player_bounds(self.state.position_um)?,
+            &mut budget,
+        )?)
     }
 
     /// Retains only the newest bounded input. Simulation remains fixed to one step per server tick.
@@ -221,9 +239,40 @@ impl AuthoritativePlayer {
         Ok(())
     }
 
-    #[must_use]
-    pub fn step(&mut self, world: &World) -> PlayerStepReport {
+    /// Exactly one bounded 60-Hz step through shared static geometry.
+    /// # Errors
+    /// Invalid bounds, initial penetration and query exhaustion leave the entire player intact.
+    pub fn step(
+        &mut self,
+        world: &impl StaticGeometry,
+    ) -> Result<PlayerStepReport, GeometryQueryError> {
+        self.step_with_limits(world, QueryLimits::default())
+    }
+
+    /// # Errors
+    /// As with step, also rejecting invalid caller budgets. Failure is atomic including held input.
+    pub fn step_with_limits(
+        &mut self,
+        world: &impl StaticGeometry,
+        limits: QueryLimits,
+    ) -> Result<PlayerStepReport, GeometryQueryError> {
+        let mut budget = QueryBudget::new(limits)?;
+        let mut candidate = *self;
+        let mut report = candidate.step_candidate(world, &mut budget)?;
+        report.geometry = budget.stats();
+        *self = candidate;
+        Ok(report)
+    }
+
+    fn step_candidate(
+        &mut self,
+        world: &impl StaticGeometry,
+        budget: &mut QueryBudget,
+    ) -> Result<PlayerStepReport, GeometryQueryError> {
         let mut report = PlayerStepReport::default();
+        if overlaps_solid(world, player_bounds(self.state.position_um)?, budget)? {
+            return Err(GeometryQueryError::InitialOverlap);
+        }
         let input = if self.input_age_ticks < MAX_PLAYER_INPUT_HOLD_TICKS {
             self.held_input
         } else {
@@ -250,9 +299,8 @@ impl AuthoritativePlayer {
             approach_velocity(self.state.velocity_um_per_second.x, desired_x);
         self.state.velocity_um_per_second.z =
             approach_velocity(self.state.velocity_um_per_second.z, desired_z);
-        if !self.state.grounded && has_static_support(world, self.state.position_um) {
-            self.state.grounded = true;
-        }
+        self.state.grounded =
+            sweep_axis(world, player_bounds(self.state.position_um)?, 1, -1, budget)?.contact;
         if self.state.grounded && input.jump {
             self.state.velocity_um_per_second.y = JUMP_SPEED_UM_PER_SECOND;
             self.state.grounded = false;
@@ -273,29 +321,34 @@ impl AuthoritativePlayer {
             if displacement == 0 {
                 continue;
             }
-            let mut candidate = self.state.position_um;
-            let candidate_axis = component(candidate, axis).saturating_add(displacement);
-            set_component(&mut candidate, axis, candidate_axis);
-            if collides(world, candidate) {
+            let sweep = sweep_axis(
+                world,
+                player_bounds(self.state.position_um)?,
+                axis,
+                displacement,
+                budget,
+            )?;
+            if sweep.displacement_um != 0 {
+                let value = component(self.state.position_um, axis)
+                    .checked_add(sweep.displacement_um)
+                    .ok_or(GeometryQueryError::WorldBounds)?;
+                set_component(&mut self.state.position_um, axis, value);
+                report.moved = true;
+            }
+            if sweep.contact {
                 report.collided = true;
-                let resolved =
-                    resolve_axis_motion(world, self.state.position_um, axis, displacement);
-                if resolved != self.state.position_um {
-                    self.state.position_um = resolved;
-                    report.moved = true;
-                }
                 if axis == 1 && displacement < 0 {
                     self.state.grounded = true;
                 }
                 set_component(&mut self.state.velocity_um_per_second, axis, 0);
                 self.state.integration_remainder[axis] = 0;
-            } else {
-                self.state.position_um = candidate;
-                report.moved = true;
             }
         }
 
         if self.state.position_um.y < FALL_RESET_Y_UM {
+            if overlaps_solid(world, player_bounds(self.spawn_position_um)?, budget)? {
+                return Err(GeometryQueryError::UnsafeSpawn);
+            }
             let last_input_sequence = self.state.last_input_sequence;
             self.state = AuthoritativePlayerState {
                 position_um: self.spawn_position_um,
@@ -310,7 +363,7 @@ impl AuthoritativePlayer {
             };
             self.input_age_ticks = MAX_PLAYER_INPUT_HOLD_TICKS;
         }
-        report
+        Ok(report)
     }
 }
 
@@ -324,105 +377,29 @@ const fn approach_velocity(current: i64, target: i64) -> i64 {
     }
 }
 
-fn collides(world: &World, position: FixedMicrometers3) -> bool {
-    let minimum = FixedMicrometers3 {
-        x: position.x.saturating_sub(PLAYER_RADIUS_UM),
-        y: position.y,
-        z: position.z.saturating_sub(PLAYER_RADIUS_UM),
-    };
-    let maximum = FixedMicrometers3 {
-        x: position
-            .x
-            .saturating_add(PLAYER_RADIUS_UM)
-            .saturating_sub(1),
-        y: position
-            .y
-            .saturating_add(PLAYER_HEIGHT_UM)
-            .saturating_sub(COLLISION_EPSILON_UM),
-        z: position
-            .z
-            .saturating_add(PLAYER_RADIUS_UM)
-            .saturating_sub(1),
-    };
-    let Some(minimum) = fixed_position_to_voxel(minimum) else {
-        return true;
-    };
-    let Some(maximum) = fixed_position_to_voxel(maximum) else {
-        return true;
-    };
-    for x in minimum.x..=maximum.x {
-        for y in minimum.y..=maximum.y {
-            for z in minimum.z..=maximum.z {
-                if world.voxel(IVec3::new(x, y, z)).is_solid() {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn has_static_support(world: &World, position: FixedMicrometers3) -> bool {
-    let mut below = position;
-    below.y = below.y.saturating_sub(1);
-    collides(world, below)
-}
-
-fn resolve_axis_motion(
-    world: &World,
-    start: FixedMicrometers3,
-    axis: usize,
-    displacement: i64,
-) -> FixedMicrometers3 {
-    let collides_at = |offset: i64| {
-        let mut candidate = start;
-        set_component(
-            &mut candidate,
-            axis,
-            component(start, axis).saturating_add(offset),
-        );
-        collides(world, candidate)
-    };
-    let resolved_offset = if displacement > 0 {
-        let mut free = 0_i64;
-        let mut blocked = displacement;
-        while blocked.saturating_sub(free) > 1 {
-            let middle = i64::midpoint(free, blocked);
-            if collides_at(middle) {
-                blocked = middle;
-            } else {
-                free = middle;
-            }
-        }
-        free
-    } else {
-        let mut blocked = displacement;
-        let mut free = 0_i64;
-        while free.saturating_sub(blocked) > 1 {
-            let middle = i64::midpoint(blocked, free);
-            if collides_at(middle) {
-                blocked = middle;
-            } else {
-                free = middle;
-            }
-        }
-        free
-    };
-    let mut resolved = start;
-    set_component(
-        &mut resolved,
-        axis,
-        component(start, axis).saturating_add(resolved_offset),
-    );
-    resolved
-}
-
-fn fixed_position_to_voxel(position: FixedMicrometers3) -> Option<IVec3> {
-    Some(IVec3::new(
-        i32::try_from(position.x.div_euclid(MICROMETERS_PER_VOXEL)).ok()?,
-        i32::try_from(position.y.div_euclid(MICROMETERS_PER_VOXEL)).ok()?,
-        i32::try_from(position.z.div_euclid(MICROMETERS_PER_VOXEL)).ok()?,
-    ))
+fn player_bounds(position: FixedMicrometers3) -> Result<PhysicalBox, GeometryQueryError> {
+    let minimum = [
+        position.x.checked_sub(PLAYER_RADIUS_UM),
+        Some(position.y),
+        position.z.checked_sub(PLAYER_RADIUS_UM),
+    ];
+    let maximum = [
+        position.x.checked_add(PLAYER_RADIUS_UM),
+        position.y.checked_add(PLAYER_HEIGHT_UM),
+        position.z.checked_add(PLAYER_RADIUS_UM),
+    ];
+    PhysicalBox::from_micrometers(
+        [
+            minimum[0].ok_or(GeometryQueryError::WorldBounds)?,
+            minimum[1].ok_or(GeometryQueryError::WorldBounds)?,
+            minimum[2].ok_or(GeometryQueryError::WorldBounds)?,
+        ],
+        [
+            maximum[0].ok_or(GeometryQueryError::WorldBounds)?,
+            maximum[1].ok_or(GeometryQueryError::WorldBounds)?,
+            maximum[2].ok_or(GeometryQueryError::WorldBounds)?,
+        ],
+    )
 }
 
 const fn component(vector: FixedMicrometers3, axis: usize) -> i64 {
@@ -513,8 +490,8 @@ mod tests {
                 .expect("newest input");
         }
 
-        let _ = once.step(&world);
-        let _ = flooded.step(&world);
+        let _ = once.step(&world).unwrap();
+        let _ = flooded.step(&world).unwrap();
 
         assert_eq!(once.state().position_um, flooded.state().position_um);
         assert_eq!(
@@ -539,8 +516,8 @@ mod tests {
         second.accept_input(input).expect("input");
         let mut expired = false;
         for _ in 0..120 {
-            expired |= first.step(&world).input_expired;
-            let _ = second.step(&world);
+            expired |= first.step(&world).unwrap().input_expired;
+            let _ = second.step(&world).unwrap();
             assert_eq!(first, second);
         }
 
@@ -576,7 +553,7 @@ mod tests {
         });
         player.state.velocity_um_per_second.y = MAX_FALL_SPEED_UM_PER_SECOND;
         for _ in 0..30 {
-            let _ = player.step(&world);
+            let _ = player.step(&world).unwrap();
         }
 
         assert!(player.state().grounded);
@@ -584,3 +561,6 @@ mod tests {
         assert!(player.state().position_um.y < 2 * MICROMETERS_PER_VOXEL);
     }
 }
+
+#[cfg(test)]
+mod fine_tests;

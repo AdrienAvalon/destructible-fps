@@ -4,7 +4,43 @@ use destructible_fps::mesh::fine::{
     fixture::{STAGE_NAMES, industrial_inspection_world, industrial_patch_positions},
     hybrid_dirty_chunks, mesh_hybrid_chunks,
 };
+use destructible_fps::{
+    IVec3, Material,
+    world::geometry::{GeometryCell, GeometryChange, GeometryState, RefinedWorld},
+};
 use std::collections::BTreeMap;
+
+fn replacement_meshes(
+    world: &RefinedWorld,
+    chunks: &[IVec3],
+) -> Vec<(IVec3, destructible_fps::mesh::CpuMesh)> {
+    // Same one-chunk job partition as the native industrial inspector; every job keeps its cap.
+    chunks
+        .iter()
+        .flat_map(|chunk| {
+            mesh_hybrid_chunks(world, &[*chunk], FineMeshLimits::default())
+                .unwrap()
+                .meshes
+        })
+        .collect()
+}
+
+fn window_positions(world: &RefinedWorld) -> Vec<IVec3> {
+    let mut positions: Vec<_> = world
+        .refined_positions()
+        .filter(|position| {
+            world
+                .cell(*position)
+                .volume()
+                .unwrap()
+                .leaves()
+                .iter()
+                .any(|leaf| leaf.voxel().material == Material::Steel)
+        })
+        .collect();
+    positions.sort_unstable();
+    positions
+}
 
 fn geometry_signature(
     meshes: &[(destructible_fps::IVec3, destructible_fps::mesh::CpuMesh)],
@@ -47,8 +83,24 @@ fn normal_treatment_preserves_exact_industrial_geometry() {
         0xef78_897e_10e1_2f79_998f_2daa_6744_5538,
     ];
     for (stage, expected) in expected.into_iter().enumerate() {
-        let world = industrial_inspection_world(stage).unwrap();
-        let batch = mesh_hybrid_chunks(&world, &dirty, FineMeshLimits::default()).unwrap();
+        let current = industrial_inspection_world(stage).unwrap();
+        // Isolate the pre-fenestration fixture for this NORMAL-only oracle, not for full-scene
+        // acceptance. Windows occupy previously AIR cells, proved separately against coarse source.
+        // No production legacy mode; the real map and all publication tests below keep every frame.
+        let mut legacy = GeometryState::new(current.clone(), 1).unwrap();
+        for pages in window_positions(&current).chunks(256) {
+            let changes = pages
+                .iter()
+                .map(|position| GeometryChange {
+                    position: *position,
+                    before: current.cell(*position),
+                    after: GeometryCell::AIR,
+                })
+                .collect();
+            let tx = legacy.prepare(current.tick(), changes).unwrap();
+            legacy.apply(&tx).unwrap();
+        }
+        let batch = mesh_hybrid_chunks(legacy.world(), &dirty, FineMeshLimits::default()).unwrap();
         assert_eq!(geometry_signature(&batch.meshes), expected);
     }
 }
@@ -68,11 +120,7 @@ fn every_industrial_stage_matches_full_remeshing_outside_the_complete_dirty_regi
     );
     for stage in 1..STAGE_NAMES.len() {
         let world = industrial_inspection_world(stage).unwrap();
-        let grouped: BTreeMap<_, _> = mesh_hybrid_chunks(&world, &dirty, FineMeshLimits::default())
-            .unwrap()
-            .meshes
-            .into_iter()
-            .collect();
+        let grouped: BTreeMap<_, _> = replacement_meshes(&world, &dirty).into_iter().collect();
         let mut positions = world.chunk_positions();
         positions.extend(baseline.keys());
         positions.extend(&dirty);
@@ -132,24 +180,47 @@ fn exact_inspection_reference_is_unchanged_and_industrial_rubble_is_persistent()
     let baseline = industrial_inspection_world(0).unwrap();
     let rubble: Vec<_> = baseline.refined_positions().filter(|p| p.z > 15).collect();
     assert_eq!(rubble.len(), 8);
+    let windows = window_positions(&baseline);
+    assert!(windows.len() > 300);
     for (stage, reference) in references.into_iter().enumerate() {
         assert_eq!(inspection_world(stage).unwrap().fingerprint(), reference);
         let world = industrial_inspection_world(stage).unwrap();
         for position in &rubble {
             assert_eq!(world.cell(*position), baseline.cell(*position));
         }
+        assert_eq!(window_positions(&world), windows);
+        for position in &windows {
+            assert_eq!(world.cell(*position), baseline.cell(*position));
+        }
         let stats = world.geometry_stats();
         // The ground-reaching final aperture empties three entire wall pages; they canonicalize
         // back to AIR, while all eight permanent rubble pages remain refined.
-        assert_eq!(stats.refined_pages, if stage == 3 { 17 } else { 20 });
+        assert_eq!(
+            stats.refined_pages,
+            windows.len() + if stage == 3 { 17 } else { 20 }
+        );
         assert!(
             stats.refined_leaves < 16_384,
             "keep headroom under the unchanged transaction cap"
         );
         let chunks = hybrid_dirty_chunks(&industrial_patch_positions()).unwrap();
-        let report = mesh_hybrid_chunks(&world, &chunks, FineMeshLimits::default())
-            .unwrap()
-            .report;
-        println!("RUIN_BUDGET stage={stage} {stats:?} {report:?}");
+        let mut max_work = 0;
+        let mut vertices = 0;
+        let mut indices = 0;
+        let mut total_work = 0;
+        for chunk in chunks {
+            let report = mesh_hybrid_chunks(&world, &[chunk], FineMeshLimits::default())
+                .unwrap()
+                .report;
+            max_work = max_work.max(report.work);
+            total_work += report.work;
+            vertices += report.vertices;
+            indices += report.indices;
+        }
+        assert!(vertices <= destructible_fps::mesh::fine::MAX_FINE_MESH_VERTICES);
+        assert!(indices <= destructible_fps::mesh::fine::MAX_FINE_MESH_INDICES);
+        println!(
+            "RUIN_BUDGET stage={stage} {stats:?} max_job_work={max_work} total_work={total_work} vertices={vertices} indices={indices}"
+        );
     }
 }

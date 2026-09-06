@@ -24,6 +24,11 @@ try:
         "fine-inspection": "--smoke-seconds 8",
         "fine-industrial": "--world industrial --smoke-seconds 12",
     }[world]
+    view = os.environ.get("FPS_TOOL_VIEW", "fracture")
+    if world == "fine-industrial":
+        arguments += {"fracture": " --view fracture", "approach": " --view approach", "wide": " --view wide"}[view]
+    elif view != "fracture":
+        raise RuntimeError("explicit view requires fine-industrial")
     # qrenderdoc has already initialized replay. No global hook or remote replay server.
     executable = "fine-geometry-demo" if world in ("fine-inspection", "fine-industrial") else "playable-demo"
     options = rd.CaptureOptions()
@@ -77,7 +82,7 @@ try:
     (output / "breach-thumbnail.png").write_bytes(bytes(thumbnail.data))
     (output / "renderdoc-result.json").write_text(json.dumps({
         "version": rd.GetVersionString(), "capture": filename.name, "world": world,
-        "executable": executable, "arguments": arguments,
+        "executable": executable, "arguments": arguments, "view": view,
         "bytes": filename.stat().st_size, "drawcalls": draws,
         "textures": len(replay.GetTextures()), "api": "Vulkan",
         "scope": "instrumented capture and replay, not a release performance benchmark",

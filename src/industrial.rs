@@ -12,6 +12,9 @@ pub const CANOPY_SUPPORTS: [IVec3; 4] = [
     IVec3::new(36, 1, 26),
 ];
 pub const BARRICADE: IVec3 = IVec3::new(-5, 2, -7);
+pub const HALL_FRONT_WINDOW_STARTS: [i32; 4] = [-18, -8, 3, 13];
+pub const HALL_SIDE_WINDOW_STARTS: [i32; 3] = [-12, -3, 6];
+pub const HALL_SIDE_COLUMNS: [i32; 4] = [-16, -6, 6, 16];
 
 /// Builds an intact industrial map using bounded, platform-independent integer construction.
 #[must_use]
@@ -67,7 +70,7 @@ fn main_hall(world: &mut World) {
     fill(world, [-20, 14, -16], [20, 14, 16], Material::Concrete);
     for z in [-15, 15] {
         fill(world, [-19, 1, z], [19, 13, z], Material::Brick);
-        for x in [-18, -8, 3, 13] {
+        for x in HALL_FRONT_WINDOW_STARTS {
             fill(world, [x, 7, z], [x + 5, 11, z], Material::Air);
             fill(world, [x, 6, z], [x + 5, 6, z], Material::Concrete);
             fill(world, [x, 12, z], [x + 5, 12, z], Material::Concrete);
@@ -75,11 +78,11 @@ fn main_hall(world: &mut World) {
     }
     for x in [-20, 20] {
         fill(world, [x, 1, -16], [x, 13, 16], Material::Brick);
-        for z in [-12, -3, 6] {
+        for z in HALL_SIDE_WINDOW_STARTS {
             fill(world, [x, 7, z], [x, 11, z + 5], Material::Air);
             fill(world, [x, 6, z], [x, 6, z + 5], Material::Concrete);
         }
-        for z in [-16, -6, 6, 16] {
+        for z in HALL_SIDE_COLUMNS {
             fill(world, [x, 1, z], [x, 14, z], Material::Concrete);
         }
     }

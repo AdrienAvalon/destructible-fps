@@ -95,10 +95,14 @@ def parse_options(arguments=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tool", choices=("renderdoc", "blender", "tracy"))
     parser.add_argument("--world", choices=("range", "industrial", "fine-inspection", "fine-industrial"))
+    parser.add_argument("--view", choices=("fracture", "approach", "wide"))
     options = parser.parse_args(arguments)
     if options.world is not None and options.tool != "renderdoc":
         parser.error("--world applies only to the RenderDoc game capture")
     options.world = options.world or "range"
+    if options.view is not None and (options.tool != "renderdoc" or options.world != "fine-industrial"):
+        parser.error("--view requires the fine-industrial RenderDoc capture")
+    options.view = options.view or "fracture"
     return options
 
 
@@ -118,6 +122,7 @@ def main():
     ) if key in os.environ}
     env.update({"PATH": "/usr/bin:/bin", "FPS_TOOL_OUTPUT": str(output), "FPS_TOOL_ROOT": str(ROOT),
                 "FPS_TOOL_WORLD": options.world,
+                "FPS_TOOL_VIEW": options.view,
                 "XDG_CACHE_HOME": str(output / "cache"), "XDG_DATA_HOME": str(output / "data"),
                 "XDG_CONFIG_HOME": str(output / "config"), "OMP_NUM_THREADS": "4"})
     config = output / "data/qrenderdoc/UI.config"

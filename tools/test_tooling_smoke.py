@@ -13,6 +13,18 @@ from tooling_smoke import ROOT, isolated_command, run_bounded, parse_options
 
 
 class ToolingTests(unittest.TestCase):
+    def test_native_views_are_finite_and_restricted_to_fine_industrial_capture(self):
+        for view in ("fracture", "approach", "wide"):
+            self.assertEqual(parse_options(["renderdoc", "--world", "fine-industrial", "--view", view]).view, view)
+        for args in (["renderdoc", "--view", "wide"],
+                     ["blender", "--view", "wide"],
+                     ["renderdoc", "--world", "fine-industrial", "--view", "../map"],
+                     ["renderdoc", "--world", "fine-industrial", "--view", "wide; false"],
+                     ["renderdoc", "--world", "fine-industrial", "--view"]):
+            with self.subTest(arguments=args), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                parse_options(args)
+            self.assertEqual(error.exception.code, 2)
+
     def test_capture_world_is_whitelisted_and_only_applies_to_renderdoc(self):
         self.assertEqual(parse_options(["renderdoc"]).world, "range")
         for world in ("range", "industrial", "fine-inspection", "fine-industrial"):

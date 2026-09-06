@@ -2,7 +2,7 @@
 use destructible_fps::{
     IVec3, SampleWindow,
     mesh::fine::{
-        FineMeshLimits, FineMeshReport,
+        FineMeshBatch, FineMeshLimits, FineMeshReport,
         fixture::{
             STAGE_NAMES, industrial_inspection_world, industrial_patch_positions, inspection_world,
         },
@@ -44,12 +44,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         if industrial && stage == 0 {
             let start = Instant::now();
-            let (report, max_work) = hybrid_report(&world, &world.chunk_positions())?;
+            let (report, max_work, batches) = hybrid_report(&world, &world.chunk_positions())?;
             println!(
                 "FINE_BOOTSTRAP chunks={} elapsed_ms={:.3} max_job_work={max_work} {report:?}",
                 world.chunk_positions().len(),
                 start.elapsed().as_secs_f64() * 1000.0
             );
+            black_box(batches);
         }
         let mut chunks = if industrial {
             hybrid_dirty_chunks(&industrial_patch_positions())?
@@ -61,18 +62,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut expected = None;
         for iteration in 0..iterations {
             let start = Instant::now();
-            let batch = if industrial {
-                mesh_hybrid_chunks(&world, &chunks, FineMeshLimits::default())?
+            let (report, max_work, batches) = if industrial {
+                hybrid_report(&world, &chunks)?
             } else {
-                mesh_fine_chunks(&world, &chunks, FineMeshLimits::default())?
+                let batch = mesh_fine_chunks(&world, &chunks, FineMeshLimits::default())?;
+                (batch.report, batch.report.work, vec![batch])
             };
-            let report = batch.report;
-            let max_work = report.work;
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            let jobs = batches.len();
             samples.record_ms(elapsed);
             if iteration == 0 {
                 println!(
-                    "FINE_MESH industrial={industrial} first_ms={elapsed:.5} stage={name} fingerprint={:032x} chunks={} max_job_work={max_work} {:?}",
+                    "FINE_MESH industrial={industrial} first_ms={elapsed:.5} stage={name} fingerprint={:032x} chunks={} jobs={jobs} max_job_work={max_work} {:?}",
                     world.fingerprint(),
                     chunks.len(),
                     report
@@ -82,10 +83,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err("fine work counters drifted".into());
             }
             expected = Some((report, max_work));
-            black_box(batch); // Keep mesh destruction outside the extraction timer.
+            black_box(batches); // Keep mesh destruction outside the extraction timer.
         }
         println!(
-            "FINE_MESH_TIMING stage={name} {:?}",
+            "FINE_MESH_TIMING stage={name} jobs={} {:?}",
+            if industrial { chunks.len() } else { 1 },
             samples.summary().ok_or("missing measurements")?
         );
     }
@@ -95,9 +97,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn hybrid_report(
     world: &RefinedWorld,
     chunks: &[IVec3],
-) -> Result<(FineMeshReport, usize), Box<dyn Error>> {
+) -> Result<(FineMeshReport, usize, Vec<FineMeshBatch>), Box<dyn Error>> {
     let mut total = FineMeshReport::default();
     let mut max_work = 0;
+    let mut batches = Vec::with_capacity(chunks.len());
     for chunk in chunks {
         let batch = mesh_hybrid_chunks(world, &[*chunk], FineMeshLimits::default())?;
         total.vertices += batch.report.vertices;
@@ -106,7 +109,7 @@ fn hybrid_report(
         total.work += batch.report.work;
         total.lines += batch.report.lines;
         max_work = max_work.max(batch.report.work);
-        black_box(batch);
+        batches.push(batch);
     }
-    Ok((total, max_work))
+    Ok((total, max_work, batches))
 }

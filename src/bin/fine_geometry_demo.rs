@@ -18,7 +18,10 @@ use destructible_fps::{
 mod probe;
 #[path = "fine_geometry_demo/stream.rs"]
 mod stream;
+#[path = "fine_geometry_demo/view.rs"]
+mod view;
 use stream::Stream;
+use view::View;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum WorldKind {
@@ -59,6 +62,7 @@ struct Scene {
     mesh: SampleWindow,
     yaw: f32,
     distance: f32,
+    view: View,
 }
 impl Scene {
     fn new(
@@ -66,6 +70,7 @@ impl Scene {
         worlds: Vec<Arc<RefinedWorld>>,
         kind: WorldKind,
         smoke: Option<Duration>,
+        view: View,
     ) -> Result<Self, String> {
         let mut chunks: Vec<_> = worlds.iter().flat_map(|w| w.chunk_positions()).collect();
         chunks.sort_unstable();
@@ -87,7 +92,16 @@ impl Scene {
             window,
             worker: MeshScheduler::new(),
             worlds,
-            stream: Stream::new(chunks, dirty, fingerprints, MAX_FINE_MESH_CHUNKS)?,
+            stream: Stream::new(
+                chunks,
+                dirty,
+                fingerprints,
+                if kind == WorldKind::Industrial {
+                    1
+                } else {
+                    MAX_FINE_MESH_CHUNKS
+                },
+            )?,
             kind,
             desired: 0,
             presented: [0; 4],
@@ -99,11 +113,8 @@ impl Scene {
             gpu: SampleWindow::new(16384),
             mesh: SampleWindow::new(128),
             yaw: -0.25,
-            distance: if kind == WorldKind::Industrial {
-                8.5
-            } else {
-                5.5
-            },
+            distance: view.distance(kind),
+            view,
         })
     }
 
@@ -175,18 +186,7 @@ impl Scene {
     }
 
     fn camera(&self) -> (Vec3, Vec3) {
-        let (focus, facing, elevation) = if self.kind == WorldKind::Industrial {
-            (Vec3::new(-15.0, 2.4, 15.8), 1.0, 1.3)
-        } else {
-            (Vec3::new(2.0, 1.4, 0.1), -1.0, 0.5)
-        };
-        let camera = focus
-            + Vec3::new(
-                self.yaw.sin() * self.distance,
-                elevation,
-                facing * self.yaw.cos() * self.distance,
-            );
-        (camera, (focus - camera).normalize())
+        self.view.camera(self.kind, self.yaw, self.distance)
     }
 
     fn finish_smoke(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
@@ -232,6 +232,7 @@ struct App {
     worlds: Option<Vec<Arc<RefinedWorld>>>,
     smoke: Option<Duration>,
     kind: WorldKind,
+    view: View,
     failure: Option<String>,
 }
 impl ApplicationHandler for App {
@@ -252,6 +253,7 @@ impl ApplicationHandler for App {
                     self.worlds.take().ok_or("missing inspection worlds")?,
                     self.kind,
                     self.smoke,
+                    self.view,
                 )
             });
         match result {
@@ -294,7 +296,7 @@ impl ApplicationHandler for App {
                         KeyCode::ArrowUp => s.yaw += 0.1,
                         KeyCode::ArrowDown => s.yaw -= 0.1,
                         KeyCode::KeyW => s.distance = (s.distance - 0.25).max(1.0),
-                        KeyCode::KeyS => s.distance = (s.distance + 0.25).min(12.0),
+                        KeyCode::KeyS => s.distance = (s.distance + 0.25).min(60.0),
                         KeyCode::KeyP if !event.repeat && s.stream.idle() => {
                             if let Some(stage) = s.stream.displayed {
                                 let (origin, direction) = s.camera();
@@ -323,11 +325,20 @@ impl ApplicationHandler for App {
 
 fn options(
     mut args: impl Iterator<Item = String>,
-) -> Result<(WorldKind, Option<Duration>), Box<dyn Error>> {
+) -> Result<(WorldKind, Option<Duration>, View), Box<dyn Error>> {
     let mut kind = None;
     let mut smoke = None;
+    let mut view = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
+            "--view" if view.is_none() => {
+                view = Some(match args.next().as_deref() {
+                    Some("fracture") => View::Fracture,
+                    Some("approach") => View::Approach,
+                    Some("wide") => View::Wide,
+                    _ => return Err("view must be fracture, approach or wide".into()),
+                });
+            }
             "--world" if kind.is_none() => {
                 kind = Some(match args.next().as_deref() {
                     Some("inspection") => WorldKind::Inspection,
@@ -345,10 +356,14 @@ fn options(
             _ => return Err("unknown or duplicate inspection option".into()),
         }
     }
-    Ok((kind.unwrap_or_default(), smoke))
+    let kind = kind.unwrap_or_default();
+    if view.is_some() && kind != WorldKind::Industrial {
+        return Err("explicit views require the industrial world".into());
+    }
+    Ok((kind, smoke, view.unwrap_or_default()))
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let (kind, smoke) = options(std::env::args().skip(1))?;
+    let (kind, smoke, view) = options(std::env::args().skip(1))?;
     // Source authoring is done before presentation; meshing stays on the existing bounded worker.
     let worlds = (0..STAGE_NAMES.len())
         .map(|i| {
@@ -364,6 +379,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         worlds: Some(worlds),
         smoke,
         kind,
+        view,
         failure: None,
     };
     let event_loop = EventLoop::new()?;
@@ -390,6 +406,10 @@ mod tests {
             vec!["--world", "unknown"],
             vec!["--world", "industrial", "--world", "inspection"],
             vec!["--world"],
+            vec!["--world", "industrial", "--view"],
+            vec!["--world", "industrial", "--view", "unknown"],
+            vec!["--view", "wide"],
+            vec!["--world", "industrial", "--view", "wide", "--view", "wide"],
             vec!["--smoke-seconds", "8", "--smoke-seconds", "8"],
             vec!["--smoke-seconds", "8", "extra"],
         ] {
@@ -397,7 +417,11 @@ mod tests {
         }
         assert_eq!(
             options(["--smoke-seconds", "8"].into_iter().map(str::to_owned)).unwrap(),
-            (WorldKind::Inspection, Some(Duration::from_secs(8)))
+            (
+                WorldKind::Inspection,
+                Some(Duration::from_secs(8)),
+                View::Fracture
+            )
         );
         assert_eq!(
             options(
@@ -406,7 +430,26 @@ mod tests {
                     .map(str::to_owned)
             )
             .unwrap(),
-            (WorldKind::Industrial, Some(Duration::from_secs(12)))
+            (
+                WorldKind::Industrial,
+                Some(Duration::from_secs(12)),
+                View::Fracture
+            )
         );
+        for (name, view) in [
+            ("wide", View::Wide),
+            ("approach", View::Approach),
+            ("fracture", View::Fracture),
+        ] {
+            assert_eq!(
+                options(
+                    ["--view", name, "--world", "industrial"]
+                        .into_iter()
+                        .map(str::to_owned)
+                )
+                .unwrap(),
+                (WorldKind::Industrial, None, view)
+            );
+        }
     }
 }

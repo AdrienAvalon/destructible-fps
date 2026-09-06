@@ -302,3 +302,127 @@ Two completed older/intermediate runs, `renderdoc-i9ribs33` and `renderdoc-xvdid
 the existing ignored `target/tooling-archive-lHJXgO/`, with their complete artifacts preserved.
 No deletion, retention-limit increase or permission expansion occurred. Active evidence is about
 1.8 GiB and the recoverable local archive about 2.9 GiB; neither is an off-machine backup.
+
+## Industrial fenestration and player-height inspection
+
+The fine industrial fixture now installs fourteen open steel window frames into the actual source
+volumes. They have 6.25 cm wide, 12.5 cm deep sections, three vertical mullions and a middle transom,
+with no opaque pretend glass. Twelve openings are 6×5 m; the last opening on each side is 5×5 m,
+respecting the concrete column which the coarse builder installs after its original cutout. Shared
+coarse layout constants keep those placements related to their source. This adds architectural
+detail, not finished photorealism, calibrated glazing or a simulated broken-window system.
+
+Every complete opening must initially be empty and its full perimeter solid. The operation refuses
+the whole candidate if any placement fails. All pre-existing solid cells remain unchanged. Eight
+rectangular bars are unioned before each page enters one sorted transaction per window, at most
+30 cells. All fourteen transactions belong to one authored snapshot time; their sequence advances,
+not the simulation tick. The caller's immutable world remains untouched. The 410 new steel pages
+persist across the four wall states. They use the same exact material source for queries and mesh,
+but fine authoritative weapon damage and support-driven detachment remain explicitly pending.
+
+The extra detail raises final dirty-region work beyond a single job's 4,194,304-unit ceiling. The
+industrial inspector therefore partitions replacements into eight one-chunk jobs and publishes
+the whole replacement atomically after validation. Existing per-job work/output, aggregate candidate,
+resident scene and worker deadline limits are unchanged. Small exact inspection still uses its
+previous grouped jobs. Full-scene tests cover all 132 chunks in every state and prove that changes
+remain confined to the complete dirty region, with identical ordered mesh bytes after replacement.
+
+The industrial benchmark now follows this partition and reports `jobs=8`, total work and maximum
+per-job work separately. Its old single-batch timing baseline is **not directly comparable**. It
+retains the completed meshes until after the extraction timer, including during bootstrap; the
+old bootstrap helper dropped each mesh inside that timer. Neither change establishes a speedup.
+The pre-fenestration position/index oracle remains an isolated normal-reconstruction test: a test-only
+copy restores the previously empty steel-window cells. Full new-scene tests never remove frames;
+new source fingerprints are expected, not evidence of a regression.
+
+`fine-geometry-demo --world industrial --view wide|approach|fracture` provides reproducible native
+views; `fracture` preserves the earlier close framing and remains the default. `wide` and `approach`
+place the eye at y=2.65 m, 1.65 m above the actual ground verified by static queries. Orbit/zoom are
+inspection controls, not a collision-constrained character. The capture launcher accepts the same
+finite views only with `renderdoc --world fine-industrial`; its child maps them to literal arguments,
+without widening file/network/retention limits. Rust and Python reject malformed view options.
+
+### Fenestration validation receipt, 2026-09-06
+
+Parent `496cef7`; final standalone native inspector SHA-256:
+`3be60d8e6fbc316e339a779ea4f340dc18fd362c3efa4d756e3d1090e2f68c60`.
+Evidence: `/tmp/fps-industrial-windows-AREXVy/`. Its fail-fast `validate.sh` finished with exit 0:
+formatting, strict all-target Clippy, eight offline tool tests, 527 ordinary tests in each of debug
+and release, targeted network/secure transport/authority/process/OIDC tests, two compile-fail
+doctests, all six explicit actual-GPU tests in both profiles, the four prescribed simulation/storage
+benchmarks, twenty repeated fine extractions per stage and five native smoke runs. After the review's
+benchmark-label clarification, formatting/strict Clippy and the benchmark test target were rerun;
+the latter has no unit tests and is not counted as additional behavioral coverage. The final native
+build and real twenty-iteration benchmark include the explicit `jobs=8` labels. Graphify update and
+doctor passed; source and diff checks were performed independently of its derived index.
+
+New tests trace air/mullion/transom samples on every facade using the actual fixed-point material
+query, validate exact authored steel volume and source immutability, preserve occupied masonry,
+refuse occupied/unsupported openings and verify deterministic repeated authoring. Existing all-stage
+full-versus-incremental checks now include all frames. The original exact fixture and the isolated
+normal-only geometry oracles remain unchanged. Player-height camera tests query the original ground
+and exercise finite unit directions under orbit/zoom; CLI tests reject unknown, duplicate or
+inapplicable views.
+
+Final scene bootstrap: 132 chunks, 58,240 quads, 244,167 vertices, 408,978 indices. Final damaged
+snapshot: 427 refined pages and 6,683 leaves; the first three states have 430 pages. Final dirty
+replacement: 10,921 quads, 53,106 vertices, 114,384 indices, total work 4,381,725 and maximum single
+job work 1,417,128. Across all four states the maximum job is 1,417,205. World and job limits were
+not increased. Preparing the fine source remains outside extraction and frame timing.
+
+Uninstrumented-by-RenderDoc release Vulkan runs, after compilation, with normal engine GPU
+timestamp queries: Linux 7.2.2-1-cachyos, Rust 1.97.1, i7-13700H, RTX 4050 Laptop 6,141 MiB,
+NVIDIA 610.57.04, 1440×900, 4× MSAA, exposure 0.75. No clock locking or compositor control.
+
+| Native view | CPU with present p50 / p95 / p99 (ms) | GPU p50 / p95 / p99 (ms) | Peak RSS (KiB) |
+| --- | --- | --- | --- |
+| Industrial fracture, 12 s | 2.974 / 3.122 / 3.508 | 2.357 / 2.421 / 2.815 | 267,792 |
+| Industrial approach, 12 s | 2.823 / 2.979 / 3.374 | 2.206 / 2.259 / 2.814 | 282,928 |
+| Industrial wide, 12 s | 2.134 / 2.308 / 2.510 | 1.526 / 1.559 / 1.653 | 281,368 |
+| Small exact inspection, 8 s | 1.354 / 1.485 / 1.625 | 0.754 / 0.764 / 0.767 | 263,716 |
+
+All three industrial runs displayed/probed all four complete stages; 4,063/4,271/5,633 GPU samples
+respectively, zero dropped queries. Stage replacement latency is about 29–38 ms and bootstrap
+281–356 ms. These are short fixed-scene developer observations, not a controlled speedup claim,
+sustained 1080p combat budget, multiplayer or cross-platform acceptance.
+
+Actual RenderDoc 1.45/Vulkan frame-400 captures were replayed successfully, each with 14 textures
+and a fully completed native smoke. Source assets, light and exposure settings were not changed:
+
+| Capture | Local thumbnail under `target/tooling/` | Capture bytes / draws |
+| --- | --- | --- |
+| Wide before, camera-only binary | `renderdoc-yqp_fdjh/breach-thumbnail.png` | 294,891,414 / 245 |
+| Wide after | `renderdoc-zmj7dvlf/breach-thumbnail.png` | 295,016,147 / 245 |
+| Approach after | `renderdoc-x3m4m1h7/breach-thumbnail.png` | 302,915,696 / 221 |
+| Fracture after | `renderdoc-h8iebesu/breach-thumbnail.png` | 304,888,686 / 219 |
+
+The camera-only before binary SHA-256 was
+`44578798d8acaa7775c545a4c05599372b724c12cc066df68a318fd4e1fee329`; the after captures use the final
+standalone binary above. The previous close reference remains
+`renderdoc-cg9_31h0/breach-thumbnail.png`. There is no matched pre-change approach capture. The wide
+comparison shows a modest but actual improvement in architectural detail; oversized regular concrete
+sections, sparse ground, intact roof silhouette and simplistic interior lighting remain obvious.
+This does not pass the broader ruined-factory visual gate.
+
+Claude supplied one analysis and one targeted runtime review, with tests summarized rather than
+the full test diff. Its benchmark-comparability concern produced the explicit job-count metadata
+and explanation above. Alleged missing camera/parser/count tests were checked against the existing
+new tests; an all-air noncanonical cell cannot be constructed through the sealed canonical type.
+The pre-existing 4M cap is per job, not a scene-wide lifetime work cap; the retained aggregate
+output and resident caps were verified in `Stream`, not inferred from the review.
+
+Four completed older captures (`renderdoc-o4y70k5r`, `renderdoc-pvv6_ief`, `renderdoc-zj6fsmvc`,
+`renderdoc-0by5c3zd`) were moved into the existing ignored `target/tooling-archive-lHJXgO/` without
+deletion or retention-limit increases. Their original receipt paths now resolve through that
+recoverable local archive; this is not an off-machine backup.
+
+A separate finite moving-camera check used the already installed X11 input and FFmpeg tools inside
+the existing network/PID sandbox. It addressed only the freshly launched game's PID-verified window,
+sent bounded orbit/zoom keys, recorded six seconds at 15 FPS (90 frames, 1440×900) and required the
+20-second native smoke to complete. The owned processes terminated normally. Evidence is retained
+in `target/window-motion-MaXCij/`: `motion.mp4`, the finite harness, logs and three extracted native
+frames (5/25/75) inspected for actual camera movement and attached window geometry. This is a small
+motion spot-check, not an exhaustive shimmer, occlusion or high-refresh temporal acceptance test;
+its screen recording/XWayland timings are excluded from the performance table. No additional tool
+installation or global input hook was necessary. Active RenderDoc evidence is about 1.7 GiB, the
+recoverable archive about 4.1 GiB and this separate bounded motion evidence about 8.6 MiB.

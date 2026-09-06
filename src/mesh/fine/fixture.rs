@@ -6,6 +6,8 @@ use crate::{
 };
 use std::error::Error;
 
+mod ruins;
+
 pub const STAGE_NAMES: [&str; 4] = ["intact", "shallow chip", "through bore", "breach"];
 
 /// The authored patch is the only changing source region in the industrial inspection.
@@ -20,12 +22,13 @@ pub fn industrial_patch_positions() -> Vec<IVec3> {
 /// # Errors
 /// Refuses unknown stages or bounded geometry preparation failures.
 pub fn industrial_inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn Error>> {
-    install_wall(
+    let world = install_wall(
         &crate::WorldPreset::Industrial.build(),
         stage,
         IVec3::new(-17, 1, 15),
         true,
-    )
+    )?;
+    ruins::courtyard(&world)
 }
 
 /// Builds thin layered masonry with exact air cuts and a surrounding concrete inspection pad.
@@ -102,13 +105,18 @@ fn install_wall(
                 // contour samples every 4 units. It is intentionally not called calibrated blast.
                 for row in (0_u16..256).step_by(4) {
                     let dy = y * 256 + i32::from(row) + 2 - 350;
-                    let remainder = radius * radius - dy * dy;
-                    if remainder <= 0 {
-                        continue;
-                    }
-                    let half = i32::try_from(u32::try_from(remainder)?.isqrt())?;
-                    let left = (512 - half - x * 256).clamp(0, 256);
-                    let right = (512 + half - x * 256).clamp(0, 256);
+                    let (left, right) = if positive && stage == 3 {
+                        ruins::breach_row(y * 256 + i32::from(row))
+                    } else {
+                        let remainder = radius * radius - dy * dy;
+                        if remainder <= 0 {
+                            continue;
+                        }
+                        let half = i32::try_from(u32::try_from(remainder)?.isqrt())?;
+                        (512 - half, 512 + half)
+                    };
+                    let left = (left - x * 256).clamp(0, 256);
+                    let right = (right - x * 256).clamp(0, 256);
                     if left >= right {
                         continue;
                     }

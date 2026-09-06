@@ -40,10 +40,10 @@ mod tests {
     #[test]
     fn default_player_height_viewpoints_stand_over_actual_ground_and_outside_solids() {
         use destructible_fps::{
-            WorldPreset,
+            mesh::fine::fixture::industrial_inspection_world,
             world::query::{PhysicalBox, QueryBudget, QueryLimits, overlaps_solid},
         };
-        let world = WorldPreset::Industrial.build();
+        let world = industrial_inspection_world(0).unwrap();
         for view in [View::Approach, View::Wide] {
             let (eye, _) = view.camera(
                 WorldKind::Industrial,

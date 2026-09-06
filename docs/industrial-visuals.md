@@ -25,6 +25,9 @@ The subsequent [roof-ruin increment](industrial-roof.md) records thinner actual 
 an open damaged bay, its support/topology checks and native evidence. It does not satisfy the
 full reference or establish calibrated roof collapse.
 
+The [worn hardstand increment](industrial-hardstand.md) adds a real layered concrete forecourt,
+open joints and chipped edges while preserving the existing rubble and its soil supports.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after

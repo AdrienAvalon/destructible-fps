@@ -124,6 +124,8 @@ fn exact_inspection_reference_is_unchanged_and_industrial_rubble_is_persistent()
     assert_eq!(rubble.len(), 8);
     let windows = window_positions(&baseline);
     assert!(windows.len() > 300);
+    let apron: Vec<_> = baseline.refined_positions().filter(|p| p.y == 0).collect();
+    assert_eq!(apron.len(), 566);
     for (stage, reference) in references.into_iter().enumerate() {
         assert_eq!(inspection_world(stage).unwrap().fingerprint(), reference);
         let world = industrial_inspection_world(stage).unwrap();
@@ -132,6 +134,9 @@ fn exact_inspection_reference_is_unchanged_and_industrial_rubble_is_persistent()
         }
         assert_eq!(window_positions(&world), windows);
         for position in &windows {
+            assert_eq!(world.cell(*position), baseline.cell(*position));
+        }
+        for position in &apron {
             assert_eq!(world.cell(*position), baseline.cell(*position));
         }
         let stats = world.geometry_stats();

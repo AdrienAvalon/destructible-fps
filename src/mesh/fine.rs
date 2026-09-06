@@ -1,4 +1,6 @@
-//! Exact fine/static surfaces. No coarse occupancy proxy, smoothing, or partial publication.
+//! Exact fine/static surfaces and bounded integration with uniform Surface Nets terrain.
+//!
+//! Fine occupancy is never replaced by a coarse proxy; failed candidates are never published.
 //! Edge subdivisions depend on the complete source geometry, not the requested chunk set.
 
 use super::{CpuMesh, Vertex, material_surface, voxel_damage};
@@ -7,9 +9,11 @@ use crate::{
     volume::{LocalBox, RefinedVolume, VolumeError, surface::SurfaceLimits},
     world::{geometry::GeometryCell, query::StaticGeometry},
 };
-use std::{collections::HashMap, fmt};
+use std::{cell::Cell, collections::HashMap, fmt};
 
 pub mod fixture;
+mod hybrid;
+pub use hybrid::{hybrid_dirty_chunks, mesh_hybrid_chunks};
 
 pub const MAX_FINE_MESH_CHUNKS: usize = 16;
 pub const MAX_FINE_MESH_VERTICES: usize = 262_144;
@@ -59,6 +63,7 @@ pub enum FineMeshError {
     LineBudget,
     Allocation,
     Surface(VolumeError),
+    DerivedInvariant,
 }
 impl fmt::Display for FineMeshError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -92,6 +97,15 @@ pub fn mesh_fine_chunks(
     chunks: &[IVec3],
     limits: FineMeshLimits,
 ) -> Result<FineMeshBatch, FineMeshError> {
+    mesh_chunks(world, chunks, limits, None)
+}
+
+fn mesh_chunks(
+    world: &impl StaticGeometry,
+    chunks: &[IVec3],
+    limits: FineMeshLimits,
+    refined: Option<&crate::world::geometry::RefinedWorld>,
+) -> Result<FineMeshBatch, FineMeshError> {
     for (value, hard) in [
         (limits.vertices, MAX_FINE_MESH_VERTICES),
         (limits.indices, MAX_FINE_MESH_INDICES),
@@ -118,8 +132,13 @@ pub fn mesh_fine_chunks(
     }) {
         return Err(FineMeshError::CoordinatePrecision);
     }
+    let work = WorkMeter::new(limits.work);
+    let hybrid = refined
+        .map(|refined| hybrid::HybridSource::new(world, refined, chunks, &work))
+        .transpose()?;
     let mut builder = Builder {
         world,
+        work: &work,
         limits,
         report: FineMeshReport::default(),
         lines: HashMap::new(),
@@ -130,6 +149,13 @@ pub fn mesh_fine_chunks(
         .map_err(|_| FineMeshError::Allocation)?;
     for &chunk in chunks {
         let mut mesh = CpuMesh::default();
+        let mut derived = hybrid.as_ref().map(|_| {
+            super::DerivedCellCache::new(IVec3::new(
+                chunk.x * CHUNK_EDGE,
+                chunk.y * CHUNK_EDGE,
+                chunk.z * CHUNK_EDGE,
+            ))
+        });
         for z in 0..CHUNK_EDGE {
             for y in 0..CHUNK_EDGE {
                 for x in 0..CHUNK_EDGE {
@@ -141,13 +167,19 @@ pub fn mesh_fine_chunks(
                     );
                     let cell = world.geometry_cell(position);
                     if cell.solid_units() != 0 {
-                        builder.append_cell(&mut mesh, position, &cell)?;
+                        if let (Some(hybrid), Some(derived)) = (&hybrid, &mut derived) {
+                            builder.append_hybrid(&mut mesh, position, &cell, hybrid, derived)?;
+                        } else {
+                            builder.append_cell(&mut mesh, position, &cell, [false; 6])?;
+                        }
                     }
                 }
             }
         }
         meshes.push((chunk, mesh));
     }
+    work.check()?;
+    builder.report.work = work.used.get();
     Ok(FineMeshBatch {
         meshes,
         report: builder.report,
@@ -165,17 +197,14 @@ type Cuts = [bool; 257];
 
 struct Builder<'a, G> {
     world: &'a G,
+    work: &'a WorkMeter,
     limits: FineMeshLimits,
     report: FineMeshReport,
     lines: HashMap<Line, Cuts>,
 }
 impl<G: StaticGeometry> Builder<'_, G> {
-    const fn charge(&mut self, count: usize) -> Result<(), FineMeshError> {
-        if count > self.limits.work - self.report.work {
-            return Err(FineMeshError::WorkBudget);
-        }
-        self.report.work += count;
-        Ok(())
+    fn charge(&self, count: usize) -> Result<(), FineMeshError> {
+        self.work.charge(count)
     }
 
     #[allow(clippy::many_single_char_names)] // Axis/tangent notation matches SurfaceQuad.
@@ -184,19 +213,24 @@ impl<G: StaticGeometry> Builder<'_, G> {
         mesh: &mut CpuMesh,
         p: IVec3,
         cell: &GeometryCell,
+        transition: [bool; 6],
     ) -> Result<(), FineMeshError> {
         self.charge(6)?;
         let volume = page(cell);
         let neighbors = std::array::from_fn::<_, 6, _>(|i| {
             let mut v = [p.x, p.y, p.z];
             v[i / 2] += if i % 2 == 0 { -1 } else { 1 };
-            page(&self.world.geometry_cell(IVec3::new(v[0], v[1], v[2])))
+            if transition[i] {
+                RefinedVolume::uniform(Voxel::AIR)
+            } else {
+                page(&self.world.geometry_cell(IVec3::new(v[0], v[1], v[2])))
+            }
         });
         let surface = volume.surface(
             neighbors.each_ref(),
             SurfaceLimits {
                 quads: (self.limits.quads - self.report.quads).max(1),
-                visits: (self.limits.work - self.report.work)
+                visits: (self.limits.work - self.work.used.get())
                     .clamp(1, crate::volume::surface::MAX_SURFACE_VISITS),
             },
         )?;
@@ -367,6 +401,36 @@ fn page(cell: &GeometryCell) -> RefinedVolume {
         || RefinedVolume::uniform(cell.uniform_voxel().expect("canonical uniform cell")),
         Clone::clone,
     )
+}
+
+struct WorkMeter {
+    used: Cell<usize>,
+    limit: usize,
+    exhausted: Cell<bool>,
+}
+impl WorkMeter {
+    const fn new(limit: usize) -> Self {
+        Self {
+            used: Cell::new(0),
+            limit,
+            exhausted: Cell::new(false),
+        }
+    }
+    fn charge(&self, count: usize) -> Result<(), FineMeshError> {
+        if self.exhausted.get() || count > self.limit - self.used.get() {
+            self.exhausted.set(true);
+            return Err(FineMeshError::WorkBudget);
+        }
+        self.used.set(self.used.get() + count);
+        Ok(())
+    }
+    const fn check(&self) -> Result<(), FineMeshError> {
+        if self.exhausted.get() {
+            Err(FineMeshError::WorkBudget)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

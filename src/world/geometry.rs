@@ -298,6 +298,24 @@ impl RefinedWorld {
             .collect()
     }
 
+    /// Sparse fine-page coordinates only; no dense scan or material approximation. Ordering is
+    /// unspecified, and the iterator borrows the same immutable geometry snapshot.
+    pub fn refined_positions(&self) -> impl Iterator<Item = IVec3> + '_ {
+        self.chunks.iter().flat_map(|(&position, chunk)| {
+            chunk.geometry.pages.keys().map(move |&index| {
+                let edge = super::CHUNK_EDGE_USIZE;
+                IVec3::new(
+                    position.x * super::CHUNK_EDGE
+                        + i32::try_from(index % edge).unwrap_or_default(),
+                    position.y * super::CHUNK_EDGE
+                        + i32::try_from(index / edge % edge).unwrap_or_default(),
+                    position.z * super::CHUNK_EDGE
+                        + i32::try_from(index / (edge * edge)).unwrap_or_default(),
+                )
+            })
+        })
+    }
+
     // The checkpoint sorts only 12-byte coordinates, not wide GeometryCell enums/Arc clones.
     fn occupied_positions(&self) -> Vec<IVec3> {
         let mut positions = Vec::with_capacity(self.solid_voxels);

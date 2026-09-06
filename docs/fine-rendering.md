@@ -4,15 +4,19 @@
 renderer and bounded `MeshScheduler`. It does not render an AI image, use a coarse collision proxy,
 or feed partial cells to the coarse game authority. It is an inspection scene with four **authored**
 states: intact layered masonry, a shallow chip, a through-bore, and a large breach. These are not
-calibrated bullet/blast outcomes. Existing playable maps, smoothed terrain, weapons and multiplayer
-are unchanged. This increment is a visible integration gate, **not photorealism or final gameplay**.
+calibrated bullet/blast outcomes. The optional industrial inspection uses the same smooth terrain
+as the existing map alongside a fine layered masonry patch. Existing playable weapon/multiplayer
+paths are unchanged. This is a visible integration gate, **not photorealism or final gameplay**.
 
 ```bash
 cargo run --release --bin fine-geometry-demo
 cargo run --release --bin fine-geometry-demo -- --smoke-seconds 8
+cargo run --release --bin fine-geometry-demo -- --world industrial --smoke-seconds 12
 cargo run --release --bin fine-mesh-benchmark -- --iterations 100
+cargo run --release --bin fine-mesh-benchmark -- --world industrial --iterations 100
 cargo build --release --bin fine-geometry-demo
 python tools/tooling_smoke.py renderdoc --world fine-inspection
+python tools/tooling_smoke.py renderdoc --world fine-industrial
 ```
 
 Left/right arrows choose a state; up/down orbit; W/S zoom; Escape closes the viewer. There is no
@@ -22,6 +26,47 @@ validated by this viewer. The smoke requires all four states to be actually pres
 times, finished meshing and real GPU timing samples. Missing display/GPU, errors, or early closure
 cannot pass. Only one job is in flight; a newer user selection discards stale results. No world
 mutation, server, network listener, credential, package or privilege is required.
+
+## Fine architecture inside the smooth industrial environment
+
+`mesh_hybrid_chunks` consumes a complete immutable `RefinedWorld`. Uniform sources preserve the
+existing exact architecture and Surface Nets terrain byte-for-byte in regression fixtures. Around
+each actual fine cell, a one-cell Chebyshev collar keeps neighboring uniform cells exact. The
+derived dual-cell stencil samples only one cell around its owner; the collar therefore prevents
+partial occupancy from being substituted into a uniform stencil. A partial cell returns no uniform
+voxel, never fake air or a representative solid. Existing mixed exact/derived junction pinning and
+exact-side render-cap ownership close the transition; these caps are render closure, not new
+physical solids. Fine/fine and fine/uniform boundaries retain the canonical perimeter subdivisions.
+
+Collar membership reads the bounded sparse fine-page iterator, not a dense scan or truncated list.
+The shared work meter also charges collar construction and every derived source lookup. Query
+exhaustion is sticky and rejects the whole candidate. The collar filter derives its halo from the
+same seven-cell dependency constant used by coarse masonry shading. `hybrid_dirty_chunks` unions
+all affected chunks at edges/corners, validates coordinates first and bounds input edit count. Its
+output may exceed one job for general edits; callers must slice it without raising the job caps.
+
+The industrial fixture replaces only twelve cells with a 312.5 mm layered wall, aligned to the
+existing facade. The four cut stages remain authored circular test geometry, not simulated weapon
+energy or structural failure. Tests compare full independent remeshing across every industrial
+stage with the eight-chunk dirty region; nonempty geometry outside it is unchanged. Additional
+six-direction exposed-junction rays detect view-through cracks without a solid block hiding the
+seam, while a ray through the actual bore must remain unobstructed.
+
+The viewer bootstraps one fixed source stage with one chunk per worker job, displaying its partial
+stream until all chunks are loaded. Stage controls are disabled during bootstrap. Subsequent
+changes submit the bounded dirty set together (up to the existing sixteen-chunk job limit), retain
+the prior GPU state while staging its CPU meshes, then upload the replacement
+set, including empty chunks, before the next render. Stale selections discard unpublished results.
+This is a presentation-boundary replacement, not a crash-safe GPU allocation transaction. A current
+CPU error, count/identity mismatch or five-second worker deadline exits visibly; there is no
+unbounded automatic retry. An extraction failure for an abandoned stage is reported and discarded
+after verifying its source identity. GPU/device allocation failure does not promise recoverable rollback.
+
+Inspection bookkeeping is bounded to 256 scene chunks, 524,288 resident vertices and 1,572,864
+resident indices. A dirty replacement additionally stays within 16 chunks and the existing fine
+vertex/index output caps. Source preparation stays outside presentation. Stage latency includes
+worker polling/frame scheduling; sum-of-job work/line counts are not a single-job budget or unique
+global cache size. Extraction throughput and GPU frame time are measured separately.
 
 ## Geometry and seam contract
 
@@ -74,7 +119,7 @@ also retains its smaller existing local cap. One dense page can refuse before th
 legal storage does **not** imply affordable render geometry. No automatic coarse fallback or partial
 chunk publication hides that refusal. The completed result carries its source fingerprint and
 either the entire candidate or an explicit error. The inspection viewer retains its preceding GPU
-state but exits on a failed job; it does not claim recovery or interactive continued operation.
+state but exits on a failed current job; it does not claim general interactive recovery.
 
 Emitted counts are not reserved capacity. Rust vectors/maps may reserve spare bounded capacity;
 reserve calls report allocation failure where supported, while Arc creation follows the normal
@@ -85,17 +130,19 @@ path is enabled in a match.
 
 ## Following gates
 
-- Preserve the existing smooth terrain when introducing exact fine architectural cells; prove the
-  fine/exact/smoothed transition instead of substituting a coarse proxy or flattening all terrain.
+- Extend the proved fine/exact/smoothed inspection transition to live, changing gameplay snapshots
+  and resident chunk streaming without weakening its seam and work-budget guarantees.
 - Schedule geometry edits, seams and remeshing through actual weapon-authoritative transactions,
   invalidate changed chunks **and** their edge/corner neighbors, and keep collision/render state
-  coherent across repairs. This viewer remeshes the complete union of its small scene's chunks.
+  coherent across repairs. The industrial inspector now replaces only its complete dirty region.
 - Add fine body topology/rendering, network state/repair, reliable dynamic contact and full-tensor
   angular response; the existing live authority still rejects a `RefinedWorld`.
 - Develop non-axis-aligned fracture surfaces, material blending, rubble and art direction. Better
   geometry alone does not supply the reference scene's indirect lighting or environmental detail.
 
-The benchmark repeats immutable authored snapshots, with authoring outside the timed region. It
+The benchmark repeats immutable authored snapshots, with authoring outside the timed region. The
+industrial benchmark times the same complete eight-chunk replacement job used by the viewer;
+its bootstrap measurement separately processes all 132 chunks one at a time. It
 reports first-run and p50/p95/p99/max extraction times, work and output counts. It is neither a
 complete server tick nor a client frame and does not establish sustained combat performance.
 
@@ -115,7 +162,23 @@ the source plus six neighbors are included in charged cell/neighbor work. Creati
 Arcs still allocates; removing this allocation churn and measuring true allocation counts remain
 optimization work. The benchmark's peak RSS must not be presented as an allocation count.
 
-## Validation receipt, 2026-09-06
+### Hybrid integration review
+
+A bounded targeted Claude review covered the mesher, sparse iterator, scheduler and inspection
+delivery state machine; Codex separately reviewed GUI options, fixtures, benchmarks and the capture
+whitelist. It led to explicit stale-failure reporting/discard, resident-overflow and mid-derived-query
+exhaustion tests, and a full 4,096-page sparse-source test. That far-page fixture consumes 12,289
+charged work units for an empty requested chunk, including metadata traversal and all 4,096 cell
+visits. The implementation still scans sparse page metadata per job; a spatial query optimization
+remains useful for heavily refined worlds, and worst-case page density is not a frame-time proof.
+
+Two suggested changes were not justified by the actual code. `nearby_masonry_damage` samples raw
+uniform geometry and does not consult collar classification, so its radius six does not add two
+more cells to the collar dependency. The pre-existing constant assertion `2 * dependency_radius <
+CHUNK_EDGE` already protects eight-corner dirty-chunk enumeration. Neither radius nor resource
+limits were increased. Final independent tests and native evidence remain required after review.
+
+## Initial exact-surface validation receipt, 2026-09-06
 
 Source baseline `8424aad`, plus this increment. Linux 7.2.2-1-cachyos, Rust 1.97.1, i7-13700H,
 RTX 4050 Laptop/NVIDIA 610.57.04. Final formatting/strict all-target Clippy pass; **485 ordinary
@@ -158,6 +221,78 @@ Binary SHA-256 at validation:
 - `fine-geometry-demo`: `a9d3ed042bba71e56aab47f510efa128d7ea2dd6f2db9221b3fa47855ff11aac`
 - `fine-mesh-benchmark`: `f6eba0f83239ed8160503b8ea97f02b9796e498d8072a6a25846855fe251d8d6`
 
-The full game goal remains active. The next integration is fine architecture with the existing
-smooth environment, followed by real weapon/body/network promotion; this standalone inspection
-must not become a substitute for those requirements.
+The full game goal remains active. Fine architecture now has an inspection integration with the
+smooth industrial environment; real weapon/body/network promotion remains next. This standalone
+inspection must not become a substitute for those requirements.
+
+## Hybrid industrial validation receipt, 2026-09-06
+
+Source baseline `7d04717`, plus this increment. Linux 7.2.2-1-cachyos, Rust 1.97.1,
+i7-13700H, RTX 4050 Laptop (6,141 MiB)/NVIDIA 610.57.04. Final strict Clippy/formatting pass;
+**498 ordinary tests in each debug/release profile** pass. All six actual Vulkan tests were also
+run explicitly in each profile, plus two compile-fail doctests, the targeted network, secure
+transport/authority/process and OIDC suites, and 22 offline tooling tests. Required destruction-500,
+structural-100, physics-1024/300 and snapshot-20 benchmarks pass; replicas converge and the unchanged
+physics fixture finishes with 1,024 sleeping bodies. These remain coarse gameplay/physics checks,
+not evidence of fine weapons or bodies.
+
+One intermediate debug run under simultaneous release compilation failed in the existing impaired
+network test: incoming sequence 20, expected 1, sixteen future packets/4,231 bytes retained. Source
+inspection confirms this was another future packet, not the deliverable missing packet covered by
+the earlier inbox fix in `performance.md`. No networking code, queue cap or impairment was changed.
+After compilation ended, the complete debug suite, the targeted network suite and five additional
+exact repetitions passed; the final batched debug/release suites also passed sequentially. This
+preserves evidence of the fixture's sensitivity to accumulated future traffic before repair, not
+a claim of robustness to arbitrary process starvation. Keep network repair stress on the backlog.
+
+Final industrial extraction, 100 warm-process samples of one complete eight-chunk replacement job
+(milliseconds; authoring and final mesh destruction outside the timed interval):
+
+| Authored state | Vertices / triangles | Charged work | p50 | p95 | p99 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Intact | 17,910 / 9,102 | 467,325 | 8.526 | 8.682 | 8.790 |
+| Shallow chip | 20,174 / 10,972 | 583,901 | 8.989 | 9.237 | 9.352 |
+| Through bore | 20,202 / 10,990 | 616,813 | 9.153 | 9.325 | 9.375 |
+| Breach | 26,634 / 16,286 | 1,011,785 | 10.615 | 10.819 | 10.915 |
+
+The process peaks at 11,880 KiB RSS, not an allocation count. The separately measured bootstrap
+extracts 132 chunks, 203,222 vertices/101,758 triangles in 70.979 ms total, with at most 191,090
+charged work per one-chunk job. Native initial delivery takes 1,274 ms due to progressive frame
+scheduling; that is not CPU extraction time. All work/output caps are unchanged.
+
+The first implementation scheduled each of the eight replacement chunks on a separate frame.
+An uncontended native run measured about 133 ms per replacement despite about 10.6 ms extraction
+p99. The final viewer batches those eight chunks under the existing sixteen-chunk job limit and
+publishes only after the whole result. Full-scene tests prove byte-identical grouped/individual
+meshes. Final native replacement latencies are 12.931/13.031/13.318 ms for the three changed states;
+these three observations are not a statistically established latency percentile or a combat SLA.
+
+Final native industrial smoke: 1,440×900, 4×MSAA, twelve seconds, presented counts
+`[36,36,36,2467]`, zero dropped GPU timing samples. GPU total p50/p95/p99 is
+1.801/2.440/3.126 ms; CPU wall time including presentation is 2.725/13.140/16.718 ms.
+The earlier uncontended one-chunk delivery run recorded GPU total p99 7.956 ms; clocks/power were
+not locked or sampled per frame, so no GPU speedup is attributed to batching. The final small exact
+inspection also passes (eight seconds, `[38,36,37,2458]`, GPU p99 0.799 ms), as do the ordinary
+five-second playable range and industrial smokes. These short authored scenes do not establish
+1080p sustained-combat, server-tick or cross-OS release budgets.
+
+Actual isolated RenderDoc capture/replay: `fine-industrial`, frame 400, **304,534,168 bytes,
+219 draws, 14 textures, Vulkan**. The retained thumbnail shows the fine open circular aperture
+inside the industrial facade with smooth ground and no detached wall ribbon in this view. Its
+regular contour and repeated materials remain visibly non-photorealistic. This capture predates
+the final delivery batching/error-handling changes; the full-scene grouped/individual regression
+proves mesh equivalence, and the final native smokes exercise the final delivery code. Instrumented
+capture timings and the initial concurrent build/benchmark smoke are excluded from the table.
+
+Evidence: `/tmp/fps-hybrid-native-51pFu9/` and
+`target/tooling/renderdoc-eov12e3a/`. Active tool evidence totals 2,103,685,816 bytes after capture;
+the existing 2 GiB pre-run guard and separate earlier archive are unchanged. No evidence was
+deleted, no cap was raised and no package, host policy or network service was changed.
+Final executable SHA-256:
+
+- `fine-geometry-demo`: `26bc96acb3ac3728b34cac113807d39e8c0bf60edc4639d931db782b8880b87d`
+- `fine-mesh-benchmark`: `7438ca7777f3c99458507993aa2a5fe22dceaab9827ebb5b9be2ca41e559d495`
+
+Following work: promote fine weapon edits into coherent render/collision/authority state, then
+fine structural/body/network behavior, non-axis-aligned fracture detail, rubble and the authored
+photoreal visual scene. Keep the game goal active; a regular prepared hole is not realistic blast.

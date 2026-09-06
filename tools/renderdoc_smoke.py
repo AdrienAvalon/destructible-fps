@@ -22,9 +22,10 @@ try:
         "range": "--world range --showcase-closeup --smoke-seconds 8",
         "industrial": "--world industrial --showcase-closeup --smoke-seconds 8",
         "fine-inspection": "--smoke-seconds 8",
+        "fine-industrial": "--world industrial --smoke-seconds 12",
     }[world]
     # qrenderdoc has already initialized replay. No global hook or remote replay server.
-    executable = "fine-geometry-demo" if world == "fine-inspection" else "playable-demo"
+    executable = "fine-geometry-demo" if world in ("fine-inspection", "fine-industrial") else "playable-demo"
     options = rd.CaptureOptions()
     options.allowVSync = True
     options.captureCallstacks = False
@@ -38,7 +39,8 @@ try:
     control = rd.CreateTargetControl("127.0.0.1", launched.ident, "fps-tool-smoke", False)
     if control is None:
         raise RuntimeError("cannot connect to the owned game capture")
-    control.QueueCapture(180 if world == "fine-inspection" else 120, 1)
+    frame = {"fine-inspection": 180, "fine-industrial": 400}.get(world, 120)
+    control.QueueCapture(frame, 1)
     deadline = time.monotonic() + 35
     filename = None
     while time.monotonic() < deadline and control.Connected():

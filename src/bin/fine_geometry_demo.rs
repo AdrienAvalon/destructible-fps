@@ -1,16 +1,29 @@
 //! Actual Vulkan fine-geometry inspection. Authored stages, not fine multiplayer gameplay.
 #![allow(clippy::cast_precision_loss)]
 use destructible_fps::{
-    IVec3,
     mesh::fine::{
-        FineMeshBatch, FineMeshLimits,
-        fixture::{STAGE_NAMES, inspection_world},
+        FineMeshLimits, MAX_FINE_MESH_CHUNKS,
+        fixture::{
+            STAGE_NAMES, industrial_inspection_world, industrial_patch_positions, inspection_world,
+        },
+        hybrid_dirty_chunks,
     },
-    mesh_scheduler::{CompletedMeshJob, MeshScheduler},
+    mesh_scheduler::MeshScheduler,
     render::{RenderOutcome, Renderer},
     telemetry::SampleWindow,
     world::geometry::RefinedWorld,
 };
+
+#[path = "fine_geometry_demo/stream.rs"]
+mod stream;
+use stream::Stream;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum WorldKind {
+    #[default]
+    Inspection,
+    Industrial,
+}
 use glam::Vec3;
 use std::{
     error::Error,
@@ -31,10 +44,9 @@ struct Scene {
     renderer: Renderer,
     worker: MeshScheduler,
     worlds: Vec<Arc<RefinedWorld>>,
-    chunks: Vec<IVec3>,
+    stream: Stream,
+    kind: WorldKind,
     desired: usize,
-    pending: Option<(usize, Instant)>,
-    displayed: Option<usize>,
     presented: [usize; 4],
     started: Instant,
     smoke: Option<Duration>,
@@ -49,20 +61,32 @@ impl Scene {
     fn new(
         window: Arc<Window>,
         worlds: Vec<Arc<RefinedWorld>>,
+        kind: WorldKind,
         smoke: Option<Duration>,
     ) -> Result<Self, String> {
         let mut chunks: Vec<_> = worlds.iter().flat_map(|w| w.chunk_positions()).collect();
         chunks.sort_unstable();
         chunks.dedup();
+        let dirty = if kind == WorldKind::Industrial {
+            let dirty =
+                hybrid_dirty_chunks(&industrial_patch_positions()).map_err(|e| e.to_string())?;
+            // Include empty halo chunks so a stage can remove a previously rendered surface.
+            chunks.extend(&dirty);
+            chunks.sort_unstable();
+            chunks.dedup();
+            dirty
+        } else {
+            chunks.clone()
+        };
+        let fingerprints = std::array::from_fn(|i| worlds[i].fingerprint());
         Ok(Self {
             renderer: pollster::block_on(Renderer::new(Arc::clone(&window)))?,
             window,
             worker: MeshScheduler::new(),
             worlds,
-            chunks,
+            stream: Stream::new(chunks, dirty, fingerprints, MAX_FINE_MESH_CHUNKS)?,
+            kind,
             desired: 0,
-            pending: None,
-            displayed: None,
             presented: [0; 4],
             started: Instant::now(),
             smoke,
@@ -71,60 +95,67 @@ impl Scene {
             gpu: SampleWindow::new(16384),
             mesh: SampleWindow::new(128),
             yaw: -0.25,
-            distance: 5.5,
+            distance: if kind == WorldKind::Industrial {
+                8.5
+            } else {
+                5.5
+            },
         })
     }
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         let frame = Instant::now();
-        if let Some(job) = self.worker.poll().map_err(|e| e.to_string())?
-            && let Some(MeshDelivery {
-                stage,
-                start,
-                result,
-            }) = complete_fine_job(self.pending.take(), self.desired, &self.worlds, job)?
-        {
-            let world_fingerprint = self.worlds[stage].fingerprint();
-            println!(
-                "FINE_STAGE stage={stage} name={} fingerprint={world_fingerprint:032x} quads={} vertices={} triangles={} work={} cached_lines={} worker_ms={:.3}",
-                STAGE_NAMES[stage],
-                result.report.quads,
-                result.report.vertices,
-                result.report.indices / 3,
-                result.report.work,
-                result.report.lines,
-                start.elapsed().as_secs_f64() * 1000.0
-            );
-            self.mesh.record_ms(start.elapsed().as_secs_f64() * 1000.0);
-            // All requested chunks (including now-empty ones) replace the preceding stage.
-            self.renderer.upload_chunk_meshes(result.meshes);
-            self.displayed = Some(stage);
-            self.window.set_title(&format!("Fine geometry inspection | {} | arrows: orbit/stage, W/S: zoom | not weapon simulation",STAGE_NAMES[stage]));
+        if let Some(job) = self.worker.poll().map_err(|e| e.to_string())? {
+            let delivery = self.stream.complete(self.desired, job)?;
+            if !delivery.meshes.is_empty() {
+                self.renderer.upload_chunk_meshes(delivery.meshes);
+            }
+            if let Some((stage, report, elapsed)) = delivery.complete {
+                let world_fingerprint = self.worlds[stage].fingerprint();
+                println!(
+                    "FINE_STAGE world={:?} stage={stage} name={} fingerprint={world_fingerprint:032x} quads={} vertices={} triangles={} work={} cached_lines={} stage_latency_ms={:.3}",
+                    self.kind,
+                    STAGE_NAMES[stage],
+                    report.quads,
+                    report.vertices,
+                    report.indices / 3,
+                    report.work,
+                    report.lines,
+                    elapsed.as_secs_f64() * 1000.0
+                );
+                self.mesh.record_ms(elapsed.as_secs_f64() * 1000.0);
+                self.window.set_title(&format!("Fine geometry {:?} | {} | arrows: orbit/stage, W/S: zoom | authored inspection, not weapon simulation", self.kind, STAGE_NAMES[stage]));
+            }
         }
         if self.smoke.is_some()
-            && self.pending.is_none()
-            && self.displayed == Some(self.desired)
+            && self.stream.idle()
+            && self.stream.displayed == Some(self.desired)
             && self.presented[self.desired] >= 35
             && self.desired + 1 < STAGE_NAMES.len()
         {
             self.desired += 1;
         }
-        if self.pending.is_none() && self.displayed != Some(self.desired) {
-            self.worker
-                .submit_fine(
-                    Arc::clone(&self.worlds[self.desired]),
-                    self.chunks.clone(),
-                    FineMeshLimits::default(),
-                )
-                .map_err(|e| e.to_string())?;
-            self.pending = Some((self.desired, Instant::now()));
+        if let Some((stage, chunks)) = self.stream.request(self.desired)? {
+            let world = Arc::clone(&self.worlds[stage]);
+            let result = if self.kind == WorldKind::Industrial {
+                self.worker
+                    .submit_hybrid(world, chunks, FineMeshLimits::default())
+            } else {
+                self.worker
+                    .submit_fine(world, chunks, FineMeshLimits::default())
+            };
+            result.map_err(|e| e.to_string())?;
         }
-        let focus = Vec3::new(2.0, 1.4, 0.1);
+        let (focus, facing, elevation) = if self.kind == WorldKind::Industrial {
+            (Vec3::new(-15.0, 2.4, 15.8), 1.0, 1.3)
+        } else {
+            (Vec3::new(2.0, 1.4, 0.1), -1.0, 0.5)
+        };
         let camera = focus
             + Vec3::new(
                 self.yaw.sin() * self.distance,
-                0.5,
-                -self.yaw.cos() * self.distance,
+                elevation,
+                facing * self.yaw.cos() * self.distance,
             );
         match self.renderer.render(
             camera,
@@ -132,7 +163,7 @@ impl Scene {
             self.started.elapsed().as_secs_f32(),
         ) {
             RenderOutcome::Presented => {
-                if let Some(stage) = self.displayed {
+                if let Some(stage) = self.stream.displayed {
                     self.presented[stage] += 1;
                 }
             }
@@ -149,7 +180,7 @@ impl Scene {
 
     fn finish_smoke(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         if self.smoke.is_some_and(|d| self.started.elapsed() >= d) {
-            if self.pending.is_some() || self.presented.iter().any(|n| *n < 35) {
+            if !self.stream.idle() || self.presented.iter().any(|n| *n < 35) {
                 return Err(format!(
                     "incomplete fine render smoke: {:?}",
                     self.presented
@@ -161,7 +192,7 @@ impl Scene {
             for (label, samples) in [
                 ("cpu_frame_with_present", &self.cpu),
                 ("gpu_total", &self.gpu),
-                ("mesh_job_latency", &self.mesh),
+                ("mesh_stage_latency", &self.mesh),
             ] {
                 if let Some(s) = samples.summary() {
                     println!("FINE_TIMING {label} {s:?}");
@@ -182,45 +213,11 @@ impl Scene {
     }
 }
 
-struct MeshDelivery {
-    stage: usize,
-    start: Instant,
-    result: FineMeshBatch,
-}
-
-fn complete_fine_job(
-    pending: Option<(usize, Instant)>,
-    desired: usize,
-    worlds: &[Arc<RefinedWorld>],
-    job: CompletedMeshJob,
-) -> Result<Option<MeshDelivery>, String> {
-    let (stage, start) = pending.ok_or("unsolicited mesh result")?;
-    let CompletedMeshJob::Fine {
-        world_fingerprint,
-        result,
-    } = job
-    else {
-        return Err("unexpected mesh kind".into());
-    };
-    let result = result.map_err(|e| e.to_string())?;
-    let expected = worlds
-        .get(stage)
-        .ok_or("invalid pending inspection stage")?
-        .fingerprint();
-    if world_fingerprint != expected {
-        return Err("fine mesh fingerprint mismatch".into());
-    }
-    Ok((stage == desired).then_some(MeshDelivery {
-        stage,
-        start,
-        result,
-    }))
-}
-
 struct App {
     scene: Option<Scene>,
     worlds: Option<Vec<Arc<RefinedWorld>>>,
     smoke: Option<Duration>,
+    kind: WorldKind,
     failure: Option<String>,
 }
 impl ApplicationHandler for App {
@@ -239,6 +236,7 @@ impl ApplicationHandler for App {
                 Scene::new(
                     Arc::new(w),
                     self.worlds.take().ok_or("missing inspection worlds")?,
+                    self.kind,
                     self.smoke,
                 )
             });
@@ -270,10 +268,12 @@ impl ApplicationHandler for App {
                 {
                     match key {
                         KeyCode::Escape => event_loop.exit(),
-                        KeyCode::ArrowRight if s.smoke.is_none() => {
+                        KeyCode::ArrowRight
+                            if s.smoke.is_none() && s.stream.displayed.is_some() =>
+                        {
                             s.desired = (s.desired + 1) % STAGE_NAMES.len();
                         }
-                        KeyCode::ArrowLeft if s.smoke.is_none() => {
+                        KeyCode::ArrowLeft if s.smoke.is_none() && s.stream.displayed.is_some() => {
                             s.desired = (s.desired + STAGE_NAMES.len() - 1) % STAGE_NAMES.len();
                         }
                         KeyCode::ArrowUp => s.yaw += 0.1,
@@ -299,29 +299,49 @@ impl ApplicationHandler for App {
     }
 }
 
-fn options(mut args: impl Iterator<Item = String>) -> Result<Option<Duration>, Box<dyn Error>> {
-    let Some(flag) = args.next() else {
-        return Ok(None);
-    };
-    if flag != "--smoke-seconds" {
-        return Err("expected --smoke-seconds".into());
+fn options(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(WorldKind, Option<Duration>), Box<dyn Error>> {
+    let mut kind = None;
+    let mut smoke = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--world" if kind.is_none() => {
+                kind = Some(match args.next().as_deref() {
+                    Some("inspection") => WorldKind::Inspection,
+                    Some("industrial") => WorldKind::Industrial,
+                    _ => return Err("world must be inspection or industrial".into()),
+                });
+            }
+            "--smoke-seconds" if smoke.is_none() => {
+                let seconds: u64 = args.next().ok_or("missing smoke seconds")?.parse()?;
+                if !(5..=30).contains(&seconds) {
+                    return Err("smoke seconds must be 5..=30".into());
+                }
+                smoke = Some(Duration::from_secs(seconds));
+            }
+            _ => return Err("unknown or duplicate inspection option".into()),
+        }
     }
-    let seconds: u64 = args.next().ok_or("missing smoke seconds")?.parse()?;
-    if args.next().is_some() || !(5..=30).contains(&seconds) {
-        return Err("smoke seconds must be5..=30".into());
-    }
-    Ok(Some(Duration::from_secs(seconds)))
+    Ok((kind.unwrap_or_default(), smoke))
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let smoke = options(std::env::args().skip(1))?;
+    let (kind, smoke) = options(std::env::args().skip(1))?;
     // Source authoring is done before presentation; meshing stays on the existing bounded worker.
     let worlds = (0..STAGE_NAMES.len())
-        .map(|i| inspection_world(i).map(Arc::new))
+        .map(|i| {
+            match kind {
+                WorldKind::Inspection => inspection_world(i),
+                WorldKind::Industrial => industrial_inspection_world(i),
+            }
+            .map(Arc::new)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut app = App {
         scene: None,
         worlds: Some(worlds),
         smoke,
+        kind,
         failure: None,
     };
     let event_loop = EventLoop::new()?;
@@ -339,77 +359,32 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use destructible_fps::mesh::fine::{FineMeshError, FineMeshReport};
-
-    #[test]
-    fn completion_discards_stale_and_refuses_unsolicited_failed_or_mismatched_results() {
-        let shared = Arc::new(RefinedWorld::default());
-        let worlds = vec![shared; 2];
-        let job = || CompletedMeshJob::Fine {
-            world_fingerprint: worlds[0].fingerprint(),
-            result: Ok(FineMeshBatch {
-                meshes: Vec::new(),
-                report: FineMeshReport::default(),
-            }),
-        };
-        let pending = Some((0, Instant::now()));
-        assert!(
-            complete_fine_job(pending, 0, &worlds, job())
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            complete_fine_job(pending, 1, &worlds, job())
-                .unwrap()
-                .is_none()
-        );
-        assert!(complete_fine_job(None, 0, &worlds, job()).is_err());
-        assert!(complete_fine_job(Some((2, Instant::now())), 0, &worlds, job()).is_err());
-        assert!(
-            complete_fine_job(pending, 0, &worlds, CompletedMeshJob::Bodies(Vec::new())).is_err()
-        );
-        let CompletedMeshJob::Fine { result, .. } = job() else {
-            unreachable!()
-        };
-        assert!(
-            complete_fine_job(
-                pending,
-                0,
-                &worlds,
-                CompletedMeshJob::Fine {
-                    world_fingerprint: worlds[0].fingerprint() ^ 1,
-                    result
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            complete_fine_job(
-                pending,
-                0,
-                &worlds,
-                CompletedMeshJob::Fine {
-                    world_fingerprint: worlds[0].fingerprint(),
-                    result: Err(FineMeshError::WorkBudget)
-                }
-            )
-            .is_err()
-        );
-    }
     #[test]
     fn strict_finite_smoke_options() {
         for args in [
             vec!["--smoke-seconds", "0"],
             vec!["--smoke-seconds", "31"],
             vec!["--smoke-seconds", "NaN"],
-            vec!["--world", "industrial"],
+            vec!["--world", "unknown"],
+            vec!["--world", "industrial", "--world", "inspection"],
+            vec!["--world"],
+            vec!["--smoke-seconds", "8", "--smoke-seconds", "8"],
             vec!["--smoke-seconds", "8", "extra"],
         ] {
             assert!(options(args.into_iter().map(str::to_owned)).is_err());
         }
         assert_eq!(
             options(["--smoke-seconds", "8"].into_iter().map(str::to_owned)).unwrap(),
-            Some(Duration::from_secs(8))
+            (WorldKind::Inspection, Some(Duration::from_secs(8)))
+        );
+        assert_eq!(
+            options(
+                ["--world", "industrial", "--smoke-seconds", "12"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .unwrap(),
+            (WorldKind::Industrial, Some(Duration::from_secs(12)))
         );
     }
 }

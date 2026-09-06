@@ -8,6 +8,26 @@ use std::error::Error;
 
 pub const STAGE_NAMES: [&str; 4] = ["intact", "shallow chip", "through bore", "breach"];
 
+/// The authored patch is the only changing source region in the industrial inspection.
+#[must_use]
+pub fn industrial_patch_positions() -> Vec<IVec3> {
+    (0..4)
+        .flat_map(|x| (0..3).map(move |y| IVec3::new(-17 + x, 1 + y, 15)))
+        .collect()
+}
+
+/// Adds real thin masonry to the complete existing industrial material world.
+/// # Errors
+/// Refuses unknown stages or bounded geometry preparation failures.
+pub fn industrial_inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn Error>> {
+    install_wall(
+        &crate::WorldPreset::Industrial.build(),
+        stage,
+        IVec3::new(-17, 1, 15),
+        true,
+    )
+}
+
 /// Builds thin layered masonry with exact air cuts and a surrounding concrete inspection pad.
 /// # Errors
 /// Propagates bounded geometry edit/transaction refusals. Only the four authored stages exist.
@@ -36,19 +56,37 @@ pub fn inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn Error>> {
         IVec3::new(3, 3, 0),
         Voxel::new(Material::Concrete),
     );
-    let mut geometry = GeometryState::new(RefinedWorld::from_uniform(&coarse)?, 1)?;
+    install_wall(&coarse, stage, IVec3::default(), false)
+}
+
+fn install_wall(
+    coarse: &World,
+    stage: usize,
+    origin: IVec3,
+    positive: bool,
+) -> Result<RefinedWorld, Box<dyn Error>> {
+    if stage >= STAGE_NAMES.len() {
+        return Err("unknown fine inspection stage".into());
+    }
+    let mut geometry = GeometryState::new(RefinedWorld::from_uniform(coarse)?, 1)?;
     let mut changes = Vec::new();
     for x in 0..4 {
         for y in 0..3 {
             let mut wall = RefinedVolume::uniform(Voxel::AIR)
                 .replace_box(
-                    LocalBox::new([0, 0, 0], [256, 256, 80])?,
+                    LocalBox::new(
+                        [0, 0, if positive { 176 } else { 0 }],
+                        [256, 256, if positive { 256 } else { 80 }],
+                    )?,
                     Voxel::new(Material::Brick),
                     VolumeLimits::default(),
                 )?
                 .0
                 .replace_box(
-                    LocalBox::new([0, 0, 48], [256, 256, 80])?,
+                    LocalBox::new(
+                        [0, 0, if positive { 176 } else { 48 }],
+                        [256, 256, if positive { 208 } else { 80 }],
+                    )?,
                     Voxel::new(Material::Concrete),
                     VolumeLimits::default(),
                 )?
@@ -77,8 +115,16 @@ pub fn inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn Error>> {
                     wall = wall
                         .replace_box(
                             LocalBox::new(
-                                [u16::try_from(left)?, row, 0],
-                                [u16::try_from(right)?, row + 4, depth],
+                                [
+                                    u16::try_from(left)?,
+                                    row,
+                                    if positive { 256 - depth } else { 0 },
+                                ],
+                                [
+                                    u16::try_from(right)?,
+                                    row + 4,
+                                    if positive { 256 } else { depth },
+                                ],
                             )?,
                             Voxel::AIR,
                             VolumeLimits::default(),
@@ -86,7 +132,7 @@ pub fn inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn Error>> {
                         .0;
                 }
             }
-            let position = IVec3::new(x, y, 0);
+            let position = IVec3::new(origin.x + x, origin.y + y, origin.z);
             changes.push(GeometryChange {
                 position,
                 before: geometry.world().cell(position),

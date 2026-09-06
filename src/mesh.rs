@@ -9,6 +9,20 @@ use std::collections::HashSet;
 
 pub mod fine;
 
+/// A partial cell never supplies a representative voxel to the derived surface algorithm.
+trait UniformSurfaceSource {
+    fn uniform_voxel(&self, position: IVec3) -> Option<Voxel>;
+    fn allows_derived(&self, position: IVec3) -> bool;
+}
+impl UniformSurfaceSource for World {
+    fn uniform_voxel(&self, position: IVec3) -> Option<Voxel> {
+        Some(self.voxel(position))
+    }
+    fn allows_derived(&self, _position: IVec3) -> bool {
+        true
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Vertex {
@@ -96,7 +110,11 @@ impl DerivedCellCache {
         }
     }
 
-    fn surface(&mut self, world: &World, cell: IVec3) -> Option<DerivedSurfacePoint> {
+    fn surface(
+        &mut self,
+        world: &impl UniformSurfaceSource,
+        cell: IVec3,
+    ) -> Option<DerivedSurfacePoint> {
         let index = self.index(cell)?;
         match self.cells[index] {
             DerivedCell::Uncomputed => {
@@ -252,13 +270,16 @@ pub fn mesh_chunk(world: &World, chunk: IVec3) -> CpuMesh {
 
 fn append_derived_surface(
     mesh: &mut CpuMesh,
-    world: &World,
+    world: &impl UniformSurfaceSource,
     cells: &mut DerivedCellCache,
     position: IVec3,
     voxel: Voxel,
 ) -> bool {
     for face in &FACES {
-        if world.voxel(add(position, face.neighbor)).is_solid() {
+        let Some(neighbor) = world.uniform_voxel(add(position, face.neighbor)) else {
+            return false;
+        };
+        if neighbor.is_solid() {
             continue;
         }
         let (axis, tangent_u, tangent_v) = surface_edge_basis(face.neighbor);
@@ -358,7 +379,10 @@ fn append_derived_quad(
     true
 }
 
-fn derived_surface_point(world: &World, cell: IVec3) -> Option<DerivedSurfacePoint> {
+fn derived_surface_point(
+    world: &impl UniformSurfaceSource,
+    cell: IVec3,
+) -> Option<DerivedSurfacePoint> {
     const CORNERS: [IVec3; 8] = [
         IVec3::new(0, 0, 0),
         IVec3::new(1, 0, 0),
@@ -385,14 +409,15 @@ fn derived_surface_point(world: &World, cell: IVec3) -> Option<DerivedSurfacePoi
     ];
 
     let sample_positions = CORNERS.map(|offset| add(cell, offset));
-    let samples = sample_positions.map(|position| world.voxel(position));
+    let samples = sample_positions.map(|position| world.uniform_voxel(position));
     let derived = core::array::from_fn::<_, 8, _>(|index| {
-        uses_derived_surface_at(world, sample_positions[index], samples[index])
+        samples[index]
+            .is_some_and(|voxel| uses_derived_surface_at(world, sample_positions[index], voxel))
     });
     let touches_exact = samples
         .iter()
         .zip(derived)
-        .any(|(voxel, derived)| voxel.is_solid() && !derived);
+        .any(|(voxel, derived)| voxel.is_none_or(|voxel| voxel.is_solid() && !derived));
     let mut position_sum = [0.0_f32; 3];
     let mut normal_sum = [0.0_f32; 3];
     let mut first_normal = [0.0_f32; 3];
@@ -400,8 +425,8 @@ fn derived_surface_point(world: &World, cell: IVec3) -> Option<DerivedSurfacePoi
     for (left_index, right_index) in EDGES {
         let left_derived = derived[left_index];
         let right_derived = derived[right_index];
-        let left_air = !samples[left_index].is_solid();
-        let right_air = !samples[right_index].is_solid();
+        let left_air = samples[left_index].is_some_and(|voxel| !voxel.is_solid());
+        let right_air = samples[right_index].is_some_and(|voxel| !voxel.is_solid());
         if !(left_derived && right_air || right_derived && left_air) {
             continue;
         }
@@ -413,7 +438,7 @@ fn derived_surface_point(world: &World, cell: IVec3) -> Option<DerivedSurfacePoi
         } else {
             (right, left, samples[right_index])
         };
-        let crossing = surface_crossing_t(solid_voxel);
+        let crossing = surface_crossing_t(solid_voxel?);
         position_sum[0] +=
             ((air.x - solid.x) as f32).mul_add(crossing, (cell.x + solid.x) as f32 + 0.5);
         position_sum[1] +=
@@ -474,17 +499,24 @@ const fn uses_derived_surface(voxel: Voxel) -> bool {
             && voxel.integrity <= FRACTURE_SURFACE_INTEGRITY_MAX)
 }
 
-fn uses_derived_surface_at(world: &World, position: IVec3, voxel: Voxel) -> bool {
-    uses_derived_surface(voxel)
-        || (voxel.is_solid()
-            && FACES.iter().any(|face| {
-                !world.voxel(add(position, face.neighbor)).is_solid()
-                    && fracture_cross_section_axis(world, position, face, voxel).is_some()
-            }))
+fn uses_derived_surface_at(
+    world: &impl UniformSurfaceSource,
+    position: IVec3,
+    voxel: Voxel,
+) -> bool {
+    world.allows_derived(position)
+        && (uses_derived_surface(voxel)
+            || (voxel.is_solid()
+                && FACES.iter().any(|face| {
+                    world
+                        .uniform_voxel(add(position, face.neighbor))
+                        .is_some_and(|neighbor| !neighbor.is_solid())
+                        && fracture_cross_section_axis(world, position, face, voxel).is_some()
+                })))
 }
 
 fn fracture_cross_section_axis(
-    world: &World,
+    world: &impl UniformSurfaceSource,
     position: IVec3,
     face: &Face,
     voxel: Voxel,
@@ -492,15 +524,19 @@ fn fracture_cross_section_axis(
     if !matches!(voxel.material, Material::Brick | Material::Concrete) {
         return None;
     }
-    let opposite = world.voxel(add(position, negate(face.neighbor)));
+    let opposite = world.uniform_voxel(add(position, negate(face.neighbor)))?;
     if opposite.material != voxel.material {
         return None;
     }
     let wall_axis = [face.tangent_u, face.tangent_v]
         .into_iter()
         .filter(|axis| {
-            !world.voxel(add(position, *axis)).is_solid()
-                && !world.voxel(add(position, negate(*axis))).is_solid()
+            world
+                .uniform_voxel(add(position, *axis))
+                .is_some_and(|neighbor| !neighbor.is_solid())
+                && world
+                    .uniform_voxel(add(position, negate(*axis)))
+                    .is_some_and(|neighbor| !neighbor.is_solid())
         })
         .map(cardinal_axis)
         .min()?;
@@ -508,15 +544,18 @@ fn fracture_cross_section_axis(
 }
 
 fn nearby_masonry_damage(
-    world: &World,
+    world: &impl UniformSurfaceSource,
     position: IVec3,
     material: Material,
     wall_axis: usize,
 ) -> bool {
     for first in -FRACTURE_VISUAL_HALO_RADIUS..=FRACTURE_VISUAL_HALO_RADIUS {
         for second in -FRACTURE_VISUAL_HALO_RADIUS..=FRACTURE_VISUAL_HALO_RADIUS {
-            let sample = world.voxel(add(position, planar_offset(wall_axis, first, second)));
-            if sample.material == material && sample.integrity < u8::MAX {
+            let sample =
+                world.uniform_voxel(add(position, planar_offset(wall_axis, first, second)));
+            if sample
+                .is_some_and(|sample| sample.material == material && sample.integrity < u8::MAX)
+            {
                 return true;
             }
         }

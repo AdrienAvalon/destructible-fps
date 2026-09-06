@@ -7,6 +7,7 @@ use crate::{
 use crate::{
     mesh::fine::{
         FineMeshBatch, FineMeshError, FineMeshLimits, MAX_FINE_MESH_CHUNKS, mesh_fine_chunks,
+        mesh_hybrid_chunks,
     },
     world::geometry::RefinedWorld,
 };
@@ -31,6 +32,7 @@ enum MeshJob {
         world: Arc<RefinedWorld>,
         chunks: Vec<IVec3>,
         limits: FineMeshLimits,
+        hybrid: bool,
     },
 }
 
@@ -110,6 +112,28 @@ impl MeshScheduler {
         chunks: Vec<IVec3>,
         limits: FineMeshLimits,
     ) -> Result<(), MeshScheduleError> {
+        self.submit_geometry(world, chunks, limits, false)
+    }
+
+    /// Queues the shared fine/smoothed renderer on the same bounded worker.
+    /// # Errors
+    /// Same submission and asynchronous extraction refusals as `submit_fine`.
+    pub fn submit_hybrid(
+        &self,
+        world: Arc<RefinedWorld>,
+        chunks: Vec<IVec3>,
+        limits: FineMeshLimits,
+    ) -> Result<(), MeshScheduleError> {
+        self.submit_geometry(world, chunks, limits, true)
+    }
+
+    fn submit_geometry(
+        &self,
+        world: Arc<RefinedWorld>,
+        chunks: Vec<IVec3>,
+        limits: FineMeshLimits,
+        hybrid: bool,
+    ) -> Result<(), MeshScheduleError> {
         if chunks.is_empty() {
             return Err(MeshScheduleError::EmptyJob);
         }
@@ -121,6 +145,7 @@ impl MeshScheduler {
             world,
             chunks,
             limits,
+            hybrid,
         }) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => Err(MeshScheduleError::Busy),
@@ -227,9 +252,14 @@ fn mesh_worker(receiver: &Receiver<MeshJob>, sender: &SyncSender<CompletedMeshJo
                 world,
                 chunks,
                 limits,
+                hybrid,
             } => CompletedMeshJob::Fine {
                 world_fingerprint: world.fingerprint(),
-                result: mesh_fine_chunks(world.as_ref(), &chunks, limits),
+                result: if hybrid {
+                    mesh_hybrid_chunks(world.as_ref(), &chunks, limits)
+                } else {
+                    mesh_fine_chunks(world.as_ref(), &chunks, limits)
+                },
             },
             MeshJob::Chunks { world, chunks } => {
                 let world_fingerprint = world.fingerprint();

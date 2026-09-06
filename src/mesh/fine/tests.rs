@@ -31,8 +31,10 @@ fn closed_corner_contact_contributes_canonical_edge_cuts() {
             slab([255, 255, 47], [256, 256, 213], Material::Steel),
         )],
     );
+    let meter = WorkMeter::new(MAX_FINE_MESH_WORK);
     let mut builder = Builder {
         world: &world,
+        work: &meter,
         limits: FineMeshLimits::default(),
         report: FineMeshReport::default(),
         lines: HashMap::new(),
@@ -43,9 +45,9 @@ fn closed_corner_contact_contributes_canonical_edge_cuts() {
     };
     let cuts = builder.cuts(line).unwrap();
     assert!(cuts[0] && cuts[47] && cuts[213] && cuts[256]);
-    let work = builder.report.work;
+    let work = meter.used.get();
     assert_eq!(cuts, builder.cuts(line).unwrap());
-    assert_eq!(builder.report.work, work + 1);
+    assert_eq!(meter.used.get(), work + 1);
     assert_eq!(builder.report.lines, 1);
 }
 

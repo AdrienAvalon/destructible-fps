@@ -173,7 +173,7 @@ fn all_authored_shards_are_recognized_but_layered_wall_pages_are_not() {
         let quads = surface(volume);
         let meter = WorkMeter::new(super::super::MAX_FINE_MESH_WORK);
         let plane = fit(volume, &quads, &meter).unwrap();
-        assert_eq!(plane.is_some(), position.z > 15);
+        assert_eq!(plane.is_some(), position.y == 1 && position.z > 15);
         if let Some(plane) = plane {
             accepted += 1;
             for quad in quads {

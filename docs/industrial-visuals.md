@@ -21,6 +21,10 @@ The intact map and damaged states must both hold up at player height, in wide/ap
 and while moving. Native captures and CPU/GPU tails accompany each slice. This remains the immediate
 priority ahead of broad AI/editor infrastructure or another large fine-weapon integration.
 
+The subsequent [roof-ruin increment](industrial-roof.md) records thinner actual roof sections,
+an open damaged bay, its support/topology checks and native evidence. It does not satisfy the
+full reference or establish calibrated roof collapse.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after

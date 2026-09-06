@@ -6,7 +6,10 @@ use crate::{
 };
 use std::error::Error;
 
+mod roof;
 mod ruins;
+#[cfg(test)]
+mod tests;
 mod windows;
 
 pub const STAGE_NAMES: [&str; 4] = ["intact", "shallow chip", "through bore", "breach"];
@@ -29,7 +32,7 @@ pub fn industrial_inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn
         IVec3::new(-17, 1, 15),
         true,
     )?;
-    windows::install(&ruins::courtyard(&world)?)
+    roof::install(&windows::install(&ruins::courtyard(&world)?)?)
 }
 
 /// Builds thin layered masonry with exact air cuts and a surrounding concrete inspection pad.

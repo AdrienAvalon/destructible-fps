@@ -1,0 +1,373 @@
+//! Exact fine/static surfaces. No coarse occupancy proxy, smoothing, or partial publication.
+//! Edge subdivisions depend on the complete source geometry, not the requested chunk set.
+
+use super::{CpuMesh, Vertex, material_surface, voxel_damage};
+use crate::{
+    CHUNK_EDGE, IVec3, Voxel,
+    volume::{LocalBox, RefinedVolume, VolumeError, surface::SurfaceLimits},
+    world::{geometry::GeometryCell, query::StaticGeometry},
+};
+use std::{collections::HashMap, fmt};
+
+pub mod fixture;
+
+pub const MAX_FINE_MESH_CHUNKS: usize = 16;
+pub const MAX_FINE_MESH_VERTICES: usize = 262_144;
+pub const MAX_FINE_MESH_INDICES: usize = 786_432;
+pub const MAX_FINE_MESH_QUADS: usize = 32_768;
+pub const MAX_FINE_MESH_WORK: usize = 4_194_304;
+pub const MAX_FINE_MESH_LINES: usize = 32_768;
+/// Existing GPU vertices use absolute f32 metres. Half-lattice fan centres remain exact here.
+pub const FINE_RENDER_EXTENT_METRES: i32 = 16_384;
+
+#[derive(Clone, Copy, Debug)]
+pub struct FineMeshLimits {
+    pub vertices: usize,
+    pub indices: usize,
+    pub quads: usize,
+    pub work: usize,
+    pub lines: usize,
+}
+impl Default for FineMeshLimits {
+    fn default() -> Self {
+        Self {
+            vertices: MAX_FINE_MESH_VERTICES,
+            indices: MAX_FINE_MESH_INDICES,
+            quads: MAX_FINE_MESH_QUADS,
+            work: MAX_FINE_MESH_WORK,
+            lines: MAX_FINE_MESH_LINES,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FineMeshReport {
+    pub quads: usize,
+    pub vertices: usize,
+    pub indices: usize,
+    pub work: usize,
+    pub lines: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FineMeshError {
+    InvalidLimits,
+    ChunkSet,
+    CoordinatePrecision,
+    OutputBudget,
+    WorkBudget,
+    LineBudget,
+    Allocation,
+    Surface(VolumeError),
+}
+impl fmt::Display for FineMeshError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fine mesh refused: {self:?}")
+    }
+}
+impl std::error::Error for FineMeshError {}
+impl From<VolumeError> for FineMeshError {
+    fn from(value: VolumeError) -> Self {
+        Self::Surface(value)
+    }
+}
+
+#[derive(Debug)]
+pub struct FineMeshBatch {
+    pub meshes: Vec<(IVec3, CpuMesh)>,
+    pub report: FineMeshReport,
+}
+
+/// Extracts actual uniform/fine boundaries into the ordinary GPU vertex contract on a worker.
+///
+/// Natural smoothing is deliberately NOT substituted for exact geometry on this path. Existing
+/// playable worlds continue using the hybrid coarse mesher until a shared transition is proved.
+///
+/// # Errors
+/// Rejects unordered/duplicate/oversized chunk sets, precision loss and aggregate work/output
+/// exhaustion. Failure drops the whole candidate, including preceding chunks. Vector/map growth
+/// is fallible; uniform-volume Arc creation follows the process allocator's OOM policy.
+pub fn mesh_fine_chunks(
+    world: &impl StaticGeometry,
+    chunks: &[IVec3],
+    limits: FineMeshLimits,
+) -> Result<FineMeshBatch, FineMeshError> {
+    for (value, hard) in [
+        (limits.vertices, MAX_FINE_MESH_VERTICES),
+        (limits.indices, MAX_FINE_MESH_INDICES),
+        (limits.quads, MAX_FINE_MESH_QUADS),
+        (limits.work, MAX_FINE_MESH_WORK),
+        (limits.lines, MAX_FINE_MESH_LINES),
+    ] {
+        if !(1..=hard).contains(&value) {
+            return Err(FineMeshError::InvalidLimits);
+        }
+    }
+    if chunks.is_empty()
+        || chunks.len() > MAX_FINE_MESH_CHUNKS
+        || chunks.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(FineMeshError::ChunkSet);
+    }
+    // Check before any multiplication, halo lookup, output allocation or world traversal.
+    if chunks.iter().any(|p| {
+        [p.x, p.y, p.z].into_iter().any(|v| {
+            !(-FINE_RENDER_EXTENT_METRES / CHUNK_EDGE..FINE_RENDER_EXTENT_METRES / CHUNK_EDGE)
+                .contains(&v)
+        })
+    }) {
+        return Err(FineMeshError::CoordinatePrecision);
+    }
+    let mut builder = Builder {
+        world,
+        limits,
+        report: FineMeshReport::default(),
+        lines: HashMap::new(),
+    };
+    let mut meshes = Vec::new();
+    meshes
+        .try_reserve_exact(chunks.len())
+        .map_err(|_| FineMeshError::Allocation)?;
+    for &chunk in chunks {
+        let mut mesh = CpuMesh::default();
+        for z in 0..CHUNK_EDGE {
+            for y in 0..CHUNK_EDGE {
+                for x in 0..CHUNK_EDGE {
+                    builder.charge(1)?;
+                    let position = IVec3::new(
+                        chunk.x * CHUNK_EDGE + x,
+                        chunk.y * CHUNK_EDGE + y,
+                        chunk.z * CHUNK_EDGE + z,
+                    );
+                    let cell = world.geometry_cell(position);
+                    if cell.solid_units() != 0 {
+                        builder.append_cell(&mut mesh, position, &cell)?;
+                    }
+                }
+            }
+        }
+        meshes.push((chunk, mesh));
+    }
+    Ok(FineMeshBatch {
+        meshes,
+        report: builder.report,
+    })
+}
+
+// One line within a metre interval, with two fixed global lattice coordinates. The variable
+// coordinate is the interval origin, independent of the emitting rectangle or its orientation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct Line {
+    axis: usize,
+    origin: [i32; 3],
+}
+type Cuts = [bool; 257];
+
+struct Builder<'a, G> {
+    world: &'a G,
+    limits: FineMeshLimits,
+    report: FineMeshReport,
+    lines: HashMap<Line, Cuts>,
+}
+impl<G: StaticGeometry> Builder<'_, G> {
+    const fn charge(&mut self, count: usize) -> Result<(), FineMeshError> {
+        if count > self.limits.work - self.report.work {
+            return Err(FineMeshError::WorkBudget);
+        }
+        self.report.work += count;
+        Ok(())
+    }
+
+    #[allow(clippy::many_single_char_names)] // Axis/tangent notation matches SurfaceQuad.
+    fn append_cell(
+        &mut self,
+        mesh: &mut CpuMesh,
+        p: IVec3,
+        cell: &GeometryCell,
+    ) -> Result<(), FineMeshError> {
+        self.charge(6)?;
+        let volume = page(cell);
+        let neighbors = std::array::from_fn::<_, 6, _>(|i| {
+            let mut v = [p.x, p.y, p.z];
+            v[i / 2] += if i % 2 == 0 { -1 } else { 1 };
+            page(&self.world.geometry_cell(IVec3::new(v[0], v[1], v[2])))
+        });
+        let surface = volume.surface(
+            neighbors.each_ref(),
+            SurfaceLimits {
+                quads: (self.limits.quads - self.report.quads).max(1),
+                visits: (self.limits.work - self.report.work)
+                    .clamp(1, crate::volume::surface::MAX_SURFACE_VISITS),
+            },
+        )?;
+        self.charge(surface.visits)?;
+        if surface.quads.len() > self.limits.quads - self.report.quads {
+            return Err(FineMeshError::OutputBudget);
+        }
+        self.report.quads += surface.quads.len();
+        for quad in surface.quads {
+            self.charge(1)?;
+            let a = quad.face().axis();
+            let u = (a + 1) % 3;
+            let v = (a + 2) % 3;
+            let q = quad.origin();
+            let lo = std::array::from_fn(|i| [p.x, p.y, p.z][i] * 256 + i32::from(q[i]));
+            let mut hi = lo;
+            hi[u] += i32::from(quad.extent()[0]);
+            hi[v] += i32::from(quad.extent()[1]);
+            let mut corners = [lo; 4];
+            corners[1][u] = hi[u];
+            corners[2] = hi;
+            corners[3][v] = hi[v];
+            if !quad.face().positive() {
+                corners.reverse();
+            }
+            let center = std::array::from_fn(|i| (lo[i] as f32 + hi[i] as f32) / 512.0);
+            let mut normal = [0.0; 3];
+            normal[a] = if quad.face().positive() { 1.0 } else { -1.0 };
+            let first = self.vertex(mesh, center, normal, quad.voxel())?;
+            let boundary =
+                u32::try_from(mesh.vertices.len()).map_err(|_| FineMeshError::OutputBudget)?;
+            for edge in 0..4 {
+                let start = corners[edge];
+                let end = corners[(edge + 1) % 4];
+                let axis = if start[u] == end[u] { v } else { u };
+                let lower = start[axis].min(end[axis]);
+                let upper = start[axis].max(end[axis]);
+                let mut origin = start;
+                origin[axis] = lower.div_euclid(256) * 256;
+                let cuts = self.cuts(Line { axis, origin })?;
+                for step in 0..(upper - lower) {
+                    self.charge(1)?;
+                    let t = if start[axis] < end[axis] {
+                        start[axis] + step
+                    } else {
+                        start[axis] - step
+                    };
+                    let offset = usize::try_from(t - origin[axis])
+                        .map_err(|_| FineMeshError::CoordinatePrecision)?;
+                    if step == 0 || cuts[offset] {
+                        let mut point = start;
+                        point[axis] = t;
+                        self.vertex(mesh, point.map(|c| c as f32 / 256.0), normal, quad.voxel())?;
+                    }
+                }
+            }
+            let last =
+                u32::try_from(mesh.vertices.len()).map_err(|_| FineMeshError::OutputBudget)?;
+            for index in boundary..last {
+                self.charge(1)?;
+                if self.report.indices + 3 > self.limits.indices {
+                    return Err(FineMeshError::OutputBudget);
+                }
+                mesh.indices
+                    .try_reserve(3)
+                    .map_err(|_| FineMeshError::Allocation)?;
+                mesh.indices.extend_from_slice(&[
+                    first,
+                    index,
+                    if index + 1 == last {
+                        boundary
+                    } else {
+                        index + 1
+                    },
+                ]);
+                self.report.indices += 3;
+            }
+        }
+        Ok(())
+    }
+
+    fn vertex(
+        &mut self,
+        mesh: &mut CpuMesh,
+        position: [f32; 3],
+        normal: [f32; 3],
+        voxel: Voxel,
+    ) -> Result<u32, FineMeshError> {
+        if self.report.vertices == self.limits.vertices {
+            return Err(FineMeshError::OutputBudget);
+        }
+        mesh.vertices
+            .try_reserve(1)
+            .map_err(|_| FineMeshError::Allocation)?;
+        let index = u32::try_from(mesh.vertices.len()).map_err(|_| FineMeshError::OutputBudget)?;
+        let base = material_surface(voxel.material);
+        mesh.vertices.push(Vertex {
+            position,
+            normal,
+            albedo_roughness: [base[0], base[1], base[2], base[3]],
+            ambient_occlusion: 1.0,
+            metallic: base[4],
+            material: u32::from(voxel.material as u8),
+            damage: voxel_damage(voxel),
+            fracture_depth: -1.0,
+        });
+        self.report.vertices += 1;
+        Ok(index)
+    }
+
+    fn cuts(&mut self, line: Line) -> Result<Cuts, FineMeshError> {
+        self.charge(1)?;
+        if let Some(cuts) = self.lines.get(&line) {
+            return Ok(*cuts);
+        }
+        if self.report.lines == self.limits.lines {
+            return Err(FineMeshError::LineBudget);
+        }
+        let a = line.axis;
+        let u = (a + 1) % 3;
+        let v = (a + 2) % 3;
+        let base = line.origin.map(|c| c.div_euclid(256));
+        let mut cuts = [false; 257];
+        cuts[0] = true;
+        cuts[256] = true;
+        for du in 0..=i32::from(line.origin[u].rem_euclid(256) == 0) {
+            for dv in 0..=i32::from(line.origin[v].rem_euclid(256) == 0) {
+                self.charge(1)?;
+                let mut cell = base;
+                cell[u] -= du;
+                cell[v] -= dv;
+                let local = std::array::from_fn(|i| line.origin[i] - cell[i] * 256);
+                let geometry = self
+                    .world
+                    .geometry_cell(IVec3::new(cell[0], cell[1], cell[2]));
+                if let Some(volume) = geometry.volume() {
+                    for leaf in volume.leaves() {
+                        self.charge(1)?;
+                        add_cuts(&mut cuts, leaf.bounds(), local, a);
+                    }
+                } else {
+                    self.charge(1)?;
+                    add_cuts(&mut cuts, LocalBox::FULL, local, a);
+                }
+            }
+        }
+        self.lines
+            .try_reserve(1)
+            .map_err(|_| FineMeshError::Allocation)?;
+        self.lines.insert(line, cuts);
+        self.report.lines += 1;
+        Ok(cuts)
+    }
+}
+
+fn add_cuts(cuts: &mut Cuts, bounds: LocalBox, local: [i32; 3], axis: usize) {
+    if (0..3).all(|i| {
+        i == axis
+            || (i32::from(bounds.minimum()[i])..=i32::from(bounds.maximum()[i])).contains(&local[i])
+    }) {
+        cuts[usize::from(bounds.minimum()[axis])] = true;
+        cuts[usize::from(bounds.maximum()[axis])] = true;
+    }
+}
+
+fn page(cell: &GeometryCell) -> RefinedVolume {
+    cell.volume().map_or_else(
+        || RefinedVolume::uniform(cell.uniform_voxel().expect("canonical uniform cell")),
+        Clone::clone,
+    )
+}
+
+#[cfg(test)]
+mod tests;

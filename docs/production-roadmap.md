@@ -54,6 +54,11 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
 
 ### Stage 1 — observable production renderer
 
+- bounded exact fine/uniform surface extraction with canonical shared edge subdivisions, explicit
+  output/work failures and precision bounds, immutable worker delivery and a real native four-stage
+  inspection viewer (delivered; see `fine-rendering.md`); smooth-terrain transitions, authoritative
+  weapon/body/network activation and photoreal scene acceptance remain separate gates;
+
 - real GPU timestamp queries and bounded CPU/GPU p50/p95/p99 telemetry (delivered; automated budget
   comparison remains);
 - asynchronous initial meshing and distance-prioritized bounded bootstrap streaming (delivered;

@@ -802,6 +802,9 @@ impl MultiplayerGame {
 
     fn pump_meshing(&mut self) -> Result<(), String> {
         match self.mesh_scheduler.poll() {
+            Ok(Some(CompletedMeshJob::Fine { .. })) => {
+                return Err("unexpected fine mesh in coarse multiplayer".to_owned());
+            }
             Ok(Some(CompletedMeshJob::Chunks {
                 world_fingerprint,
                 meshes,

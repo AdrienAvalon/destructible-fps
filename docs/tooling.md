@@ -62,13 +62,18 @@ From the repository root, with the Linux desktop session active:
 cargo build --locked --release --bin playable-demo
 python tools/tooling_smoke.py renderdoc
 python tools/tooling_smoke.py renderdoc --world industrial
+cargo build --locked --release --bin fine-geometry-demo
+python tools/tooling_smoke.py renderdoc --world fine-inspection
 python tools/tooling_smoke.py blender
 python tools/tooling_smoke.py tracy
 python -m unittest discover -s tools -p 'test_*.py'
 shellcheck tools/tracy_viewer.sh
 ```
 
-RenderDoc accepts only the fixed `range` (default) and `industrial` scenes. The launcher rejects
+RenderDoc accepts only the fixed `range` (default), `industrial` and `fine-inspection` scenes. The
+last selects the explicit `fine-geometry-demo` binary and captures frame 180; other scenes retain
+`playable-demo` and frame 120. See [`fine-rendering.md`](fine-rendering.md) for its non-gameplay scope.
+The launcher rejects
 paths, arbitrary names and `--world` on other tools; the capture helper maps the name to a literal
 game argument list. The industrial breach capture/replay on 2026-09-06 passed with Vulkan,
 220 draw calls, 14 textures and a 321,519,596-byte capture. Its inspected thumbnail is real runtime

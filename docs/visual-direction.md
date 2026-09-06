@@ -25,6 +25,11 @@ Generation prompt (built-in image generation):
 
 ## Delivered foundation
 
+The separate native [fine-geometry inspection](fine-rendering.md) now uses the actual renderer for
+exact layered walls, shallow chips, bores and breaches, with conforming fine/uniform chunk edges.
+Its stages are authored geometry, not weapon simulation. The following playable-world foundations
+remain the coarse hybrid path; fine/smoothed integration and photorealism are not yet achieved.
+
 The explicit `--world industrial` preset now replaces the single-box composition with a framed
 hall, recessed brick infill, open windows, roof monitor, lower annex, service tower and independent
 loading canopy. Intact, breach and interior cameras inspect the same authoritative material world

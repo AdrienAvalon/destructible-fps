@@ -7,6 +7,8 @@ use bytemuck::{Pod, Zeroable};
 use core::mem::size_of;
 use std::collections::HashSet;
 
+pub mod fine;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Vertex {

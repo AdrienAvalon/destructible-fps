@@ -4,6 +4,12 @@ use crate::{
     IVec3, RigidBodyDescriptor, World, mesh::CpuBodyMesh, mesh::CpuMesh, mesh::mesh_body,
     mesh::mesh_chunk,
 };
+use crate::{
+    mesh::fine::{
+        FineMeshBatch, FineMeshError, FineMeshLimits, MAX_FINE_MESH_CHUNKS, mesh_fine_chunks,
+    },
+    world::geometry::RefinedWorld,
+};
 use core::fmt;
 use std::{
     sync::Arc,
@@ -21,6 +27,11 @@ enum MeshJob {
         chunks: Vec<IVec3>,
     },
     Bodies(Vec<RigidBodyDescriptor>),
+    Fine {
+        world: Arc<RefinedWorld>,
+        chunks: Vec<IVec3>,
+        limits: FineMeshLimits,
+    },
 }
 
 #[derive(Debug)]
@@ -30,12 +41,17 @@ pub enum CompletedMeshJob {
         meshes: Vec<(IVec3, CpuMesh)>,
     },
     Bodies(Vec<CpuBodyMesh>),
+    Fine {
+        world_fingerprint: u128,
+        result: Result<FineMeshBatch, FineMeshError>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MeshScheduleError {
     EmptyJob,
     TooManyChunks(usize),
+    TooManyFineChunks(usize),
     TooManyBodies(usize),
     TooManyBodyVoxels(usize),
     Busy,
@@ -53,6 +69,10 @@ impl fmt::Display for MeshScheduleError {
             Self::TooManyBodies(count) => write!(
                 formatter,
                 "mesh job has {count} bodies; maximum is {MAX_BODIES_PER_MESH_JOB}"
+            ),
+            Self::TooManyFineChunks(count) => write!(
+                formatter,
+                "fine mesh job has {count} chunks; maximum is {MAX_FINE_MESH_CHUNKS}"
             ),
             Self::TooManyBodyVoxels(count) => write!(
                 formatter,
@@ -80,6 +100,33 @@ impl Default for MeshScheduler {
 }
 
 impl MeshScheduler {
+    /// Queues exact fine geometry without changing the coarse gameplay path.
+    /// # Errors
+    /// Rejects oversized/empty jobs, stopped workers and backpressure. The worker returns all
+    /// geometry/budget failures explicitly; no partial chunk set is published as success.
+    pub fn submit_fine(
+        &self,
+        world: Arc<RefinedWorld>,
+        chunks: Vec<IVec3>,
+        limits: FineMeshLimits,
+    ) -> Result<(), MeshScheduleError> {
+        if chunks.is_empty() {
+            return Err(MeshScheduleError::EmptyJob);
+        }
+        if chunks.len() > MAX_FINE_MESH_CHUNKS {
+            return Err(MeshScheduleError::TooManyFineChunks(chunks.len()));
+        }
+        let sender = self.jobs.as_ref().ok_or(MeshScheduleError::WorkerStopped)?;
+        match sender.try_send(MeshJob::Fine {
+            world,
+            chunks,
+            limits,
+        }) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(MeshScheduleError::Busy),
+            Err(TrySendError::Disconnected(_)) => Err(MeshScheduleError::WorkerStopped),
+        }
+    }
     /// Starts the single bounded worker.
     ///
     /// # Panics
@@ -176,6 +223,14 @@ impl Drop for MeshScheduler {
 fn mesh_worker(receiver: &Receiver<MeshJob>, sender: &SyncSender<CompletedMeshJob>) {
     while let Ok(job) = receiver.recv() {
         let completed = match job {
+            MeshJob::Fine {
+                world,
+                chunks,
+                limits,
+            } => CompletedMeshJob::Fine {
+                world_fingerprint: world.fingerprint(),
+                result: mesh_fine_chunks(world.as_ref(), &chunks, limits),
+            },
             MeshJob::Chunks { world, chunks } => {
                 let world_fingerprint = world.fingerprint();
                 let meshes = chunks
@@ -202,6 +257,60 @@ mod tests {
     use super::*;
     use crate::{Material, Voxel};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn fine_job_failure_is_atomic_and_worker_remains_usable() {
+        let world = Arc::new(crate::mesh::fine::fixture::inspection_world(3).unwrap());
+        let fingerprint = world.fingerprint();
+        let mut chunks = world.chunk_positions();
+        chunks.sort_unstable();
+        let scheduler = MeshScheduler::new();
+        for (limits, success) in [
+            (
+                FineMeshLimits {
+                    work: 1,
+                    ..FineMeshLimits::default()
+                },
+                false,
+            ),
+            (FineMeshLimits::default(), true),
+        ] {
+            scheduler
+                .submit_fine(Arc::clone(&world), chunks.clone(), limits)
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let completed = loop {
+                if let Some(job) = scheduler.poll().unwrap() {
+                    break job;
+                }
+                assert!(Instant::now() < deadline, "fine worker deadline");
+                thread::yield_now();
+            };
+            let CompletedMeshJob::Fine {
+                world_fingerprint,
+                result,
+            } = completed
+            else {
+                panic!("wrong fine result kind")
+            };
+            assert_eq!(world_fingerprint, fingerprint);
+            assert_eq!(result.is_ok(), success);
+            if let Ok(batch) = result {
+                assert_eq!(batch.meshes.len(), chunks.len());
+            }
+        }
+        assert_eq!(world.fingerprint(), fingerprint);
+        assert_eq!(
+            scheduler.submit_fine(
+                Arc::clone(&world),
+                vec![IVec3::default(); MAX_FINE_MESH_CHUNKS + 1],
+                FineMeshLimits::default()
+            ),
+            Err(MeshScheduleError::TooManyFineChunks(
+                MAX_FINE_MESH_CHUNKS + 1
+            ))
+        );
+    }
 
     #[test]
     fn worker_meshes_an_immutable_world_snapshot() {

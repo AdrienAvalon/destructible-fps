@@ -6,6 +6,11 @@ performance foundations instead of presenting a scripted visual demo as if it we
 
 ## First playable demo
 
+For the new exact thin-wall/breach rendering, run
+`cargo run --release --bin fine-geometry-demo`. This is a native [geometry inspection](docs/fine-rendering.md)
+with four authored stages, not fine weapon simulation or multiplayer. It keeps the existing
+playable mode below unchanged; the photorealistic target remains unachieved.
+
 The new [industrial workshop](docs/industrial-world.md) is playable with
 `cargo run --release --bin playable-demo -- --world industrial`: concrete-framed hall, open
 clerestory, recessed brick infill, connected workshop/service volumes and a blast-detachable canopy.

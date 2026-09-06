@@ -420,6 +420,9 @@ impl Game {
             .take()
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1_000.0);
         match completed {
+            CompletedMeshJob::Fine { .. } => {
+                "unexpected fine mesh in coarse gameplay".clone_into(&mut self.last_action);
+            }
             CompletedMeshJob::Chunks {
                 world_fingerprint,
                 meshes,

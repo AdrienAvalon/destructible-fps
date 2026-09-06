@@ -15,7 +15,7 @@ from tooling_smoke import ROOT, isolated_command, run_bounded, parse_options
 class ToolingTests(unittest.TestCase):
     def test_capture_world_is_whitelisted_and_only_applies_to_renderdoc(self):
         self.assertEqual(parse_options(["renderdoc"]).world, "range")
-        for world in ("range", "industrial"):
+        for world in ("range", "industrial", "fine-inspection"):
             self.assertEqual(parse_options(["renderdoc", "--world", world]).world, world)
         for args in (["renderdoc", "--world"], ["renderdoc", "--world", "../map"],
                      ["renderdoc", "--world", "industrial; false"],

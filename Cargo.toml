@@ -20,6 +20,14 @@ name = "playable-demo"
 path = "src/bin/playable_demo.rs"
 
 [[bin]]
+name = "fine-geometry-demo"
+path = "src/bin/fine_geometry_demo.rs"
+
+[[bin]]
+name = "fine-mesh-benchmark"
+path = "src/bin/fine_mesh_benchmark.rs"
+
+[[bin]]
 name = "multiplayer-demo"
 path = "src/bin/multiplayer_demo.rs"
 

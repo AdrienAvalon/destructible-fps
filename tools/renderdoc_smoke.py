@@ -21,14 +21,16 @@ try:
     arguments = {
         "range": "--world range --showcase-closeup --smoke-seconds 8",
         "industrial": "--world industrial --showcase-closeup --smoke-seconds 8",
+        "fine-inspection": "--smoke-seconds 8",
     }[world]
     # qrenderdoc has already initialized replay. No global hook or remote replay server.
+    executable = "fine-geometry-demo" if world == "fine-inspection" else "playable-demo"
     options = rd.CaptureOptions()
     options.allowVSync = True
     options.captureCallstacks = False
     options.hookIntoChildren = False
     launched = rd.ExecuteAndInject(
-        str(root / "target/release/playable-demo"), str(root),
+        str(root / "target/release" / executable), str(root),
         arguments, [], str(output / "breach"), options, False,
     )
     if launched.result != rd.ResultCode.Succeeded:
@@ -36,7 +38,7 @@ try:
     control = rd.CreateTargetControl("127.0.0.1", launched.ident, "fps-tool-smoke", False)
     if control is None:
         raise RuntimeError("cannot connect to the owned game capture")
-    control.QueueCapture(120, 1)
+    control.QueueCapture(180 if world == "fine-inspection" else 120, 1)
     deadline = time.monotonic() + 35
     filename = None
     while time.monotonic() < deadline and control.Connected():
@@ -73,6 +75,7 @@ try:
     (output / "breach-thumbnail.png").write_bytes(bytes(thumbnail.data))
     (output / "renderdoc-result.json").write_text(json.dumps({
         "version": rd.GetVersionString(), "capture": filename.name, "world": world,
+        "executable": executable, "arguments": arguments,
         "bytes": filename.stat().st_size, "drawcalls": draws,
         "textures": len(replay.GetTextures()), "api": "Vulkan",
         "scope": "instrumented capture and replay, not a release performance benchmark",

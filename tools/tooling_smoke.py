@@ -94,7 +94,7 @@ def tracy_inner(output):
 def parse_options(arguments=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tool", choices=("renderdoc", "blender", "tracy"))
-    parser.add_argument("--world", choices=("range", "industrial"))
+    parser.add_argument("--world", choices=("range", "industrial", "fine-inspection"))
     options = parser.parse_args(arguments)
     if options.world is not None and options.tool != "renderdoc":
         parser.error("--world applies only to the RenderDoc game capture")

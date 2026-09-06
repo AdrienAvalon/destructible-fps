@@ -72,6 +72,10 @@ name = "volume-stress-benchmark"
 path = "src/bin/volume_stress_benchmark.rs"
 
 [[bin]]
+name = "world-geometry-benchmark"
+path = "src/bin/world_geometry_benchmark.rs"
+
+[[bin]]
 name = "secure-dedicated-server"
 path = "src/bin/secure_dedicated_server.rs"
 

@@ -2,6 +2,12 @@ use crate::material::Voxel;
 use core::fmt;
 use std::{collections::HashMap, collections::hash_map::Entry, sync::Arc};
 
+pub mod geometry;
+
+/// Uniform-only geometry keeps the existing dense two-byte cells and no extension allocation.
+#[derive(Clone, Default)]
+pub struct UniformGeometry;
+
 pub const CHUNK_EDGE: i32 = 16;
 const CHUNK_EDGE_USIZE: usize = CHUNK_EDGE as usize;
 const VOXELS_PER_CHUNK: usize = CHUNK_EDGE_USIZE * CHUNK_EDGE_USIZE * CHUNK_EDGE_USIZE;
@@ -37,25 +43,29 @@ pub struct VoxelChange {
 }
 
 #[derive(Clone)]
-struct Chunk {
+struct Chunk<G> {
     voxels: Box<[Voxel; VOXELS_PER_CHUNK]>,
     solid_voxels: usize,
+    // Local mutation counter only: wraps and restarts after reclamation. Observations use the
+    // retained Arc identity, never this counter as a globally monotonic cache/version key.
     revision: u64,
+    geometry: G,
 }
 
-impl Default for Chunk {
+impl<G: Default> Default for Chunk<G> {
     fn default() -> Self {
         Self {
             voxels: Box::new([Voxel::AIR; VOXELS_PER_CHUNK]),
             solid_voxels: 0,
             revision: 0,
+            geometry: G::default(),
         }
     }
 }
 
 #[derive(Clone, Default)]
-pub struct World {
-    chunks: HashMap<IVec3, Arc<Chunk>>,
+pub struct WorldStorage<G> {
+    chunks: HashMap<IVec3, Arc<Chunk<G>>>,
     chunk_capacity_high_water: usize,
     // Retained by absent-chunk observations. Allocation/reclamation replaces the token, so an
     // empty -> occupied -> empty ABA cannot make a previously observed absence look unchanged.
@@ -65,18 +75,21 @@ pub struct World {
     solid_voxels: usize,
 }
 
-pub(crate) struct ChunkObservation {
+/// Existing gameplay consumers accept only this uniform specialization.
+pub type World = WorldStorage<UniformGeometry>;
+
+pub(crate) struct ChunkObservation<G = UniformGeometry> {
     position: IVec3,
-    state: ObservedChunk,
+    state: ObservedChunk<G>,
 }
 
-enum ObservedChunk {
-    Occupied(Arc<Chunk>),
+enum ObservedChunk<G> {
+    Occupied(Arc<Chunk<G>>),
     Absent(Arc<()>),
 }
 
-impl ChunkObservation {
-    pub(crate) fn matches(&self, world: &World) -> bool {
+impl<G> ChunkObservation<G> {
+    pub(crate) fn matches(&self, world: &WorldStorage<G>) -> bool {
         match &self.state {
             ObservedChunk::Occupied(expected) => world
                 .chunks
@@ -138,26 +151,6 @@ impl fmt::Display for WorldError {
 impl std::error::Error for WorldError {}
 
 impl World {
-    /// Bound `HashMap` storage as well as live entries: reclamation need not shrink its allocation.
-    pub(crate) fn bounded_snapshot(&self, maximum_chunks: usize) -> Option<Self> {
-        if self.chunks.len() > maximum_chunks
-            || self.chunk_capacity_high_water > maximum_chunks.saturating_mul(2)
-        {
-            return None;
-        }
-        Some(self.clone())
-    }
-
-    pub(crate) fn observe_chunk(&self, position: IVec3) -> ChunkObservation {
-        ChunkObservation {
-            position,
-            state: self.chunks.get(&position).map_or_else(
-                || ObservedChunk::Absent(Arc::clone(&self.vacancy_epoch)),
-                |chunk| ObservedChunk::Occupied(Arc::clone(chunk)),
-            ),
-        }
-    }
-
     #[must_use]
     pub fn voxel(&self, position: IVec3) -> Voxel {
         let (chunk_position, local) = split_position(position);
@@ -274,28 +267,6 @@ impl World {
         Ok(())
     }
 
-    #[must_use]
-    pub const fn tick(&self) -> u64 {
-        self.tick
-    }
-
-    pub(crate) const fn set_tick(&mut self, tick: u64) {
-        self.tick = tick;
-    }
-
-    #[must_use]
-    pub const fn fingerprint(&self) -> u128 {
-        self.fingerprint
-    }
-
-    /// Returns occupied chunk coordinates in a stable order for deterministic meshing.
-    #[must_use]
-    pub fn chunk_positions(&self) -> Vec<IVec3> {
-        let mut positions: Vec<_> = self.chunks.keys().copied().collect();
-        positions.sort_unstable();
-        positions
-    }
-
     /// Returns every occupied voxel in canonical world-coordinate order.
     #[must_use]
     pub fn occupied_voxels(&self) -> Vec<(IVec3, Voxel)> {
@@ -327,17 +298,6 @@ impl World {
         voxels
     }
 
-    #[must_use]
-    pub fn stats(&self) -> WorldStats {
-        WorldStats {
-            chunks: self.chunks.len(),
-            solid_voxels: self.solid_voxels,
-            bytes_dense_payload: self.chunks.len() * VOXELS_PER_CHUNK * size_of::<Voxel>(),
-            tick: self.tick,
-            fingerprint: self.fingerprint,
-        }
-    }
-
     /// Slow reference implementation used by tests and periodic server audits.
     #[must_use]
     pub fn recompute_fingerprint(&self) -> u128 {
@@ -361,6 +321,61 @@ impl World {
             }
         }
         result
+    }
+}
+
+impl<G: Clone + Default> WorldStorage<G> {
+    /// Bound `HashMap` storage as well as live entries: reclamation need not shrink its allocation.
+    pub(crate) fn bounded_snapshot(&self, maximum_chunks: usize) -> Option<Self> {
+        if self.chunks.len() > maximum_chunks
+            || self.chunk_capacity_high_water > maximum_chunks.saturating_mul(2)
+        {
+            return None;
+        }
+        Some(self.clone())
+    }
+
+    pub(crate) fn observe_chunk(&self, position: IVec3) -> ChunkObservation<G> {
+        ChunkObservation {
+            position,
+            state: self.chunks.get(&position).map_or_else(
+                || ObservedChunk::Absent(Arc::clone(&self.vacancy_epoch)),
+                |chunk| ObservedChunk::Occupied(Arc::clone(chunk)),
+            ),
+        }
+    }
+
+    #[must_use]
+    pub const fn tick(&self) -> u64 {
+        self.tick
+    }
+
+    pub(crate) const fn set_tick(&mut self, tick: u64) {
+        self.tick = tick;
+    }
+
+    #[must_use]
+    pub const fn fingerprint(&self) -> u128 {
+        self.fingerprint
+    }
+
+    /// Returns occupied chunk coordinates in a stable order for deterministic meshing.
+    #[must_use]
+    pub fn chunk_positions(&self) -> Vec<IVec3> {
+        let mut positions: Vec<_> = self.chunks.keys().copied().collect();
+        positions.sort_unstable();
+        positions
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> WorldStats {
+        WorldStats {
+            chunks: self.chunks.len(),
+            solid_voxels: self.solid_voxels,
+            bytes_dense_payload: self.chunks.len() * VOXELS_PER_CHUNK * size_of::<Voxel>(),
+            tick: self.tick,
+            fingerprint: self.fingerprint,
+        }
     }
 }
 

@@ -177,6 +177,12 @@ off-grid box now completes with the rectangular-run representation. The companio
 axis orders, reporting incomplete/refused cases explicitly. Neither needs a new package or privilege. See
 [`refined-volumes.md`](refined-volumes.md) for its experimental scope and runtime integration gates.
 
+`world-geometry-benchmark` measures the next shared-World storage layer on the industrial scene:
+fixed alternating 1/64/256-cell transitions, two component replicas, strict codecs and complete
+static-geometry checkpoint candidates. It uses the installed Rust toolchain and no new service,
+dependency or privilege. See [`world-geometry.md`](world-geometry.md) for bounds and exclusions;
+it does not test fine gameplay, network fragmentation, bodies or rendering.
+
 The repository-native `rifle-benchmark --iterations 500` additionally measures reset three-shot
 material fixtures through two framed replicas, with first/p50/p95/p99/max timings and exact payload
 counts. It uses the existing pinned Rust toolchain without a new package or profiler permission.

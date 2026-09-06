@@ -3,9 +3,11 @@
 The experimental fine-volume core advances DEST-01/02, PHYS-01 and VIS-01 without changing the
 playable world's one-metre cells or its current authority/physics/network contracts. It now
 provides exact material occupancy, box edits, boundary rectangles and physical segment
-intersections from the **same** immutable geometry. It is not yet installed in World, the rifle
-damage transaction, character/rigid-body collision, structural analysis or asynchronous render
-workers. The native demo still does not meet the photoreal reference.
+intersections from the **same** immutable geometry. It now has a typed specialization of the shared
+World chunk storage and a static-geometry transaction/checkpoint component; see
+[`world-geometry.md`](world-geometry.md). It is not yet enabled in the playable world's rifle
+transaction, character/rigid-body collision, structural analysis or asynchronous render workers.
+The native demo still does not meet the photoreal reference.
 
 ## Why the octree was replaced
 
@@ -57,8 +59,9 @@ rectangular bounds. Combined edit vector payload capacity is at most 232,960 byt
 readers, final Arc copy, encoded buffers and allocator metadata are additional: these are per-page
 contracts, **not** a total process-memory guarantee. Vector reservation is fallible; standard Arc
 allocation still follows the process allocator's OOM policy. Profile scratch starts small and
-grows within bounds. Aggregate residency, staged transactions and retained snapshots still need
-a global budget before integration.
+grows within bounds. The typed World component now bounds accepted aggregate geometry and
+transactions as documented in `world-geometry.md`; retained readers, workers and whole-process
+residency still need a shared runtime budget before gameplay integration.
 
 Material volumes sum exactly to 256³. Density-weighted mass stays as an exact kg / 256³ numerator
 for a metre page. A finest wood cell is about 38.7 mg, not zero mass. The current whole-kilogram
@@ -104,7 +107,8 @@ before constructing accepted state. It does not normalize malformed input. The m
 match is exhaustive so new enum variants cannot silently index past the table.
 
 DFVL v1 is explicitly rejected. It was the preceding isolated experiment, not the world's
-snapshot schema; source searches find this module only in its own tests and geometry benchmarks.
+snapshot schema. The typed World component now encloses DFVL v2 in static-geometry sections;
+the existing live gameplay snapshots do not consume those sections yet.
 No user backups or private saves were scanned. The larger v2 per-record/maximum byte contract is
 intentional and documented; existing world delta v6, snapshot v2, four-MiB snapshot guard and
 1,200-byte gameplay MTU are unchanged. Neither DFVL format contains authority, world coordinates,
@@ -170,8 +174,9 @@ Next gates remain explicit:
 
 1. Choose/validate large-cut geometry and atomic regional staging under global memory/work limits;
    do not implement explosions as thousands of unbudgeted synchronous micro-edits.
-2. Integrate refined state into World COW observations, fingerprints and versioned atomic
-   world/body transactions, snapshot repair and late join, retaining the uniform fast path.
+2. World COW observations, fingerprints and static-geometry transactions/checkpoints now have a
+   typed implementation (`world-geometry.md`). Finish the enclosing world/body transaction,
+   actual snapshot repair and late-join migration, retaining the uniform fast path.
 3. Use a shared physical transform/occupancy for bullets, character and body collision, with
    precise integer penetration work and server-only damage decisions. The new segment primitive
    supplies one piece, not the completed integration.
@@ -202,7 +207,7 @@ raising limits. A worst-case 8,192-leaf all-material page now exercises diagonal
 segment queries; an 8,192-leaf solid/air checkerboard with six equally detailed neighbors exercises
 exact acceptance of 24,576 surface rectangles and refusal one below that output cap.
 
-## Final local validation, 2026-09-06
+## Core-volume milestone validation, 2026-09-06 (before typed World integration)
 
 The implementing working tree is based on `8fd7231`. Hardware/toolchain: Intel i7-13700H,
 RTX 4050 Laptop, NVIDIA 610.57.04, Linux 7.2.2-1-cachyos, Rust 1.97.1, release fat LTO. Desktop

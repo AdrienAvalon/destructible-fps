@@ -7,6 +7,14 @@ with persistent material-aware destruction. Prefer a narrow engine that serves t
 general editor or framework. A visually attractive demo is not evidence that the multiplayer or
 simulation architecture works.
 
+## Resuming work
+
+Read `REPRISE.md`, then the latest dated receipt in `docs/checkpoints/`, before continuing after a
+context loss. Confirm current Git/source state rather than treating historical measurements as live
+evidence. Preserve the distinction between the playable coarse FPS, the fine/convex inspection viewer,
+planned features and the unachieved photorealistic target. Update the handoff and evidence with each
+material checkpoint; never depend on a temporary path or private conversation to reproduce a claim.
+
 ## Load-bearing invariants
 
 - The dedicated server is authoritative for damage, fracture, structural separation, rigid bodies,
@@ -66,8 +74,10 @@ The graphical smoke check requires an active Linux Wayland or X11 session with a
 adapter. Treat a headless skip as missing coverage, not success.
 
 Add a regression test near every corrected parser, synchronization, determinism, or bounds defect.
-Use explicit fixed seeds for reproducible simulation tests. Do not commit `target/`, captures, or
-profiling output.
+Use explicit fixed seeds for reproducible simulation tests. Do not commit `target/`, raw GPU/video
+captures, or profiling output. Small selected native screenshots explicitly requested for a
+documented checkpoint may live in `docs/screenshots/` with provenance and build identity; label them
+separately from generated art-direction concepts and do not capture the user's desktop or secrets.
 
 ## Repository hygiene
 

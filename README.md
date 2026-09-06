@@ -4,6 +4,16 @@ Technical spike for a photorealistic, server-authoritative multiplayer FPS whose
 structures can ultimately be destroyed. This repository starts with the correctness and
 performance foundations instead of presenting a scripted visual demo as if it were a game engine.
 
+## Resume this project
+
+Start with **[REPRISE.md](REPRISE.md)** (French): product objective, current limitations, exact demo
+commands, next milestone, tools and validation procedure. The
+[2026-09-06 checkpoint](docs/checkpoints/2026-09-06.md) preserves native images and evidence separately
+from the [generated visual target](docs/visual-direction.md). This is a technical starting point,
+**not a photorealistic release**. Code remains `UNLICENSED`; no open-source license is implied.
+
+![Actual native inspector, 2026-09-06 — not the playable combat client and not the visual target](docs/screenshots/2026-09-06-convex-approach.png)
+
 ## First playable demo
 
 For the new exact thin-wall/breach rendering, run
@@ -184,6 +194,9 @@ manufacture contact torque. Exact convex manifolds, full vertical impulse exchan
 constraint-island convergence are not claimed yet.
 
 ## Screenshots
+
+Historical engineering captures below, not the current inspector. See the
+[checkpoint gallery](docs/checkpoints/2026-09-06.md) for the current three native views.
 
 ![First-person approach to the intact test building](docs/screenshots/01-approach.png)
 

@@ -93,6 +93,11 @@ streaming, with no synchronous world meshing on the presentation thread.
   isolated primitive);
 - bounded promotion into revalidated authoritative body descriptors with integer-millimetre centre
   of mass and integer inertia (delivered);
+- shared exact rectangular-volume mass/first/second moments for uniform and typed fine World
+  storage, rational sub-kilogram fragments and full tensors about explicit bounded pivots, with
+  actual coarse body mass/COM using the same accumulator (delivered; see `mass-properties.md`);
+  fine body membership/topology/transport, full-tensor angular response and fine graphical
+  destruction remain integration gates, not delivered by this calculation;
 - atomic explosion/topology/body transactions and protocol-v6 body membership replication with
   independent body fingerprints, bounded reassembly memory, and hostile-input rejection
   (delivered);

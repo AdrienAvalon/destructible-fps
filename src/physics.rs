@@ -2,6 +2,7 @@
 
 use crate::{
     DetachedIsland, IVec3, Voxel, World,
+    mass_properties::{MAX_MASS_CELLS, MassProperties, MassPropertyError},
     structural::{ISLAND_FINGERPRINT_SEED, describe_island, mix_island_fingerprint},
 };
 use core::fmt;
@@ -38,6 +39,7 @@ const BODY_NEIGHBORS: [IVec3; 6] = [
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BodyLimits {
+    /// Caller limit, additionally bounded by `mass_properties::MAX_MASS_CELLS` at import.
     pub max_voxels: usize,
 }
 
@@ -168,6 +170,8 @@ pub struct RigidBodyDescriptor {
     pub minimum: IVec3,
     pub maximum: IVec3,
     pub mass_kg: u64,
+    /// Exact rectangular integrals; full-tensor angular response remains a separate migration.
+    pub mass_properties: MassProperties,
     pub center_of_mass_mm: FixedMillimeters3,
     pub inertia_diagonal_kg_mm2: InertiaDiagonalKgMm2,
     /// Lowest occupied voxel in each local X/Z column, ordered by world position.
@@ -196,6 +200,7 @@ pub enum BodyError {
     IslandDescriptorMismatch,
     ZeroMass,
     CenterOfMassOverflow,
+    MassProperties(MassPropertyError),
 }
 
 impl fmt::Display for BodyError {
@@ -225,6 +230,7 @@ impl fmt::Display for BodyError {
             }
             Self::ZeroMass => write!(formatter, "detached island has zero physical mass"),
             Self::CenterOfMassOverflow => write!(formatter, "center of mass exceeds fixed units"),
+            Self::MassProperties(error) => error.fmt(formatter),
         }
     }
 }
@@ -244,6 +250,9 @@ impl RigidBodyDescriptor {
         voxels: Vec<IVec3>,
         limits: BodyLimits,
     ) -> Result<Self, BodyError> {
+        if voxels.len() > limits.max_voxels.min(MAX_MASS_CELLS) {
+            return Err(BodyError::TooManyVoxels(voxels.len()));
+        }
         let island = describe_island(world, voxels);
         Self::from_detached_island(body_id, world, &island, limits)
     }
@@ -266,7 +275,7 @@ impl RigidBodyDescriptor {
         if island.voxels.is_empty() {
             return Err(BodyError::EmptyIsland);
         }
-        if island.voxels.len() > limits.max_voxels {
+        if island.voxels.len() > limits.max_voxels.min(MAX_MASS_CELLS) {
             return Err(BodyError::TooManyVoxels(island.voxels.len()));
         }
         for pair in island.voxels.windows(2) {
@@ -312,7 +321,7 @@ impl RigidBodyDescriptor {
         if voxels.is_empty() {
             return Err(BodyError::EmptyIsland);
         }
-        if voxels.len() > limits.max_voxels {
+        if voxels.len() > limits.max_voxels.min(MAX_MASS_CELLS) {
             return Err(BodyError::TooManyVoxels(voxels.len()));
         }
         for pair in voxels.windows(2) {
@@ -331,7 +340,11 @@ impl RigidBodyDescriptor {
         }
 
         let (minimum, maximum) = body_bounds(&voxels);
-        let mut mass_kg = 0_u64;
+        let mass_properties =
+            MassProperties::from_body_voxels(&voxels).map_err(BodyError::MassProperties)?;
+        let mass = mass_properties.mass_kg();
+        let mass_kg = u64::try_from(mass.numerator() / mass.denominator())
+            .map_err(|_| BodyError::MassProperties(MassPropertyError::ArithmeticOverflow))?;
         let mut weighted_friction = 0_u128;
         let mut weighted_restitution = 0_u128;
         let mut weighted_fragmentation = 0_u128;
@@ -339,7 +352,6 @@ impl RigidBodyDescriptor {
         for body_voxel in &voxels {
             let properties = body_voxel.voxel.material.properties();
             let voxel_mass = u64::from(properties.density_kg_m3);
-            mass_kg = mass_kg.saturating_add(voxel_mass);
             weighted_friction = weighted_friction.saturating_add(
                 u128::from(voxel_mass).saturating_mul(u128::from(properties.friction_per_mille)),
             );
@@ -356,7 +368,15 @@ impl RigidBodyDescriptor {
         if mass_kg == 0 {
             return Err(BodyError::ZeroMass);
         }
-        let center_of_mass_mm = center_of_mass(&voxels, mass_kg)?;
+        let center = mass_properties.center_of_mass_mm();
+        let center_of_mass_mm = FixedMillimeters3 {
+            x: i64::try_from(center[0].rounded_integer())
+                .map_err(|_| BodyError::CenterOfMassOverflow)?,
+            y: i64::try_from(center[1].rounded_integer())
+                .map_err(|_| BodyError::CenterOfMassOverflow)?,
+            z: i64::try_from(center[2].rounded_integer())
+                .map_err(|_| BodyError::CenterOfMassOverflow)?,
+        };
         let inertia_diagonal_kg_mm2 = inertia_diagonal(&voxels, center_of_mass_mm);
         let collision = collision_surfaces(&voxels);
         let friction_per_mille = weighted_response(weighted_friction, mass_kg);
@@ -369,6 +389,7 @@ impl RigidBodyDescriptor {
             minimum,
             maximum,
             mass_kg,
+            mass_properties,
             center_of_mass_mm,
             inertia_diagonal_kg_mm2,
             collision_bottom: collision.bottom,
@@ -3114,30 +3135,6 @@ const fn intervals_overlap_or_touch(
     left_min <= right_max && right_min <= left_max
 }
 
-fn center_of_mass(
-    voxels: &[BodyVoxel],
-    total_mass_kg: u64,
-) -> Result<FixedMillimeters3, BodyError> {
-    let mut weighted = [0_i128; 3];
-    for body_voxel in voxels {
-        let position = body_voxel.position;
-        let mass = i128::from(body_voxel.voxel.material.properties().density_kg_m3);
-        for (sum, coordinate) in weighted.iter_mut().zip([
-            voxel_center_mm(position.x),
-            voxel_center_mm(position.y),
-            voxel_center_mm(position.z),
-        ]) {
-            *sum = sum.saturating_add(mass.saturating_mul(i128::from(coordinate)));
-        }
-    }
-    let denominator = i128::from(total_mass_kg);
-    Ok(FixedMillimeters3 {
-        x: fixed_coordinate(weighted[0], denominator)?,
-        y: fixed_coordinate(weighted[1], denominator)?,
-        z: fixed_coordinate(weighted[2], denominator)?,
-    })
-}
-
 fn inertia_diagonal(voxels: &[BodyVoxel], center: FixedMillimeters3) -> InertiaDiagonalKgMm2 {
     let mut inertia = InertiaDiagonalKgMm2::default();
     for body_voxel in voxels {
@@ -3285,16 +3282,6 @@ fn weighted_response(weighted: u128, mass_kg: u64) -> u16 {
 #[allow(clippy::missing_const_for_fn)]
 fn voxel_center_mm(coordinate: i32) -> i64 {
     i64::from(coordinate) * MILLIMETERS_PER_VOXEL + MILLIMETERS_PER_VOXEL / 2
-}
-
-fn fixed_coordinate(numerator: i128, denominator: i128) -> Result<i64, BodyError> {
-    let half = denominator / 2;
-    let rounded = if numerator >= 0 {
-        numerator.saturating_add(half) / denominator
-    } else {
-        -numerator.saturating_neg().saturating_add(half) / denominator
-    };
-    i64::try_from(rounded).map_err(|_| BodyError::CenterOfMassOverflow)
 }
 
 #[allow(clippy::missing_const_for_fn)]

@@ -170,6 +170,10 @@ client must be reviewed, version-compatible and disabled in distributed/default 
 
 ## CPU profiling without loosening host protections
 
+`mass-benchmark --iterations 100` measures exact remaining-material integrals on fixed coarse/fine
+pages and actual whole-cell body import. It adds a repository-native Rust executable, no external
+package, runtime dependency, daemon or permission. See [`mass-properties.md`](mass-properties.md).
+
 `character-benchmark --ticks 10000 --fine` exercises the actual fixed-step character solver on
 16 maximum-leaf floor pages, reporting bounded geometry work and a final movement checksum to
 compare with uniform mode. It uses the existing executable and no new dependency or profiler

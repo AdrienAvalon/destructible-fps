@@ -786,6 +786,10 @@ mod tests {
             )
             .expect("authoritative damage");
         let _ = authority.advance_physics();
+        assert!(
+            !authority.bodies().is_empty(),
+            "round trip must exercise actual body metadata"
+        );
         let mut frames = encode_snapshot_frames(1, &authority, MAX_SNAPSHOT_DATAGRAM_BYTES)
             .expect("snapshot frames");
         assert!(frames.len() > 1);
@@ -812,6 +816,17 @@ mod tests {
             authority.world().fingerprint()
         );
         assert_eq!(replica.bodies(), authority.bodies());
+        for (id, body) in authority.bodies() {
+            let restored = &replica.bodies()[id];
+            assert_eq!(restored.mass_properties, body.mass_properties);
+            assert_eq!(
+                restored
+                    .mass_properties
+                    .inertia_about_rounded_center()
+                    .unwrap(),
+                body.mass_properties.inertia_about_rounded_center().unwrap()
+            );
+        }
         assert_eq!(replica.body_states(), authority.body_states());
         assert_eq!(replica.next_body_id(), authority.next_body_id());
     }

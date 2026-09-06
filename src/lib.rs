@@ -13,6 +13,7 @@ pub mod environment;
 pub mod generator;
 pub mod host_attestation;
 pub mod industrial;
+pub mod mass_properties;
 pub mod material;
 pub mod material_library;
 pub mod mesh;

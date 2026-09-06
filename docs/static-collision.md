@@ -11,6 +11,10 @@ mass, inertia, topology, static/dynamic contacts and structural support still ne
 standalone floating-point local-demo controller is not migrated by this lot. This is not fine-world
 graphical multiplayer, a capsule controller, a completed crushing/death policy or photorealism.
 
+The following [`mass-properties.md`](mass-properties.md) increment now shares exact rectangular
+mass integrals with actual body promotion. Fine topology, body contacts, angular solver and live
+body geometry remain unmigrated; character queries are not a substitute for those consumers.
+
 ## Exact coordinates and bounded traversal
 
 `world/query.rs` represents nonempty half-open physical boxes in **1/256 micrometre** units.

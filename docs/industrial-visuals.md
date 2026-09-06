@@ -43,6 +43,9 @@ chipped shoulders and removes the thin bridge over the passage in actual collisi
 The [fragment-face finish revision](fragment-face-finishes.md) distinguishes the retained facade
 skin from exposed cut sides on the large authored debris, without changing its physical geometry.
 
+The [polygonal rubble revision](polygon-rubble.md) changes those large pieces into grounded,
+asymmetric physical footprints and keeps original skin on an explicit rotated side plane.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after

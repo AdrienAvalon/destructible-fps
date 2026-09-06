@@ -15,10 +15,10 @@ use destructible_fps::{
 #[test]
 fn authored_finishes_change_only_markers_and_never_mix_inside_triangles() {
     let fingerprints = [
-        0x1a62_9069_c0f3_ed58_0cc1_33f9_83ac_8b69_u128,
-        0x659c_d20b_2634_1198_4f03_3a46_a232_8fba,
-        0xafe2_3513_fdf7_515c_6339_a144_e64c_23af,
-        0x018e_8048_9b45_91b3_cf8f_2c89_dd90_aec9,
+        0xa31f_c6be_dc94_9804_6ab5_129d_6b7c_7b26_u128,
+        0xdce1_84dc_3a53_64c4_2977_1b22_4ae2_7ff5,
+        0x169f_63c4_e190_2400_054d_8020_0e9c_d3e0,
+        0xb8f3_d69f_8722_e4ef_a9fb_0ded_3540_5e86,
     ];
     let first = industrial_inspection_world(0).unwrap();
     let finishes = industrial_surface_finishes(&first).unwrap();
@@ -29,7 +29,7 @@ fn authored_finishes_change_only_markers_and_never_mix_inside_triangles() {
         assert_eq!(
             world.fingerprint(),
             fingerprint,
-            "finishes preserve the authored asymmetric bay source revision"
+            "finishes preserve the authored polygon rubble source revision"
         );
         assert_eq!(
             finishes.fingerprint(),
@@ -60,32 +60,7 @@ fn authored_finishes_change_only_markers_and_never_mix_inside_triangles() {
                 for vertex in &mut b.vertices {
                     if vertex.fracture_depth.to_bits() == CUT_CORE_MARKER.to_bits() {
                         if vertex.normal[1] <= 0.5 {
-                            // An independent explicit authoring oracle, not the production list.
-                            // Rubble footprints stay strictly inside their x/z source cell.
-                            assert!(vertex.normal[0].abs() > 0.99 || vertex.normal[2] < -0.99);
-                            assert!((1.0..2.0).contains(&vertex.position[1]));
-                            assert!(
-                                [
-                                    (-19_i16, 16_i16),
-                                    (-18, 16),
-                                    (-16, 16),
-                                    (-12, 16),
-                                    (-11, 17),
-                                    (-18, 17),
-                                    (-17, 18),
-                                    (-16, 18),
-                                    (-14, 18),
-                                    (-12, 19),
-                                    (-14, 20),
-                                    (-18, 21),
-                                ]
-                                .into_iter()
-                                .any(|(x, z)| {
-                                    (f32::from(x)..f32::from(x + 1)).contains(&vertex.position[0])
-                                        && (f32::from(z)..f32::from(z + 1))
-                                            .contains(&vertex.position[2])
-                                })
-                            );
+                            assert_authored_cut_side(vertex);
                         }
                         assert!(
                             vertex.material == u32::from(Material::Brick as u8)
@@ -108,6 +83,45 @@ fn authored_finishes_change_only_markers_and_never_mix_inside_triangles() {
     println!(
         "FINISH_MARKERS vertices_across_stages={count} fingerprint={:032x}",
         finishes.fingerprint()
+    );
+}
+
+fn assert_authored_cut_side(vertex: &destructible_fps::mesh::Vertex) {
+    // Independent page and original-plane oracle, not the production authoring registry.
+    assert!(vertex.normal[0].abs() > 0.99 || vertex.normal[2].abs() > 0.99);
+    assert!((1.0..2.0).contains(&vertex.position[1]));
+    let (i, (x, z)) = [
+        (-19_i16, 16_i16),
+        (-18, 16),
+        (-16, 16),
+        (-12, 16),
+        (-11, 17),
+        (-18, 17),
+        (-17, 18),
+        (-16, 18),
+        (-14, 18),
+        (-12, 19),
+        (-14, 20),
+        (-18, 21),
+    ]
+    .into_iter()
+    .enumerate()
+    .find(|(_, (x, z))| {
+        (f32::from(*x)..f32::from(*x + 1)).contains(&vertex.position[0])
+            && (f32::from(*z)..f32::from(*z + 1)).contains(&vertex.position[2])
+    })
+    .expect("only twelve large authored fragments have cut sides");
+    let (axis, sign, plane) = match i % 4 {
+        0 => (2, 1.0_f32, 208.0),
+        1 => (0, -1.0, 48.0),
+        2 => (2, -1.0, 48.0),
+        _ => (0, 1.0, 208.0),
+    };
+    let coordinate = f32::from(if axis == 0 { x } else { z }) + plane / 256.0;
+    assert!(
+        !(vertex.normal[axis].to_bits() == sign.to_bits()
+            && vertex.position[axis].to_bits() == coordinate.to_bits()),
+        "original flat skin is not cut core"
     );
 }
 

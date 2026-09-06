@@ -277,10 +277,11 @@ impl<G: StaticGeometry> Builder<'_, G> {
             }
             let center = std::array::from_fn(|i| (lo[i] as f32 + hi[i] as f32) / 512.0);
             let normal = normals::shading_normal(quad, terrace, &volume, self.work)?;
-            if finish_policy.is_some() {
-                self.charge(4)?;
+            if let Some(policy) = finish_policy {
+                self.charge(policy.work())?;
             }
-            let finish = if finish_policy.is_some_and(|policy| policy.marks(quad.face(), normal[1]))
+            let finish = if finish_policy
+                .is_some_and(|policy| policy.marks(quad.face(), quad.origin(), normal[1]))
             {
                 finishes::CUT_CORE_MARKER
             } else {

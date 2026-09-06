@@ -1,5 +1,8 @@
 # Explicit original and broken fragment faces
 
+This is the initial face-policy receipt. The subsequent [polygonal rubble revision](polygon-rubble.md)
+adds retained-plane metadata and intentionally revises the twelve large pieces' physical shapes.
+
 The native ruined-factory scene is still below the photorealistic reference. This slice addresses
 one material error: large bay fragments previously wrapped the intact brick scan around every
 vertical side. Now each of those twelve authored pieces preserves its courtyard-facing (+Z) skin,

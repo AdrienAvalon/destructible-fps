@@ -21,22 +21,53 @@ pub enum FinishPolicy {
     /// Preserve one original vertical side and the underside of a grounded fragment.
     /// The constructor rejects Y faces; smoothed top terraces remain cut on every side.
     CutTopAndSides(Face),
+    /// Preserve only a specific original side plane (local 1/256 m coordinate, 0..=256).
+    /// Other steps with the same face orientation are broken material, not original skin.
+    CutTopAndSidesAtPlane(Face, u16),
 }
 
 impl FinishPolicy {
-    fn key(self) -> Result<u8, FineMeshError> {
+    fn key(self) -> Result<[u8; 3], FineMeshError> {
         match self {
-            Self::CutTop => Ok(0),
-            Self::CutTopAndSides(face) if face.axis() != 1 => {
-                Ok(1 + u8::try_from(face.index()).map_err(|_| FineMeshError::SurfaceFinish)?)
+            Self::CutTop => Ok([0, 0, 0]),
+            Self::CutTopAndSides(face) if face.axis() != 1 => Ok([
+                1 + u8::try_from(face.index()).map_err(|_| FineMeshError::SurfaceFinish)?,
+                0,
+                0,
+            ]),
+            Self::CutTopAndSidesAtPlane(face, coordinate)
+                if face.axis() != 1 && coordinate <= 256 =>
+            {
+                let [lo, hi] = coordinate.to_le_bytes();
+                Ok([
+                    8 + u8::try_from(face.index()).map_err(|_| FineMeshError::SurfaceFinish)?,
+                    lo,
+                    hi,
+                ])
             }
-            Self::CutTopAndSides(_) => Err(FineMeshError::SurfaceFinish),
+            Self::CutTopAndSides(_) | Self::CutTopAndSidesAtPlane(_, _) => {
+                Err(FineMeshError::SurfaceFinish)
+            }
         }
     }
 
-    pub(super) fn marks(self, face: Face, normal_y: f32) -> bool {
-        normal_y > 0.5
-            || matches!(self, Self::CutTopAndSides(intact) if face.axis() != 1 && face != intact)
+    pub(super) const fn work(self) -> usize {
+        if matches!(self, Self::CutTopAndSidesAtPlane(_, _)) {
+            8
+        } else {
+            4
+        }
+    }
+
+    pub(super) fn marks(self, face: Face, origin: [u16; 3], normal_y: f32) -> bool {
+        let cut_side = match self {
+            Self::CutTop => false,
+            Self::CutTopAndSides(intact) => face != intact,
+            Self::CutTopAndSidesAtPlane(intact, coordinate) => {
+                face != intact || origin[face.axis()] != coordinate
+            }
+        };
+        normal_y > 0.5 || (face.axis() != 1 && cut_side)
     }
 }
 
@@ -78,7 +109,7 @@ impl SurfaceFinishes {
             .try_reserve_exact(policies.len())
             .map_err(|_| FineMeshError::Allocation)?;
         let mut leaves = 0;
-        let mut fingerprint = 0x6375_742d_6661_6365_732d_7632_u128;
+        let mut fingerprint = 0x6375_742d_6661_6365_732d_7633_u128;
         for &(position, policy) in policies {
             let policy_key = policy.key()?;
             let cell = world.cell(position);
@@ -105,7 +136,7 @@ impl SurfaceFinishes {
                 .into_iter()
                 .flat_map(i32::to_le_bytes)
                 .chain(volume.fingerprint().to_le_bytes())
-                .chain([policy_key])
+                .chain(policy_key)
             {
                 fingerprint =
                     (fingerprint ^ u128::from(byte)).wrapping_mul(0x0100_0000_0000_0000_0000_013b);
@@ -168,13 +199,17 @@ mod tests {
             Face::PositiveZ,
         ] {
             let policy = FinishPolicy::CutTopAndSides(intact);
-            assert!(policy.marks(intact, 0.8));
-            assert!(!policy.marks(intact, 0.0));
-            assert!(!policy.marks(Face::NegativeY, -1.0));
-            assert!(policy.marks(intact.opposite(), 0.0));
-            assert!(policy.marks(Face::PositiveY, 1.0));
-            assert!(!FinishPolicy::CutTop.marks(intact.opposite(), 0.0));
-            assert!(!FinishPolicy::CutTop.marks(Face::PositiveY, 0.5));
+            assert!(policy.marks(intact, [0; 3], 0.8));
+            assert!(!policy.marks(intact, [0; 3], 0.0));
+            assert!(!policy.marks(Face::NegativeY, [0; 3], -1.0));
+            assert!(policy.marks(intact.opposite(), [0; 3], 0.0));
+            assert!(policy.marks(Face::PositiveY, [0; 3], 1.0));
+            assert!(!FinishPolicy::CutTop.marks(intact.opposite(), [0; 3], 0.0));
+            assert!(!FinishPolicy::CutTop.marks(Face::PositiveY, [0; 3], 0.5));
+            let plane = FinishPolicy::CutTopAndSidesAtPlane(intact, 0);
+            assert!(plane.marks(intact, [0; 3], 0.8));
+            assert!(!plane.marks(intact, [0; 3], 0.0));
+            assert!(plane.marks(intact, [1; 3], 0.0));
         }
     }
 }

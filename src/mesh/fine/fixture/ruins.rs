@@ -4,6 +4,8 @@ use super::{
     RefinedWorld, VolumeLimits, Voxel,
 };
 
+mod polygon;
+
 /// Half-open aperture in the four-by-three-metre wall patch, in 1/256 m units.
 /// The intact strips at both sides and the upper band remain connected to the surrounding wall.
 pub(super) fn breach_row(y: i32) -> (i32, i32) {
@@ -126,7 +128,7 @@ fn sampled_shard(shard: Shard, step: u16) -> Result<RefinedVolume, Box<dyn Error
 }
 
 pub(super) fn courtyard(source: &RefinedWorld) -> Result<RefinedWorld, Box<dyn Error>> {
-    place(source, &SHARDS, 8)
+    place(source, &SHARDS, |shard, _| shard_volume(shard))
 }
 
 fn bay_shards() -> Vec<Shard> {
@@ -149,7 +151,7 @@ fn bay_shards() -> Vec<Shard> {
     .map(|(i, (x, z))| Shard {
         cell: IVec3::new(x, 1, z),
         extent: [[224, 208], [208, 192], [192, 224]][i % 3],
-        thickness: [144, 96, 128, 64][i % 4],
+        thickness: [112, 56, 80, 44][i % 4],
         slope: [[32, -16], [-24, 16], [16, 24]][i % 3],
         material: if i % 3 == 0 {
             Material::Concrete
@@ -162,7 +164,7 @@ fn bay_shards() -> Vec<Shard> {
 
 /// Static dressed debris accompanying the missing facade, not a mass-conserved blast result.
 pub(super) fn bay_debris(source: &RefinedWorld) -> Result<RefinedWorld, Box<dyn Error>> {
-    place(source, &bay_shards(), 16)
+    place(source, &bay_shards(), polygon::volume)
 }
 
 pub(super) fn surface_finishes(
@@ -173,14 +175,12 @@ pub(super) fn surface_finishes(
         .iter()
         .map(|s| (s.cell, FinishPolicy::CutTop))
         .collect();
-    policies.extend(bay_shards().iter().map(|s| {
-        // These upright authored chunks retain their courtyard-facing masonry skin.
-        // Other exposed sides are cut core; this is not inferred dynamic fracture history.
-        (
-            s.cell,
-            FinishPolicy::CutTopAndSides(crate::volume::surface::Face::PositiveZ),
-        )
-    }));
+    policies.extend(
+        bay_shards()
+            .iter()
+            .enumerate()
+            .map(|(index, s)| (s.cell, polygon::finish(index))),
+    );
     policies.extend(
         super::bay::cut_top_cells(source)
             .into_iter()
@@ -193,11 +193,11 @@ pub(super) fn surface_finishes(
 fn place(
     source: &RefinedWorld,
     shards: &[Shard],
-    step: u16,
+    make_volume: fn(Shard, usize) -> Result<RefinedVolume, Box<dyn Error>>,
 ) -> Result<RefinedWorld, Box<dyn Error>> {
     let mut state = GeometryState::new(source.clone(), 1)?;
     let mut changes = Vec::with_capacity(shards.len());
-    for &shard in shards {
+    for (index, &shard) in shards.iter().enumerate() {
         if source.cell(shard.cell).solid_units() != 0
             || source
                 .cell(IVec3::new(shard.cell.x, 0, shard.cell.z))
@@ -211,11 +211,7 @@ fn place(
         changes.push(GeometryChange {
             position: shard.cell,
             before: source.cell(shard.cell),
-            after: GeometryCell::refined(if step == 8 {
-                shard_volume(shard)?
-            } else {
-                sampled_shard(shard, step)?
-            }),
+            after: GeometryCell::refined(make_volume(shard, index)?),
         });
     }
     changes.sort_by_key(|c| c.position);
@@ -250,12 +246,8 @@ mod tests {
     }
 
     #[test]
-    fn rubble_has_exact_ground_contact_empty_corners_and_tilted_quantized_tops() {
-        let shards: Vec<_> = SHARDS
-            .into_iter()
-            .map(|s| (s, 8_u16))
-            .chain(bay_shards().into_iter().map(|s| (s, 16)))
-            .collect();
+    fn original_courtyard_has_exact_ground_contact_empty_corners_and_tilted_quantized_tops() {
+        let shards: Vec<_> = SHARDS.into_iter().map(|s| (s, 8_u16)).collect();
         let cells: std::collections::BTreeSet<_> = shards.iter().map(|(s, _)| s.cell).collect();
         assert_eq!(cells.len(), shards.len(), "no overlapping shard pages");
         for (shard, step) in shards {

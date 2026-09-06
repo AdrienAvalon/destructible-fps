@@ -19,6 +19,29 @@ would reduce reliability without improving the game.
 Simulation resolution is bounded by gameplay relevance. The server owns every permanent mutation;
 clients may predict reversible motion and cosmetic debris only.
 
+## Immediate priority — photorealistic renderer and industrial map
+
+User direction: finish the in-flight Claude-helper repair and validate the current exact material
+probe, then prioritize **visible native rendering and map quality**, ahead of the next large fine
+weapon/authority expansion. The full physics/destruction/multiplayer contract remains intact.
+Do not turn completion of additional infrastructure primitives into a prerequisite for showing
+meaningful visual progress. The point-ray probe is an inspection tool, not completed fine combat.
+
+Next visual slice: a cohesive industrial courtyard and ruined building, using the supplied ruined
+concrete/brick factory reference as art direction. Work at actual player height and architectural
+scale: natural terrain transitions, layered architecture and broken edges, coherent material scale
+and variation, rubble contacts, vegetation and a photographic outdoor/indoor light balance. Inspect
+the existing light transport and content first; do not simply raise texture resolution or hide
+silhouette defects under postprocessing. A generated reference is never a runtime screenshot.
+
+Each visual increment needs an actual native before/after capture from fixed wide, approach and
+close-fracture views, a moving-camera check, plus separately recorded CPU/GPU frame tails and
+memory/geometry budgets on named hardware. Keep source asset provenance and reproducible cooking.
+Damage remains a visual acceptance condition: no floating facade, sealed physical hole, detached
+decoration, disappearing support or inconsistent shadow after the corresponding source changes.
+Do not obtain realism by adding indestructible gameplay cover or colliders unrelated to visible
+material. Fine weapon activation stays explicitly pending while this visual-first slice advances.
+
 ## Non-negotiable budgets
 
 | Domain | Shipping target | Promotion evidence |

@@ -46,6 +46,39 @@ The user reconfirmed the ruined-factory image as the target, with the ambition t
 [`industrial-visuals.md`](industrial-visuals.md) separates that visual acceptance from intermediate
 material-condition work and keeps the outstanding geometric/composition requirements explicit.
 
+### Visual acceptance reset — 2026-09-06
+
+The user again rejects the current image as non-photorealistic. Small fixes to individual fragments,
+tiling or haze do not constitute the requested visual milestone. Close the in-flight haze validation,
+then prioritize one cohesive, player-scale reference scene instead of another isolated cosmetic
+increment. The full-resolution haze candidate was subsequently rejected on native cost/benefit
+evidence; runtime was restored, as recorded in [the experiment report](occluded-haze.md).
+Keep the existing prototype as a technical baseline, not as visual acceptance.
+
+The next scene must combine layered industrial architecture (slabs, columns, reveals and broken
+material thickness), supported multi-scale rubble, coherent terrain transitions and vegetation,
+and believable outdoor/interior illumination. Reuse verified scans and tools; choose new tools only
+for a demonstrated production bottleneck. Visible solids remain the destruction/collision source.
+Author a small complete area first; map breadth, generic editor work and optional AI features must
+not consume this milestone. Do not promise that textures or postprocessing alone can supply it.
+
+Source inspection confirms that the Blender smoke exports/reimports a GLB, while the native game
+still has no model-asset importer: installing Blender did not deliver a content-production bridge.
+The material library contains five scan families, and the industrial world is authored integer
+geometry with bounded refined patches. Use those facts to choose the implementation, not an
+assumption that detailed assets can already be dropped into the renderer. Any needed authoring
+bridge must deliver actual scene content and validate scale, bounds, provenance and physical
+correspondence; an isolated importer smoke or a beautiful indestructible backdrop is not this
+milestone. Conservative collision mismatches in the older smoothed coarse renderer remain an
+explicit limitation in `visual-direction.md`, not precedent for silently bypassing the fine source.
+
+Review actual native player-height stills and motion against the supplied factory reference at
+comparable framing. Evaluate silhouette/scale, material detail/repetition, rubble contacts, terrain,
+lighting and frame-time cost together. Keep the gate open if major categories still look like a
+prototype; passing shader tests or a high FPS cannot substitute for visible quality. Generated
+concept art is not an acceptable deliverable for this comparison. Broader hardware, multiplayer and
+destruction qualification remain separate required gates, not implied by a beautiful static scene.
+
 ## Non-negotiable budgets
 
 | Domain | Shipping target | Promotion evidence |

@@ -46,6 +46,10 @@ skin from exposed cut sides on the large authored debris, without changing its p
 The [polygonal rubble revision](polygon-rubble.md) changes those large pieces into grounded,
 asymmetric physical footprints and keeps original skin on an explicit rotated side plane.
 
+The [full-resolution haze experiment](occluded-haze.md) was rejected after native comparison and
+GPU measurement: its scene-wide visual benefit did not justify the measured cost. The runtime
+was restored; the next milestone prioritizes a cohesive reference scene over isolated corrections.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after

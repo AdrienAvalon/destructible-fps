@@ -104,13 +104,17 @@ fn column_height(shard: Shard, x: u16, z: u16) -> Option<u16> {
 }
 
 fn shard_volume(shard: Shard) -> Result<RefinedVolume, Box<dyn Error>> {
+    sampled_shard(shard, 8)
+}
+
+fn sampled_shard(shard: Shard, step: u16) -> Result<RefinedVolume, Box<dyn Error>> {
     let mut volume = RefinedVolume::uniform(Voxel::AIR);
-    for z in (0..shard.extent[1]).step_by(8) {
-        for x in (0..shard.extent[0]).step_by(8) {
-            if let Some(height) = column_height(shard, x + 4, z + 4) {
+    for z in (0..shard.extent[1]).step_by(usize::from(step)) {
+        for x in (0..shard.extent[0]).step_by(usize::from(step)) {
+            if let Some(height) = column_height(shard, x + step / 2, z + step / 2) {
                 volume = volume
                     .replace_box(
-                        LocalBox::new([16 + x, 0, 16 + z], [24 + x, height, 24 + z])?,
+                        LocalBox::new([16 + x, 0, 16 + z], [16 + x + step, height, 16 + z + step])?,
                         Voxel::new(shard.material),
                         VolumeLimits::default(),
                     )?
@@ -122,9 +126,53 @@ fn shard_volume(shard: Shard) -> Result<RefinedVolume, Box<dyn Error>> {
 }
 
 pub(super) fn courtyard(source: &RefinedWorld) -> Result<RefinedWorld, Box<dyn Error>> {
+    place(source, &SHARDS, 8)
+}
+
+fn bay_shards() -> Vec<Shard> {
+    [
+        (-19, 16),
+        (-18, 16),
+        (-16, 16),
+        (-12, 16),
+        (-11, 17),
+        (-18, 17),
+        (-17, 18),
+        (-16, 18),
+        (-14, 18),
+        (-12, 19),
+        (-14, 20),
+        (-18, 21),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (x, z))| Shard {
+        cell: IVec3::new(x, 1, z),
+        extent: [[224, 208], [208, 192], [192, 224]][i % 3],
+        thickness: [144, 96, 128, 64][i % 4],
+        slope: [[32, -16], [-24, 16], [16, 24]][i % 3],
+        material: if i % 3 == 0 {
+            Material::Concrete
+        } else {
+            Material::Brick
+        },
+    })
+    .collect()
+}
+
+/// Static dressed debris accompanying the missing facade, not a mass-conserved blast result.
+pub(super) fn bay_debris(source: &RefinedWorld) -> Result<RefinedWorld, Box<dyn Error>> {
+    place(source, &bay_shards(), 16)
+}
+
+fn place(
+    source: &RefinedWorld,
+    shards: &[Shard],
+    step: u16,
+) -> Result<RefinedWorld, Box<dyn Error>> {
     let mut state = GeometryState::new(source.clone(), 1)?;
-    let mut changes = Vec::with_capacity(SHARDS.len());
-    for shard in SHARDS {
+    let mut changes = Vec::with_capacity(shards.len());
+    for &shard in shards {
         if source.cell(shard.cell).solid_units() != 0
             || source
                 .cell(IVec3::new(shard.cell.x, 0, shard.cell.z))
@@ -138,7 +186,11 @@ pub(super) fn courtyard(source: &RefinedWorld) -> Result<RefinedWorld, Box<dyn E
         changes.push(GeometryChange {
             position: shard.cell,
             before: source.cell(shard.cell),
-            after: GeometryCell::refined(shard_volume(shard)?),
+            after: GeometryCell::refined(if step == 8 {
+                shard_volume(shard)?
+            } else {
+                sampled_shard(shard, step)?
+            }),
         });
     }
     changes.sort_by_key(|c| c.position);
@@ -174,23 +226,32 @@ mod tests {
 
     #[test]
     fn rubble_has_exact_ground_contact_empty_corners_and_tilted_quantized_tops() {
-        let cells: std::collections::BTreeSet<_> = SHARDS.iter().map(|s| s.cell).collect();
-        assert_eq!(cells.len(), SHARDS.len(), "no overlapping shard pages");
-        for shard in SHARDS {
-            let volume = shard_volume(shard).unwrap();
+        let shards: Vec<_> = SHARDS
+            .into_iter()
+            .map(|s| (s, 8_u16))
+            .chain(bay_shards().into_iter().map(|s| (s, 16)))
+            .collect();
+        let cells: std::collections::BTreeSet<_> = shards.iter().map(|(s, _)| s.cell).collect();
+        assert_eq!(cells.len(), shards.len(), "no overlapping shard pages");
+        for (shard, step) in shards {
+            let volume = sampled_shard(shard, step).unwrap();
             let mut heights = std::collections::BTreeSet::new();
             let mut volume_units = 0;
-            for z in (0..shard.extent[1]).step_by(8) {
-                for x in (0..shard.extent[0]).step_by(8) {
-                    let expected = column_height(shard, x + 4, z + 4);
-                    let sample =
-                        |y| LocalBox::new([20 + x, y, 20 + z], [21 + x, y + 1, 21 + z]).unwrap();
+            for z in (0..shard.extent[1]).step_by(usize::from(step)) {
+                for x in (0..shard.extent[0]).step_by(usize::from(step)) {
+                    let expected = column_height(shard, x + step / 2, z + step / 2);
+                    let centre_x = 16 + x + step / 2;
+                    let centre_z = 16 + z + step / 2;
+                    let sample = |y| {
+                        LocalBox::new([centre_x, y, centre_z], [centre_x + 1, y + 1, centre_z + 1])
+                            .unwrap()
+                    };
                     assert_eq!(volume.overlaps_solid(sample(0)), expected.is_some());
                     if let Some(height) = expected {
                         assert!(volume.overlaps_solid(sample(height - 1)));
                         assert!(!volume.overlaps_solid(sample(height)));
                         heights.insert(height);
-                        volume_units += u32::from(height) * 64;
+                        volume_units += u32::from(height) * u32::from(step).pow(2);
                     }
                 }
             }
@@ -198,7 +259,7 @@ mod tests {
             assert_eq!(volume.solid_units(), volume_units);
             assert_eq!(
                 volume.fingerprint(),
-                shard_volume(shard).unwrap().fingerprint()
+                sampled_shard(shard, step).unwrap().fingerprint()
             );
         }
     }
@@ -207,6 +268,7 @@ mod tests {
     fn courtyard_refuses_missing_support_and_occupied_authored_cells_without_mutating_source() {
         let empty = RefinedWorld::default();
         assert!(courtyard(&empty).is_err());
+        assert!(bay_debris(&empty).is_err());
         assert_eq!(empty.geometry_stats().chunks, 0);
         let mut coarse = crate::WorldPreset::Industrial.build();
         let s = SHARDS[0];
@@ -215,5 +277,11 @@ mod tests {
         let before = occupied.fingerprint();
         assert!(courtyard(&occupied).is_err());
         assert_eq!(occupied.fingerprint(), before);
+        let coarse = crate::WorldPreset::Industrial.build();
+        let original = RefinedWorld::from_uniform(&coarse).unwrap();
+        let dressed = bay_debris(&original).unwrap();
+        let before = dressed.fingerprint();
+        assert!(bay_debris(&dressed).is_err());
+        assert_eq!(dressed.fingerprint(), before);
     }
 }

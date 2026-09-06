@@ -182,7 +182,7 @@ fn all_authored_shards_are_recognized_but_layered_wall_pages_are_not() {
         }
         added_work += meter.used.get();
     }
-    assert_eq!(accepted, 8);
+    assert_eq!(accepted, 20);
     assert!(
         added_work < 150_000,
         "keep margin in the unchanged 4M job budget"

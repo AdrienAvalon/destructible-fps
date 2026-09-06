@@ -121,6 +121,24 @@ fn openings() -> Vec<Opening> {
     openings
 }
 
+/// Exact authored frame used to validate a subsequent whole-bay removal, not a material proxy.
+pub(super) fn left_front_cells() -> Result<Vec<(IVec3, GeometryCell)>, Box<dyn Error>> {
+    let opening = openings()
+        .into_iter()
+        .find(|opening| opening.origin == IVec3::new(-18, 7, 15))
+        .ok_or("missing authored left front opening")?;
+    let mut cells = Vec::with_capacity(30);
+    for u in 0..opening.width {
+        for y in 0..5 {
+            cells.push((
+                opening.cell(i32::from(u), i32::from(y)),
+                opening.page(u, y)?,
+            ));
+        }
+    }
+    Ok(cells)
+}
+
 pub(super) fn install(source: &RefinedWorld) -> Result<RefinedWorld, Box<dyn Error>> {
     let openings = openings();
     // Validate the complete original layout before preparing any derived candidate.

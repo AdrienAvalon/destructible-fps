@@ -6,6 +6,7 @@ use crate::{
 };
 use std::error::Error;
 
+mod bay;
 mod hardstand;
 mod roof;
 mod ruins;
@@ -33,9 +34,12 @@ pub fn industrial_inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn
         IVec3::new(-17, 1, 15),
         true,
     )?;
-    hardstand::install(&roof::install(&windows::install(&ruins::courtyard(
-        &world,
-    )?)?)?)
+    let world = ruins::courtyard(&world)?;
+    let world = windows::install(&world)?;
+    let world = roof::install(&world)?;
+    let world = hardstand::install(&world)?;
+    let world = bay::install(&world)?;
+    ruins::bay_debris(&world)
 }
 
 /// Builds thin layered masonry with exact air cuts and a surrounding concrete inspection pad.

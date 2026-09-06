@@ -121,7 +121,7 @@ fn exact_inspection_reference_is_unchanged_and_industrial_rubble_is_persistent()
         .refined_positions()
         .filter(|p| p.y == 1 && p.z > 15)
         .collect();
-    assert_eq!(rubble.len(), 8);
+    assert_eq!(rubble.len(), 20);
     let windows = window_positions(&baseline);
     assert!(windows.len() > 300);
     let apron: Vec<_> = baseline.refined_positions().filter(|p| p.y == 0).collect();
@@ -141,7 +141,7 @@ fn exact_inspection_reference_is_unchanged_and_industrial_rubble_is_persistent()
         }
         let stats = world.geometry_stats();
         // The ground-reaching final aperture empties three entire wall pages; they canonicalize
-        // back to AIR, while all eight permanent rubble pages remain refined.
+        // back to AIR, while all twenty permanent rubble pages remain refined.
         assert_eq!(
             stats.refined_pages,
             baseline.geometry_stats().refined_pages - if stage == 3 { 3 } else { 0 }

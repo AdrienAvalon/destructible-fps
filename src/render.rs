@@ -25,11 +25,12 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
+mod sky;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_MAP_SIZE: u32 = 2_048;
-const GPU_TIMESTAMP_COUNT: u32 = 4;
-const GPU_TIMESTAMP_BYTES: u64 = 4 * 8;
+const GPU_TIMESTAMP_COUNT: u32 = 6;
+const GPU_TIMESTAMP_BYTES: u64 = 6 * 8;
 const GPU_READBACK_SLOTS: usize = 4;
 const MAX_COMPLETED_GPU_SAMPLES: usize = 16;
 const BODY_INSTANCE_BYTES: u64 = 64;
@@ -66,7 +67,7 @@ struct GpuBody {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct BodyInstance {
     model: [[f32; 4]; 4],
 }
@@ -85,11 +86,16 @@ pub struct RenderStats {
     pub visible_players: usize,
     pub world_draw_calls: usize,
     pub shadow_draw_calls: usize,
+    pub sky_draw_calls: usize,
+    pub sky_rebuilds: u64,
+    pub sky_cache_hits: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GpuFrameTime {
     pub shadow_ms: f64,
+    pub sky_visibility_ms: f64,
+    pub sky_refreshed: bool,
     pub world_hud_ms: f64,
     pub total_ms: f64,
 }
@@ -103,6 +109,7 @@ enum ReadbackState {
 struct ReadbackSlot {
     buffer: wgpu::Buffer,
     state: ReadbackState,
+    sky_refreshed: bool,
 }
 
 struct GpuProfiler {
@@ -137,6 +144,7 @@ impl GpuProfiler {
                     mapped_at_creation: false,
                 }),
                 state: ReadbackState::Idle,
+                sky_refreshed: false,
             })
             .collect();
         Self {
@@ -163,7 +171,10 @@ impl GpuProfiler {
                 Ok(Ok(())) => {
                     if let Ok(view) = slot.buffer.get_mapped_range(..) {
                         let timestamps = bytemuck::cast_slice::<u8, u64>(&view);
-                        if let Some(sample) = gpu_frame_time(timestamps, self.timestamp_period_ns) {
+                        if let Some(mut sample) =
+                            gpu_frame_time(timestamps, self.timestamp_period_ns)
+                        {
+                            sample.sky_refreshed = slot.sky_refreshed;
                             if self.completed.len() == MAX_COMPLETED_GPU_SAMPLES {
                                 self.completed.pop_front();
                                 self.dropped_samples = self.dropped_samples.saturating_add(1);
@@ -192,7 +203,11 @@ impl GpuProfiler {
         }
     }
 
-    fn encode_readback(&mut self, encoder: &mut wgpu::CommandEncoder) -> Option<usize> {
+    fn encode_readback(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        sky_refreshed: bool,
+    ) -> Option<usize> {
         let slot_index = (0..self.slots.len())
             .map(|offset| (self.next_slot + offset) % self.slots.len())
             .find(|&index| matches!(self.slots[index].state, ReadbackState::Idle));
@@ -214,6 +229,7 @@ impl GpuProfiler {
             GPU_TIMESTAMP_BYTES,
         );
         self.slots[slot_index].state = ReadbackState::Scheduled;
+        self.slots[slot_index].sky_refreshed = sky_refreshed;
         self.next_slot = (slot_index + 1) % self.slots.len();
         Some(slot_index)
     }
@@ -231,15 +247,32 @@ impl GpuProfiler {
 }
 
 fn gpu_frame_time(timestamps: &[u64], period_ns: f64) -> Option<GpuFrameTime> {
-    let [shadow_begin, shadow_end, world_begin, world_end] = *timestamps else {
+    let [
+        shadow_begin,
+        shadow_end,
+        sky_begin,
+        sky_end,
+        world_begin,
+        world_end,
+    ] = *timestamps
+    else {
         return None;
     };
-    if shadow_end < shadow_begin || world_begin < shadow_end || world_end < world_begin {
+    if shadow_end < shadow_begin
+        || sky_begin < shadow_end
+        || sky_end < sky_begin
+        || world_begin < sky_end
+        || world_end < world_begin
+        || !period_ns.is_finite()
+        || period_ns <= 0.0
+    {
         return None;
     }
     let ticks_to_ms = |ticks: u64| ticks as f64 * period_ns / 1_000_000.0;
     Some(GpuFrameTime {
         shadow_ms: ticks_to_ms(shadow_end - shadow_begin),
+        sky_visibility_ms: ticks_to_ms(sky_end - sky_begin),
+        sky_refreshed: false,
         world_hud_ms: ticks_to_ms(world_end - world_begin),
         total_ms: ticks_to_ms(world_end - shadow_begin),
     })
@@ -279,6 +312,7 @@ pub struct Renderer {
     shadow_sampling_bind_group: wgpu::BindGroup,
     material_bind_group: wgpu::BindGroup,
     environment_bind_group: wgpu::BindGroup,
+    sky_visibility: sky::SkyVisibility,
     gpu_profiler: Option<GpuProfiler>,
     chunks: HashMap<IVec3, GpuMesh>,
     bodies: HashMap<BodyId, GpuBody>,
@@ -378,16 +412,14 @@ impl Renderer {
         });
         let player_mesh = create_gpu_mesh(&device, &player_cpu_mesh(), "remote player");
         let (shadow_texture, shadow_view) = create_shadow_map(&device);
-        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("shadow comparison sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            compare: Some(wgpu::CompareFunction::LessEqual),
-            ..Default::default()
-        });
+        let sky_visibility = sky::SkyVisibility::new(&device);
+        println!(
+            "Visibilite du ciel: {} vues {}px, {} octets GPU; cache geometrie/poses/ancrage",
+            sky::VIEWS,
+            sky::EDGE,
+            sky::DEPTH_BYTES
+        );
+        let shadow_sampler = create_shadow_sampler(&device);
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -421,6 +453,28 @@ impl Renderer {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                size_of::<sky::Parameters>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
                 ],
             });
         let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -442,6 +496,14 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&sky_visibility.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: sky_visibility.buffer.as_entire_binding(),
                 },
             ],
         });
@@ -722,6 +784,7 @@ impl Renderer {
             shadow_sampling_bind_group,
             material_bind_group,
             environment_bind_group,
+            sky_visibility,
             gpu_profiler,
             chunks: HashMap::new(),
             bodies: HashMap::new(),
@@ -762,6 +825,7 @@ impl Renderer {
     }
 
     fn upload_mesh(&mut self, chunk: IVec3, mesh: &CpuMesh) {
+        self.sky_visibility.invalidate();
         if mesh.indices.is_empty() {
             self.chunks.remove(&chunk);
             return;
@@ -780,6 +844,7 @@ impl Renderer {
             if body.mesh.indices.is_empty() {
                 continue;
             }
+            self.sky_visibility.invalidate();
             let instance_slot = if let Some(existing) = self.bodies.get(&body.body_id) {
                 existing.instance_slot
             } else {
@@ -838,6 +903,7 @@ impl Renderer {
 
     /// Drops every rendered rigid body before installing an authoritative replacement snapshot.
     pub fn clear_body_meshes(&mut self) {
+        self.sky_visibility.invalidate();
         self.bodies.clear();
         self.body_instances.clear();
         self.refresh_stats();
@@ -869,6 +935,9 @@ impl Renderer {
             };
             let index = usize::try_from(body.instance_slot).unwrap_or(usize::MAX);
             if let Some(slot) = self.body_instances.get_mut(index) {
+                if *slot != instance {
+                    self.sky_visibility.invalidate();
+                }
                 *slot = instance;
             }
             body.world_minimum = world_minimum;
@@ -919,6 +988,9 @@ impl Renderer {
                 0,
                 bytemuck::cast_slice(&instances),
             );
+        }
+        if self.player_instances != instances {
+            self.sky_visibility.invalidate();
         }
         self.player_instances = instances;
         self.stats.players = self.player_instances.len();
@@ -1085,10 +1157,25 @@ impl Renderer {
                 );
             }
         }
+        self.sky_visibility.encode(
+            &mut encoder,
+            &self.queue,
+            camera_position,
+            &self.chunks,
+            &self.bodies,
+            &self.body_instance_buffer,
+            &self.player_mesh,
+            &self.player_instance_buffer,
+            self.player_instances.len(),
+            self.gpu_profiler.as_ref(),
+        );
+        self.stats.sky_draw_calls = self.sky_visibility.stats.draw_calls;
+        self.stats.sky_rebuilds = self.sky_visibility.stats.rebuilds;
+        self.stats.sky_cache_hits = self.sky_visibility.stats.cache_hits;
         let world_timestamp_writes = self
             .gpu_profiler
             .as_ref()
-            .map(|profiler| profiler.timestamps(2, 3));
+            .map(|profiler| profiler.timestamps(4, 5));
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("world and HUD pass"),
@@ -1155,10 +1242,9 @@ impl Renderer {
             pass.set_pipeline(&self.crosshair_pipeline);
             pass.draw(0..12, 0..1);
         }
-        let readback_slot = self
-            .gpu_profiler
-            .as_mut()
-            .and_then(|profiler| profiler.encode_readback(&mut encoder));
+        let readback_slot = self.gpu_profiler.as_mut().and_then(|profiler| {
+            profiler.encode_readback(&mut encoder, self.sky_visibility.stats.refreshed)
+        });
         self.queue.submit([encoder.finish()]);
         if let (Some(profiler), Some(slot_index)) = (&mut self.gpu_profiler, readback_slot) {
             profiler.map_after_submit(slot_index);
@@ -1587,6 +1673,19 @@ fn create_depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::Te
         .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+fn create_shadow_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("shadow comparison sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        compare: Some(wgpu::CompareFunction::LessEqual),
+        ..Default::default()
+    })
+}
+
 fn create_shadow_map(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("directional shadow map"),
@@ -1634,18 +1733,29 @@ mod tests {
 
     #[test]
     fn gpu_timestamps_are_split_into_pass_and_total_times() {
-        let sample = gpu_frame_time(&[100, 160, 175, 275], 10.0).expect("valid timestamps");
+        let times = [100, 160, 165, 175, 185, 285];
+        let sample = gpu_frame_time(&times, 10.0).expect("valid timestamps");
 
         assert_eq!(
             sample,
             GpuFrameTime {
                 shadow_ms: 0.0006,
+                sky_visibility_ms: 0.0001,
+                sky_refreshed: false,
                 world_hud_ms: 0.001,
-                total_ms: 0.00175,
+                total_ms: 0.00185,
             }
         );
         assert!(gpu_frame_time(&[100, 99, 175, 275], 10.0).is_none());
         assert!(gpu_frame_time(&[100, 160, 175], 10.0).is_none());
+        for index in 1..6 {
+            let mut invalid = times;
+            invalid[index] = invalid[index - 1] - 1;
+            assert!(gpu_frame_time(&invalid, 10.0).is_none());
+        }
+        for period in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(gpu_frame_time(&times, period).is_none());
+        }
     }
 
     #[test]

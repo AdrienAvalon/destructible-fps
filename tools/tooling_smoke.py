@@ -32,14 +32,18 @@ def run_bounded(command, output, env, timeout=60):
             process.wait()
 
 
-def isolated_command(output, command):
+def isolated_command(output, command, *, max_file_bytes=256 * 1024**2):
+    # Only the reviewed RenderDoc profile admits the larger bound. Never accept an
+    # arbitrary caller-provided cap (or an unlimited/negative RLIMIT sentinel).
+    if max_file_bytes not in (256 * 1024**2, 512 * 1024**2):
+        raise ValueError("unsupported tool file-size limit")
     # The PID namespace reaps even descendants that create a separate process group.
     # /dev and the existing compositor socket are accessible for real local GPU tests.
     return ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-net",
             "--ro-bind", "/", "/", "--bind", str(output), str(output),
             "--dev-bind", "/dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
             "--ro-bind-try", "/tmp/.X11-unix", "/tmp/.X11-unix",
-            "--chdir", str(ROOT), "--", "prlimit", "--fsize=268435456:268435456", "--",
+            "--chdir", str(ROOT), "--", "prlimit", f"--fsize={max_file_bytes}:{max_file_bytes}", "--",
             *map(str, command)]
 
 
@@ -133,7 +137,8 @@ def main():
         run_bounded(isolated_command(output, compile_command), output, env, timeout=60)
         env["FPS_TRACY_INNER"] = "1"
         command = ["python", str(ROOT / "tools/tooling_smoke.py")]
-    run_bounded(isolated_command(output, command), output, env)
+    file_limit = (512 if options.tool == "renderdoc" else 256) * 1024**2
+    run_bounded(isolated_command(output, command, max_file_bytes=file_limit), output, env)
     result = output / f"{options.tool}-result.json"
     if not result.is_file():
         raise RuntimeError(f"missing success proof: inspect {output}; process exit alone is insufficient")

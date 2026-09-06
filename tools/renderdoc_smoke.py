@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import resource
 import sys
 import time
 import traceback
@@ -39,8 +40,9 @@ try:
         time.sleep(0.01)
     if filename is None or filename.parent != output or not filename.is_file():
         raise RuntimeError("no actual local GPU frame captured")
-    if filename.stat().st_size > 256 * 1024 * 1024:
-        raise RuntimeError("capture exceeds the smoke artifact budget")
+    file_limit = resource.getrlimit(resource.RLIMIT_FSIZE)[0]
+    if not 0 < file_limit <= 512 * 1024**2 or filename.stat().st_size >= file_limit:
+        raise RuntimeError("capture reached its finite file limit and may be truncated")
     control.Shutdown()
     control = None
     capture = rd.OpenCaptureFile()

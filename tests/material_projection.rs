@@ -4,7 +4,7 @@
 use destructible_fps::{environment::EnvironmentLibrary, render::create_environment};
 use glam::{Mat4, Vec3, Vec4};
 
-const OUTPUT_BYTES: u64 = 42 * 16;
+const OUTPUT_BYTES: u64 = 43 * 16;
 const HARNESS: &str = r"
 @group(0) @binding(7) var<storage, read_write> results: array<vec4<f32>>;
 
@@ -45,7 +45,8 @@ fn validate_material_projection() {
     results[40] = vec4<f32>(environment_lighting(vec3<f32>(0.0, 1.0, 0.0),
         vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.5), 1.0, 1.0, 1.0), 0.0);
     results[41] = vec4<f32>(textureSampleLevel(environment_specular, environment_sampler,
-        vec3<f32>(1.0, 0.0, 0.0), 6.0).rgb, 0.0);
+        vec3<f32>(1.0, 0.0, 0.0), f32(textureNumLevels(environment_specular) - 1u)).rgb, 0.0);
+    results[42] = vec4<f32>(fog_radiance(vec3<f32>(1.0, 0.0, 0.0)), 0.0);
 }
 ";
 
@@ -285,6 +286,7 @@ fn validate_environment(values: &[[f32; 4]]) {
         );
     }
     assert_vector(values[39], Vec4::ZERO);
+    assert_vector(values[42], Vec4::from_array(values[41]));
     let final_mip = &library.specular()[library.specular().len() - 48..];
     assert_vector(
         values[41],

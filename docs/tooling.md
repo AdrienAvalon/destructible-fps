@@ -68,10 +68,18 @@ listener survives the capture. No remote replay server or global injection is st
 
 Each subprocess phase has a 60-second deadline. Cleanup kills the owned group; the PID namespace
 also reaps children that create another group. A regression test exercises a detached descendant
-and timeout. The smoke limits each output file to 256 MiB, captures one GPU frame, and refuses a
-new run if retained evidence exceeds 2 GiB or 2,000 entries. Existing evidence is never automatically
+and timeout. The smoke limits each output file to 256 MiB (512 MiB for RenderDoc's expanded dynamic
+depth-array capture), captures one GPU frame, and refuses a new run if retained evidence exceeds
+2 GiB or 2,000 entries. Existing evidence is never automatically
 deleted; archive selected old runs explicitly before continuing. A scene too large for these
 budgets fails rather than silently raising them.
+
+The sixteen-view sky increment reached the former RenderDoc cap at exactly 268,435,456 bytes:
+capture creation appeared successful but GPU replay failed on the truncated artifact. The reviewed
+RenderDoc profile now uses a fixed 512 MiB hard/soft `RLIMIT_FSIZE`, while Blender/Tracy retain
+256 MiB. The replay script rejects a file at the exact active limit as potentially truncated,
+before trying replay. Offline tests verify both kernel-enforced limits and reject arbitrary larger
+or unlimited values. Network/PID isolation, deadlines and aggregate retention are unchanged.
 
 RenderDoc 1.45 as packaged here does not support `VK_KHR_wayland_surface`. Its smoke unsets
 `WAYLAND_DISPLAY` for the game and uses the local XWayland Unix socket, without changing the user's

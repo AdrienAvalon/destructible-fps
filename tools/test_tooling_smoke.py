@@ -62,6 +62,19 @@ class ToolingTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(processes.returncode, 1, "owned detached descendant survived cleanup")
 
+    def test_renderdoc_file_size_limit_is_bounded_and_applied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            code = "import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE))"
+            command = isolated_command(output, ["python", "-c", code], max_file_bytes=512 * 1024**2)
+            run_bounded(command, output, {"PATH": "/usr/bin:/bin"}, timeout=5)
+            self.assertEqual((output / "process.log").read_text().strip(), "(536870912, 536870912)")
+
+    def test_file_size_limit_cannot_be_arbitrarily_expanded(self):
+        for invalid in (-1, 0, 1, 512 * 1024**2 + 1, 1024**3):
+            with self.subTest(limit=invalid), self.assertRaises(ValueError):
+                isolated_command(Path("/tmp"), ["true"], max_file_bytes=invalid)
+
 
 if __name__ == "__main__":
     unittest.main()

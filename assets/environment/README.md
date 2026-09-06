@@ -93,7 +93,9 @@ production bindings/WGSL at asymmetric directions on every face, independent CPU
 mirror checks, all seven specular mip uploads, grazing finiteness and zero-AO output, retaining the
 prior normal/projection checks. Headless ordinary tests deliberately skip the GPU proof.
 
-No local reflection probes, sky-visibility rays, indoor transport, contact shadows or TAA exist yet.
-Vertex AO stays approximate: the interior is visibly too open to the sky. Small probe faces and finite
+The renderer now adds [dynamic directional sky visibility](../../docs/sky-visibility.md) around
+the camera. No local reflection probes, indoor bounce, fine contact shadows or TAA exist yet.
+Vertex AO stays approximate, and the coarse sky mask does not restore reflected interior light.
+Small probe faces and finite
 sample counts can blur detail or introduce variance; PDF-selected source mips/multiscattering remain
 work. This is a coherent lighting foundation, **not achievement of the photorealistic target**.

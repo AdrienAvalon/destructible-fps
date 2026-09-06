@@ -1,8 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use destructible_fps::{
-    DemoSession, FireMode, FixedMicrometers3, IVec3, MICROMETERS_PER_VOXEL, Material,
-    ReplicatedPlayerState, World, chunk_position,
+    DemoSession, FireMode, FixedMicrometers3, IVec3, MAX_SERVER_PEERS, MICROMETERS_PER_VOXEL,
+    Material, ReplicatedPlayerState, World, chunk_position,
     mesh_scheduler::{
         CompletedMeshJob, MAX_BODIES_PER_MESH_JOB, MAX_BODY_VOXELS_PER_MESH_JOB,
         MAX_CHUNKS_PER_MESH_JOB, MeshScheduler,
@@ -32,6 +32,11 @@ const FIXED_STEP_SECONDS: f32 = 1.0 / 120.0;
 const MAX_PENDING_MESH_CHUNKS: usize = 512;
 const INITIAL_MESH_BATCH_CHUNKS: usize = 16;
 const TELEMETRY_WINDOW: usize = 4_096;
+const LIGHTING_STRESS_PLAYERS: usize = if MAX_SERVER_PEERS < 32 {
+    MAX_SERVER_PEERS
+} else {
+    32
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MeshPhase {
@@ -49,6 +54,8 @@ struct RuntimeTelemetry {
     frame_interval: SampleWindow,
     cpu_frame_work: SampleWindow,
     gpu_shadow: SampleWindow,
+    gpu_sky_visibility: SampleWindow,
+    gpu_sky_refresh: SampleWindow,
     gpu_world_hud: SampleWindow,
     gpu_total: SampleWindow,
 }
@@ -59,6 +66,8 @@ impl RuntimeTelemetry {
             frame_interval: SampleWindow::new(TELEMETRY_WINDOW),
             cpu_frame_work: SampleWindow::new(TELEMETRY_WINDOW),
             gpu_shadow: SampleWindow::new(TELEMETRY_WINDOW),
+            gpu_sky_visibility: SampleWindow::new(TELEMETRY_WINDOW),
+            gpu_sky_refresh: SampleWindow::new(TELEMETRY_WINDOW),
             gpu_world_hud: SampleWindow::new(TELEMETRY_WINDOW),
             gpu_total: SampleWindow::new(TELEMETRY_WINDOW),
         }
@@ -67,6 +76,10 @@ impl RuntimeTelemetry {
     fn record_gpu(&mut self, renderer: &mut Renderer) {
         while let Some(sample) = renderer.take_gpu_frame_time() {
             self.gpu_shadow.record_ms(sample.shadow_ms);
+            self.gpu_sky_visibility.record_ms(sample.sky_visibility_ms);
+            if sample.sky_refreshed {
+                self.gpu_sky_refresh.record_ms(sample.sky_visibility_ms);
+            }
             self.gpu_world_hud.record_ms(sample.world_hud_ms);
             self.gpu_total.record_ms(sample.total_ms);
         }
@@ -80,6 +93,8 @@ impl RuntimeTelemetry {
         print_distribution("travail CPU frame", self.cpu_frame_work.summary());
         if renderer.gpu_timing_supported() {
             print_distribution("GPU ombres", self.gpu_shadow.summary());
+            print_distribution("GPU visibilite ciel", self.gpu_sky_visibility.summary());
+            print_distribution("GPU ciel recalcul seul", self.gpu_sky_refresh.summary());
             print_distribution("GPU monde + HUD", self.gpu_world_hud.summary());
             print_distribution("GPU frame totale", self.gpu_total.summary());
             println!(
@@ -180,7 +195,12 @@ impl Game {
         }
         let before = Instant::now();
         let mut renderer = pollster::block_on(Renderer::new(Arc::clone(&window)))?;
-        if showcase {
+        if showcase_view == Some(ShowcaseView::LightingStress) {
+            renderer.update_player_transforms(&lighting_stress_players(0.0), None)?;
+            println!(
+                "STRESS eclairage: {LIGHTING_STRESS_PLAYERS} casters synthetiques mobiles, pas un test reseau/physique de joueurs"
+            );
+        } else if showcase {
             renderer.update_player_transforms(&showcase_players(), None)?;
         }
         let now = Instant::now();
@@ -520,6 +540,14 @@ impl Game {
         self.previous_frame = now;
         self.advance_simulation(frame_interval);
         let elapsed_seconds = now.duration_since(self.started).as_secs_f32();
+        if self.showcase_view == Some(ShowcaseView::LightingStress)
+            && let Err(error) = self
+                .renderer
+                .update_player_transforms(&lighting_stress_players(elapsed_seconds), None)
+        {
+            event_loop.exit();
+            return Some(error);
+        }
         if self.lab == Some(LabPhase::Ready)
             && exit_after.is_some()
             && elapsed_seconds >= 1.0
@@ -530,7 +558,9 @@ impl Game {
             self.fire_at(Vec3::new(1.5, 4.5, 12.0), -Vec3::Z, FireMode::TestCharge);
         }
         let (camera_position, view_direction) = match self.showcase_view {
-            Some(ShowcaseView::Orbit) => showcase_camera(elapsed_seconds),
+            Some(ShowcaseView::Orbit | ShowcaseView::LightingStress) => {
+                showcase_camera(elapsed_seconds)
+            }
             Some(ShowcaseView::BreachCloseup) => breach_closeup_camera(elapsed_seconds),
             None => (self.player.camera_position(), self.player.view_direction()),
         };
@@ -619,6 +649,10 @@ impl Game {
             render.world_draw_calls,
             render.shadow_draw_calls
         );
+        println!(
+            "Visibilite ciel: {} recalculs, {} cache hits, {} draws derniere frame",
+            render.sky_rebuilds, render.sky_cache_hits, render.sky_draw_calls
+        );
         let sleeping_bodies = self
             .session
             .body_states()
@@ -662,7 +696,18 @@ impl Game {
                 render.bodies,
                 self.session.bodies().len()
             ))
-        } else if self.showcase_view.is_some() && render.players != showcase_players().len() {
+        } else if render.sky_rebuilds == 0 {
+            Some("aucune carte de visibilite du ciel valide pendant le smoke".to_owned())
+        } else if self.showcase_view == Some(ShowcaseView::LightingStress)
+            && (render.players != LIGHTING_STRESS_PLAYERS || render.sky_cache_hits != 0)
+        {
+            Some(
+                "stress eclairage incomplet: casters mobiles absents ou cache reutilise".to_owned(),
+            )
+        } else if self.showcase_view.is_some()
+            && self.showcase_view != Some(ShowcaseView::LightingStress)
+            && render.players != showcase_players().len()
+        {
             Some(format!(
                 "rendu joueur incomplet: {} avatars GPU pour {} attendus",
                 render.players,
@@ -836,6 +881,7 @@ struct LaunchOptions {
 enum ShowcaseView {
     Orbit,
     BreachCloseup,
+    LightingStress,
 }
 
 fn launch_options() -> Result<LaunchOptions, Box<dyn Error>> {
@@ -850,6 +896,7 @@ fn launch_options() -> Result<LaunchOptions, Box<dyn Error>> {
             "--structural-lab" => options.structural_lab = true,
             "--showcase" => options.showcase_view = Some(ShowcaseView::Orbit),
             "--showcase-closeup" => options.showcase_view = Some(ShowcaseView::BreachCloseup),
+            "--lighting-stress" => options.showcase_view = Some(ShowcaseView::LightingStress),
             "--smoke-seconds" => {
                 let seconds: f64 = arguments
                     .next()
@@ -890,6 +937,21 @@ fn showcase_players() -> [ReplicatedPlayerState; 2] {
     ]
 }
 
+fn lighting_stress_players(elapsed_seconds: f32) -> Vec<ReplicatedPlayerState> {
+    // Explicit rendering fixture: does not submit player commands or mutate replicated state.
+    (0..LIGHTING_STRESS_PLAYERS)
+        .map(|index| {
+            let mut player = showcase_player(201 + index as u64, 0, 1, 0);
+            let phase = elapsed_seconds.mul_add(1.3, index as f32 * 0.37);
+            let x = ((index % 8) as f32 - 3.5).mul_add(3.0, phase.sin() * 2.0);
+            let z = ((index / 8) as f32).mul_add(5.0, phase.cos().mul_add(2.0, 8.0));
+            player.position_um.x = (x * MICROMETERS_PER_VOXEL as f32) as i64;
+            player.position_um.z = (z * MICROMETERS_PER_VOXEL as f32) as i64;
+            player
+        })
+        .collect()
+}
+
 fn showcase_player(session_id: u64, x: i64, y: i64, z: i64) -> ReplicatedPlayerState {
     ReplicatedPlayerState {
         session_id,
@@ -926,6 +988,32 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lighting_stress_has_bounded_unique_and_actually_moving_render_instances() {
+        let first = lighting_stress_players(0.0);
+        let next = lighting_stress_players(0.01);
+        assert_eq!(first.len(), LIGHTING_STRESS_PLAYERS);
+        assert!(first.len() <= MAX_SERVER_PEERS && first.len() <= 32);
+        assert_eq!(
+            first
+                .iter()
+                .map(|p| p.session_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            first.len()
+        );
+        assert!(
+            first
+                .iter()
+                .zip(&next)
+                .any(|(a, b)| a.position_um != b.position_um)
+        );
+        for player in first.iter().chain(&next) {
+            assert!(player.position_um.x.abs() < 16 * MICROMETERS_PER_VOXEL);
+            assert!(player.position_um.z.abs() < 32 * MICROMETERS_PER_VOXEL);
+        }
+    }
 
     #[test]
     fn world_position_maps_to_negative_chunk_with_euclidean_division() {

@@ -16,6 +16,15 @@ var shadow_map: texture_depth_2d;
 @group(1) @binding(1)
 var shadow_sampler: sampler_comparison;
 
+@group(1) @binding(2) var sky_visibility_depth: texture_depth_2d_array;
+struct SkyVisibilityParameters {
+    matrices: array<mat4x4<f32>, 16>,
+    directions: array<vec4<f32>, 16>,
+    focus: vec4<f32>,
+    settings: vec4<f32>,
+};
+@group(1) @binding(3) var<uniform> sky_visibility_parameters: SkyVisibilityParameters;
+
 @group(2) @binding(0)
 var material_color: texture_2d_array<f32>;
 @group(2) @binding(1)
@@ -393,8 +402,46 @@ fn atmosphere(direction: vec3<f32>) -> vec3<f32> {
     return textureSampleLevel(environment_sky, environment_sampler, direction, 0.0).rgb;
 }
 
-fn environment_lighting(normal: vec3<f32>, view: vec3<f32>, albedo: vec3<f32>,
-    roughness: f32, metallic: f32, ao: f32) -> vec3<f32> {
+fn fog_radiance(direction: vec3<f32>) -> vec3<f32> {
+    return textureSampleLevel(environment_specular, environment_sampler,
+        direction, f32(textureNumLevels(environment_specular) - 1u)).rgb;
+}
+
+fn environment_visibility(position: vec3<f32>, geometric_normal: vec3<f32>,
+    normal: vec3<f32>, view: vec3<f32>, roughness: f32) -> vec2<f32> {
+    let distance = length(position - sky_visibility_parameters.focus.xyz);
+    let coverage = 1.0 - smoothstep(sky_visibility_parameters.focus.w,
+        sky_visibility_parameters.settings.x, distance);
+    if coverage <= 0.0 { return vec2<f32>(1.0); }
+    let receiver = position + geometric_normal * sky_visibility_parameters.settings.y;
+    let reflection = reflect(-view, normal);
+    // Smooth lobe weighting, not a discontinuous nearest-octant selection. Sixteen directions
+    // remain a coarse visibility approximation, especially for mirror-like materials.
+    let specular_power = mix(32.0, 1.0, clamp(roughness, 0.0, 1.0));
+    var visible = vec2<f32>(0.0);
+    var total = vec2<f32>(0.0);
+    for (var index = 0u; index < 16u; index = index + 1u) {
+        let direction = sky_visibility_parameters.directions[index].xyz;
+        let weight = vec2<f32>(max(dot(normal, direction), 0.0),
+            pow(max(dot(reflection, direction), 0.0), specular_power));
+        let clip = sky_visibility_parameters.matrices[index] * vec4<f32>(receiver, 1.0);
+        let projected = clip.xyz / clip.w;
+        let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+        var visibility = 1.0;
+        if projected.z > 0.0 && projected.z < 1.0 && all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)) {
+            // Linear comparison sampler provides a local 2x2 PCF footprint.
+            visibility = textureSampleCompareLevel(sky_visibility_depth, shadow_sampler, uv, i32(index),
+                projected.z - sky_visibility_parameters.settings.z);
+        }
+        visible = visible + weight * visibility;
+        total = total + weight;
+    }
+    return mix(vec2<f32>(1.0), clamp(visible / max(total, vec2<f32>(1e-12)),
+        vec2<f32>(0.0), vec2<f32>(1.0)), coverage);
+}
+
+fn visible_environment_lighting(normal: vec3<f32>, view: vec3<f32>, albedo: vec3<f32>,
+    roughness: f32, metallic: f32, ao: f32, visibility: vec2<f32>) -> vec3<f32> {
     let r = clamp(roughness, 0.0, 1.0);
     let ndotv = clamp(dot(normal, view), 0.0, 1.0);
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
@@ -406,9 +453,15 @@ fn environment_lighting(normal: vec3<f32>, view: vec3<f32>, albedo: vec3<f32>,
     let reflection = reflect(-view, normal);
     let last_mip = f32(textureNumLevels(environment_specular) - 1u);
     let specular = textureSampleLevel(environment_specular, environment_sampler, reflection, r * last_mip).rgb;
-    // Diffuse map stores E/pi already. Local visibility is still the approximate vertex AO;
-    // this distant probe does not contain the building, moving debris or local reflections.
-    return (diffuse_weight * albedo * diffuse + integrated_fresnel * specular) * ao;
+    // Diffuse map stores E/pi already. Visibility is dynamic, but the distant probe still
+    // does not contain local color bleeding, interior lights or reflected building geometry.
+    return (diffuse_weight * albedo * diffuse * visibility.x
+        + integrated_fresnel * specular * visibility.y) * ao;
+}
+
+fn environment_lighting(normal: vec3<f32>, view: vec3<f32>, albedo: vec3<f32>,
+    roughness: f32, metallic: f32, ao: f32) -> vec3<f32> {
+    return visible_environment_lighting(normal, view, albedo, roughness, metallic, ao, vec2<f32>(1.0));
 }
 
 fn display_transform(linear_color: vec3<f32>) -> vec3<f32> {
@@ -477,15 +530,20 @@ fn world_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
     let direct = (diffuse_weight * albedo / 3.14159265 + specular)
         * sun_radiance * normal_dot_light * shadow * direct_occlusion;
 
-    var color = direct + environment_lighting(normal, view_direction, albedo,
-        roughness, metallic, ambient_occlusion);
+    let visibility = environment_visibility(input.world_position, normalize(input.normal),
+        normal, view_direction, roughness);
+    var color = direct + visible_environment_lighting(normal, view_direction, albedo,
+        roughness, metallic, ambient_occlusion, visibility);
 
     let camera_to_surface = input.world_position - globals.camera_time.xyz;
     let distance_from_camera = length(camera_to_surface);
     let altitude_relief = clamp((input.world_position.y + 4.0) / 42.0, 0.0, 1.0);
     let fog_density = globals.sun_fog.w * mix(1.18, 0.48, altitude_relief);
     let fog = 1.0 - exp(-distance_from_camera * fog_density);
-    color = mix(color, atmosphere(normalize(camera_to_surface)), clamp(fog, 0.0, 0.92));
+    // Haze scatters low-frequency incident light. Sampling the sharp sky panorama here
+    // would paint recognizable clouds onto occluded walls rather than model scattering.
+    let fog_light = fog_radiance(normalize(camera_to_surface));
+    color = mix(color, fog_light, clamp(fog, 0.0, 0.92));
 
     return vec4<f32>(display_transform(color), 1.0);
 }

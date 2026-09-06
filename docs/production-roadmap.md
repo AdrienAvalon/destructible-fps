@@ -65,7 +65,10 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
   normal-aware mips and explicit-gradient body-local triplanar projection, procedural steel/glass
   and cut layers, and a view-correct HDR sky with offline diffuse/GGX image-based lighting,
   split-sum BRDF and fixed shared exposure (delivered); GPU block compression, material blending,
-  local reflections/sky visibility, and a full HDR postprocessing pipeline remain;
+  local reflections/bounced transport, and a full HDR postprocessing pipeline remain;
+- dynamic distant-sky visibility from sixteen bounded directional depth maps, actual rendered
+  static/moving casters, cache invalidation, continuous coverage fade and refresh-only timings
+  (delivered near the camera); higher-quality visibility, real bounce and large-world coverage remain;
 - 3×3 PCF sun-shadow filtering (delivered); cascaded sun shadows, local lights, temporal
   anti-aliasing, and measured dynamic resolution remain;
 - hybrid chunk meshing with fixed-cache Surface Nets for soil/stone, exact authored architecture,

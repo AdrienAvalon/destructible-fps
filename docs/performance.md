@@ -3,6 +3,108 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-06 — dynamic distant-sky visibility
+
+Source: parent `2e549ae` plus the directional-visibility increment. Sixteen world-space depth views
+mask distant HDR illumination using actual rendered chunks, rigid bodies and player instances.
+Camera coverage moves continuously while depth is cached in 16 m cells; accepted geometry and pose
+edits rebuild all sixteen views in one frame. The cache does not change simulation or wire state.
+See [`sky-visibility.md`](sky-visibility.md) for equations, bounds, tests and the distinction from
+global illumination. This is not photorealistic fidelity or a lighting-performance promotion.
+
+Same verified i7-13700H / RTX 4050 Laptop, NVIDIA 610.57.04, CachyOS kernel 7.2.2-1-cachyos,
+Rust 1.97.1 release, actual 1,440×900 desktop Vulkan presentation. No driver changes, clock locks,
+cache purges or simultaneous GPU capture/index build/benchmark. First/repeat means consecutive runs,
+not cold/warm hardware validation. CPU frame wall includes presentation waits, not only active work.
+The stable breach contains 98,078 voxels, 128 chunks, 48,684 faces and one sleeping body.
+
+Two twelve-second `--showcase-closeup` runs, two displayed player instances, 70 chunks/one body/two
+players visible, 72 world draws and 130 sun-shadow draws:
+
+| Timing in ms | First p50 / p95 / p99 | Repeat p50 / p95 / p99 |
+| --- | --- | --- |
+| CPU frame wall | 2.628 / 16.721 / 16.860 | 2.067 / 10.135 / 14.116 |
+| GPU sun shadows | 0.074 / 0.153 / 0.155 | 0.070 / 0.072 / 0.076 |
+| GPU sky, refreshes only | 0.683 / 0.948 / 0.949 | 0.685 / 0.693 / 0.738 |
+| GPU world/HUD | 1.406 / 3.135 / 3.147 | 0.988 / 1.005 / 1.129 |
+| GPU total | 1.494 / 3.312 / 3.324 | 1.071 / 1.091 / 1.897 |
+
+These samples precede the post-review extraction of the **identical** comparison-sampler descriptor
+into a helper shared by production/tests; shader/runtime lighting behavior is unchanged by that
+refactor. CPU sample counts 1,947/3,563, GPU 1,945/3,561; sky refresh counts 83/84 versus
+1,864/3,479 cache hits, zero dropped GPU samples. GPU maxima 5.603/2.048 ms, CPU maxima
+29.974/17.168 ms; initial mesh streaming 54.0/55.1 ms. The first/repeat variation is retained with
+no identified cause or causal speedup claim. Cached sky distributions alone would hide refresh cost.
+
+Two thirty-second `--lighting-stress` runs keep sixteen synthetic player instances moving and orbit
+the camera without consuming/destroying the scene. This is **rendering-only**, not a multiplayer,
+collision or 32-player authority test. All 6,678/6,714 rendered frames rebuild depth, no cache hits;
+last frame has 92 chunks/one body/16 instances visible, 94 world draws, 130 sun-shadow draws and
+1,720 sky-depth draws. Reported percentiles cover the **last 4,096 samples**, not the entire run:
+
+| Timing in ms | First p50 / p95 / p99 | Repeat p50 / p95 / p99 |
+| --- | --- | --- |
+| CPU frame wall | 3.100 / 8.004 / 10.119 | 3.056 / 8.076 / 8.449 |
+| GPU sun shadows | 0.070 / 0.071 / 0.071 | 0.071 / 0.072 / 0.072 |
+| GPU sky, every frame refreshed | 0.685 / 0.695 / 0.696 | 0.681 / 0.695 / 0.696 |
+| GPU world/HUD | 0.934 / 1.168 / 1.172 | 0.904 / 1.222 / 1.229 |
+| GPU total | 1.707 / 1.935 / 1.940 | 1.674 / 1.986 / 1.994 |
+
+No GPU samples were dropped. Within those retained windows, total GPU maxima are 1.948/2.023 ms,
+sky refresh maxima 0.705/0.698 ms, CPU maxima 10.502/10.418 ms. Fixed map allocation is
+67,108,864 texel bytes (64 MiB), excluding driver overhead; refresh time remains proportional to
+caster geometry. The decoded sky/material arrays remain 3,452,912/55,924,040 bytes. A separate
+eight-second closeup exited cleanly with whole-process peak child RSS 264,436 KiB (258.24 MiB),
+measured in a fresh launcher via `getrusage(RUSAGE_CHILDREN)`. This is neither isolated VRAM nor
+incremental renderer memory. Allocations, cold caches, full combat, network bandwidth/corrections,
+cross-OS GPU behavior and 1080p quality tiers remain missing coverage for this graphics lot.
+
+The structural-lab smoke applied its partial charge at 1.001 s, committed one automatic cut,
+drained three assessments and put both bodies to sleep with zero stale/failed jobs or overflows.
+Sixty-seven depth rebuilds were followed by 2,632 cache hits as the geometry settled. This is a real
+simulation/renderer path but a small scene, not the graphics stress benchmark above.
+
+Quiet mandatory CPU fixtures were rerun serially after the sampler extraction and review additions:
+
+| Fixture | p50 / p95 / p99 ms | Additional evidence |
+| --- | --- | --- |
+| Destruction, 500 events | 0.014 / 0.245 / 0.400 | 29,631 changes; 908 frames; 0.567 MiB; replicas agree |
+| Detached slab, 100 iterations, combined | 4.201 / 4.372 / 4.614 | 8,192 voxels; max 5.346 ms |
+| Physics, 1,024 bodies / 300 ticks | 0.536 / 1.193 / 1.214 | max 1.248 ms; all bodies asleep |
+| Snapshot, 20 iterations, total | 11.888 / 12.061 / 13.770 | 1,181 frames / 1.351 MiB |
+
+360 ordinary tests passed in each debug/release all-target profile after the final test additions;
+formatting and strict all-target Clippy passed. The named network, QUIC transport/authority/process
+and OIDC suites were separately rerun. All four ignored shader/visibility tests were explicitly run
+successfully on real Vulkan in both
+debug and release; the new player test uses independent geometry rays for both poses, including
+the small grazing occlusion that can remain after moving a finite slab sideways. No arbitrary
+full-dark/full-light expectation substitutes for that geometry. All 21 offline tooling tests pass,
+including enforced file limits, network/PID isolation and detached-descendant cleanup.
+
+The final ordinary five-second Vulkan smoke streamed 128 chunks / 48,736 faces in 52.6 ms and
+exited cleanly; 327 frames, nine sky refreshes, zero dropped GPU samples. Its GPU total p99 was
+4.316 ms, maximum 4.363 ms; CPU frame wall p99 33.377 ms, maximum 33.565 ms. This different initial
+scene/view is a functional gate, not a replacement for the representative tables or proof of
+frame-pacing compliance. Presentation waits remain visible rather than removed from the report.
+
+Before/after captures of only the owned XWayland game window were inspected. Occluded interiors
+are darker and sharp cloud details no longer paint dark walls through haze. Angular bands, blocky
+architecture and missing bounced light remain evident. The final capture is actual game output,
+not the generated art-direction reference. A first RenderDoc file hit exactly the former 256 MiB
+hard limit and failed replay; it is retained as failed evidence. With the explicit bounded 512 MiB
+RenderDoc profile, the real Vulkan capture/replay succeeded: 272,867,130 bytes, 204 draws and twelve
+textures. Its thumbnail was inspected; frame 120 reuses cached sky depth and is not a full-refresh
+performance measurement. No instrumented timings are mixed into the tables. Raw logs/captures
+remain in `/tmp/fps-sky-visibility-soAEnF/` and ignored `target/tooling/`, outside Git/shipping assets.
+
+Claude's single bounded final code review found no demonstrated blocking defect and prompted the
+additional player-path GPU test and shared production comparison sampler. Codex confirmed the
+Renderer invalidation hooks and absence of an individual body-removal path in the source. The
+hardware fixtures manually invalidate their installed state; Renderer-level pixel assertions are
+still missing, beyond the live stress/lab smokes. Claude did not receive the full documentation or
+the later RenderDoc limit adjustment; follow-up changes were reviewed and validated locally.
+
 ## 2026-09-06 — offline HDR environment lighting
 
 Source: parent `08aca03` plus the HDR environment increment. Rendering and asset tools only;

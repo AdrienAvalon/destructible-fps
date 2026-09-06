@@ -13,6 +13,7 @@ use std::{cell::Cell, collections::HashMap, fmt};
 
 pub mod fixture;
 mod hybrid;
+mod normals;
 pub use hybrid::{hybrid_dirty_chunks, mesh_hybrid_chunks};
 
 pub const MAX_FINE_MESH_CHUNKS: usize = 16;
@@ -239,6 +240,11 @@ impl<G: StaticGeometry> Builder<'_, G> {
             return Err(FineMeshError::OutputBudget);
         }
         self.report.quads += surface.quads.len();
+        let terrace = if cell.volume().is_some() {
+            normals::fit(&volume, &surface.quads, self.work)?
+        } else {
+            None
+        };
         for quad in surface.quads {
             self.charge(1)?;
             let a = quad.face().axis();
@@ -257,8 +263,7 @@ impl<G: StaticGeometry> Builder<'_, G> {
                 corners.reverse();
             }
             let center = std::array::from_fn(|i| (lo[i] as f32 + hi[i] as f32) / 512.0);
-            let mut normal = [0.0; 3];
-            normal[a] = if quad.face().positive() { 1.0 } else { -1.0 };
+            let normal = normals::shading_normal(quad, terrace, &volume, self.work)?;
             let first = self.vertex(mesh, center, normal, quad.voxel())?;
             let boundary =
                 u32::try_from(mesh.vertices.len()).map_err(|_| FineMeshError::OutputBudget)?;

@@ -1,5 +1,8 @@
 //! Authored masonry silhouette and grounded rubble, not explosion-generated rigid bodies.
-use super::*;
+use super::{
+    Error, GeometryCell, GeometryChange, GeometryState, IVec3, LocalBox, Material, RefinedVolume,
+    RefinedWorld, VolumeLimits, Voxel,
+};
 
 /// Half-open aperture in the four-by-three-metre wall patch, in 1/256 m units.
 /// The intact strips at both sides and the upper band remain connected to the surrounding wall.

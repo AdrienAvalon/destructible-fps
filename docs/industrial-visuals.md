@@ -168,12 +168,19 @@ a replacement server authority. No blocking runtime defect was identified by the
 Parent `cf4fc58`, final native inspection binary SHA-256
 `99c565b8d9ed5eb9177a3f8c9c11ace76b1bc44193c2f807491816475b1981c8`.
 Logs are in `/tmp/fps-industrial-ruins-x1Lz83/`; `validate.sh` completed with exit 0.
-Formatting, strict Clippy, 517 ordinary tests in **each** of debug/release, the targeted network,
+Formatting, 517 ordinary tests in **each** of debug/release, the targeted network,
 secure transport/authority/server-process and OIDC tests, two compile-fail doctests and all six
 explicit real-GPU checks in both profiles passed. The prescribed destruction/structural/physics/
 snapshot benchmarks and the range/exact/industrial native smokes passed. Graphify update/doctor
 passed. The first failed test expected 20 refined pages even after entire pages became AIR; the
 corrected test explicitly requires 17 in the final state and verifies unchanged rubble identity.
+
+Correction discovered during the following normal-reconstruction increment: the earlier claim of
+strict Clippy success was incorrect. The separate shell command continued into successful tests
+after Clippy rejected a wildcard import; a later pass also exposed a redundant `into_iter()`.
+The prior test results above are valid, but do not imply lint success. Both warnings are corrected
+in the subsequent increment, whose single validation script includes Clippy under
+`set -euo pipefail` and refuses to continue after any failed check.
 
 Same observed Linux/Rust/NVIDIA/RTX 4050 Laptop/i7-13700H hardware as the preceding receipt,
 1440×900, 4× MSAA, exposure 0.75. Final measurements were taken after compilation, without RenderDoc,
@@ -200,3 +207,98 @@ or moving-camera photorealistic acceptance. Instrumented capture timings remain 
 The previous intermediate `renderdoc-tgq_t1ay` run was moved from the active directory to the
 existing ignored `target/tooling-archive-lHJXgO/` before this capture. It remains fully recoverable;
 nothing was deleted, and no retention or permission limit was increased.
+
+## Shading reconstruction for fine terraces
+
+`mesh/fine/normals.rs` recognizes nearly planar, homogeneous brick/concrete/stone fragments from
+their **actual** volume and exposed surface rectangles. It reconstructs shading normals only.
+Positions, triangle indices, material occupancy, collision queries and shadow-caster geometry
+remain exact and unchanged. No smoothing displacement, new texture/asset, exposure change,
+shadow-bias change or GPU feature is involved.
+
+Recognition is deliberately limited: solid material must stay inside the page's X/Z boundary,
+below its top, and reach local Y=0; multiple materials/integrities and visible undersides above
+Y=0 reject the candidate. This local shape check is not a new world-support/structural test.
+Area-integrated second moments fit the top rectangles by least squares, including their width²/12
+and depth²/12 terms so coplanar subdivision does not change the mathematical fit. Ill-conditioned,
+flat or steeper-than-45-degree fits fall back. Every top corner must lie within 6/256 m vertically
+of the plane; that is a **recognition threshold**, not permission to move geometry.
+
+The normal applies to accepted tops and short internal risers, never indiscriminately across
+the whole fragment. Risers are at most 8/256 m tall, remain near the fitted plane, and require a
+positive geometric-normal dot product above 0.001. The entire adjacent base strip must be solid:
+testing only the face's Y origin would incorrectly soften short upper pieces of an external side.
+Outer footprint sides and undersides retain their original normals. Since accepted fragments do
+not touch their page sides or top, no cross-page smoothing seam is introduced by this treatment.
+Larger, curved, mixed-material and multi-page pieces retain the old treatment pending broader work.
+
+All work is charged to the existing mesh-job meter. Moment accumulation and footprint checks use
+constant scratch space, with bounded interval traversal for base-strip occupancy. A strip is one
+lattice unit wide and high; its length L admits at most 3L visited slabs/bands/runs. The query cap
+uses that geometric bound, not the page's maximum leaf count. Exhaustion is an
+error propagated through the whole mesh candidate, not permission to publish a partially smoothed
+scene. The industrial final dirty-region work increases from 3,715,941 to 3,769,734 units; geometry
+counts remain 10,150 quads and 48,683 vertices. No budget was increased.
+
+Tests recognize all eight authored fragments and reject the layered wall pages; exercise signed
+slopes, unit/outward normals, split upper outer sides, flat/mixed/overhanging/boundary/nonplanar
+fallback, fit/subdivision invariance and exhaustion both during fitting and a base-strip query.
+An additional dense fixture contains 2,658 leaves and 6,361 surface quads; 3,056 receive reconstructed
+normals, using 45,368 recognition/query work units. It tests the length-bounded strip cap beyond
+the eight default fragments; it is not a universal CPU-latency guarantee for every valid page.
+Ordered position/index regression checksums were measured from `c62c96a` **before** adding this
+code and still match in all four industrial states. Those FNV checksums are fixture regression
+oracles, not a security or authentication mechanism. Full-versus-incremental scene identity passes.
+
+The actual same-camera capture shows the corrugated highlight pattern removed from the foreground
+concrete fragment while its silhouette remains unchanged. It does not prove stair silhouettes or
+self-shadowing are invisible from every distance and light angle; lower player views, motion and
+raking-light inspection remain part of the broader visual gate. The overall map still lacks the
+reference's composition, architectural detail, natural terrain, vegetation and lighting richness.
+
+### Terrace-normal validation receipt, 2026-09-06
+
+Parent `c62c96a`, final standalone native inspection SHA-256
+`23d90aa7e841437f300c1bfccc260ce8d9d600d6256f42b83b4392e3b24369e5`.
+Evidence: `/tmp/fps-rubble-normals-2oXgN1/`. After tightening the base-strip bound and adding its
+dense test, the entire `validate.sh` was rerun on the final code with `set -euo pipefail`, including
+Clippy in the same fail-fast sequence. Final result: exit 0; formatting, strict all-target Clippy,
+523 ordinary tests in each of debug/release, targeted network/secure transport/authority/process/
+OIDC checks, two compile-fail doctests and all six explicit real-GPU checks in both profiles passed.
+The prescribed destruction/structural/physics/snapshot benchmarks, 20 repeated fine extractions per
+industrial stage and the range/exact/industrial native smokes also passed. Graphify update/doctor
+passed. The earlier incorrect lint claim is corrected in the preceding receipt, not hidden by these
+new results.
+
+Final release Vulkan measurements after compilation, without RenderDoc, with engine timestamp
+telemetry: Linux 7.2.2-1-cachyos, Rust 1.97.1, i7-13700H, RTX 4050 Laptop 6,141 MiB, NVIDIA 610.57.04,
+1440×900, 4× MSAA, exposure 0.75. Clocks and compositor pacing are not fixed: especially the lower
+CPU-with-present tail must not be attributed to this normal treatment as an established speedup.
+
+| Final native inspection | CPU with present p50 / p95 / p99 (ms) | GPU p50 / p95 / p99 (ms) | Peak RSS (KiB) |
+| --- | --- | --- | --- |
+| Industrial, 12 s | 2.705 / 2.855 / 3.257 | 2.093 / 2.120 / 2.631 | 267,924 |
+| Exact fixture, 8 s | 1.345 / 1.516 / 1.635 | 0.746 / 0.760 / 0.767 | 263,148 |
+
+Industrial GPU samples: 4,456, zero dropped queries; stage frames 42/42/42/4,174. Bootstrap took
+342.919 ms; replacements 18.509/18.582/18.391 ms. Source fingerprints, quad/vertex counts and ordered
+geometry signatures remain unchanged. These short inspection runs are not multiplayer combat,
+cross-platform acceptance or a controlled before/after timing experiment.
+
+Before: `target/tooling/renderdoc-0by5c3zd/breach-thumbnail.png`.
+Final after: `target/tooling/renderdoc-cg9_31h0/breach-thumbnail.png`, successfully captured/replayed
+with RenderDoc 1.45/Vulkan, 304,891,228 bytes, 219 draws, 14 textures. Both were inspected at the same
+camera/frame 400, material packs, exposure and shadow settings. The after-capture executable hash
+matches the final standalone binary above. The screenshot is native output, not a generated target.
+
+Claude supplied an analysis and a targeted runtime review, with tests summarized rather than a
+complete test-diff review. Codex independently inspected the vertex appender (it does not deduplicate
+vertices by normals), ran the actual tests, inspected the captures and corrected the validation
+receipt. The review's dense-work concern led to the explicit 3L strip bound and dense regression.
+All shape/budget findings were checked in the code; no final photorealistic or all-angle shadow
+acceptance is claimed.
+
+Two completed older/intermediate runs, `renderdoc-i9ribs33` and `renderdoc-xvdidype`, were moved into
+the existing ignored `target/tooling-archive-lHJXgO/`, with their complete artifacts preserved.
+No deletion, retention-limit increase or permission expansion occurred. Active evidence is about
+1.8 GiB and the recoverable local archive about 2.9 GiB; neither is an off-machine backup.

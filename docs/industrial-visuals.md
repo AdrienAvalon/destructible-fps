@@ -31,6 +31,9 @@ open joints and chipped edges while preserving the existing rubble and its soil 
 The [open ruined-bay increment](industrial-bay.md) removes the upper left infill and its entire
 steel frame, exposes the interior and adds grounded shards with exact regional connectivity checks.
 
+[Explicit cut finishes](fine-surface-finishes.md) separate rubble-top appearance from physical
+integrity, removing exterior brick tiling from those authored cut surfaces without geometry changes.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after

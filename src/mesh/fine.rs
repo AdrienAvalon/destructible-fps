@@ -11,10 +11,11 @@ use crate::{
 };
 use std::{cell::Cell, collections::HashMap, fmt};
 
+pub mod finishes;
 pub mod fixture;
 mod hybrid;
 mod normals;
-pub use hybrid::{hybrid_dirty_chunks, mesh_hybrid_chunks};
+pub use hybrid::{hybrid_dirty_chunks, mesh_hybrid_chunks, mesh_hybrid_chunks_with_finishes};
 
 pub const MAX_FINE_MESH_CHUNKS: usize = 16;
 pub const MAX_FINE_MESH_VERTICES: usize = 262_144;
@@ -65,6 +66,7 @@ pub enum FineMeshError {
     Allocation,
     Surface(VolumeError),
     DerivedInvariant,
+    SurfaceFinish,
 }
 impl fmt::Display for FineMeshError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -98,7 +100,7 @@ pub fn mesh_fine_chunks(
     chunks: &[IVec3],
     limits: FineMeshLimits,
 ) -> Result<FineMeshBatch, FineMeshError> {
-    mesh_chunks(world, chunks, limits, None)
+    mesh_chunks(world, chunks, limits, None, None)
 }
 
 fn mesh_chunks(
@@ -106,6 +108,7 @@ fn mesh_chunks(
     chunks: &[IVec3],
     limits: FineMeshLimits,
     refined: Option<&crate::world::geometry::RefinedWorld>,
+    finishes: Option<&finishes::SurfaceFinishes>,
 ) -> Result<FineMeshBatch, FineMeshError> {
     for (value, hard) in [
         (limits.vertices, MAX_FINE_MESH_VERTICES),
@@ -134,6 +137,9 @@ fn mesh_chunks(
         return Err(FineMeshError::CoordinatePrecision);
     }
     let work = WorkMeter::new(limits.work);
+    if let Some(finishes) = finishes {
+        finishes.validate(world, &work)?;
+    }
     let hybrid = refined
         .map(|refined| hybrid::HybridSource::new(world, refined, chunks, &work))
         .transpose()?;
@@ -143,6 +149,7 @@ fn mesh_chunks(
         limits,
         report: FineMeshReport::default(),
         lines: HashMap::new(),
+        finishes,
     };
     let mut meshes = Vec::new();
     meshes
@@ -202,6 +209,7 @@ struct Builder<'a, G> {
     limits: FineMeshLimits,
     report: FineMeshReport,
     lines: HashMap<Line, Cuts>,
+    finishes: Option<&'a finishes::SurfaceFinishes>,
 }
 impl<G: StaticGeometry> Builder<'_, G> {
     fn charge(&self, count: usize) -> Result<(), FineMeshError> {
@@ -217,6 +225,11 @@ impl<G: StaticGeometry> Builder<'_, G> {
         transition: [bool; 6],
     ) -> Result<(), FineMeshError> {
         self.charge(6)?;
+        let cut_top = self
+            .finishes
+            .map(|s| s.contains(p, self.work))
+            .transpose()?
+            .unwrap_or(false);
         let volume = page(cell);
         let neighbors = std::array::from_fn::<_, 6, _>(|i| {
             let mut v = [p.x, p.y, p.z];
@@ -264,7 +277,12 @@ impl<G: StaticGeometry> Builder<'_, G> {
             }
             let center = std::array::from_fn(|i| (lo[i] as f32 + hi[i] as f32) / 512.0);
             let normal = normals::shading_normal(quad, terrace, &volume, self.work)?;
-            let first = self.vertex(mesh, center, normal, quad.voxel())?;
+            let finish = if cut_top && normal[1] > 0.5 {
+                finishes::CUT_CORE_MARKER
+            } else {
+                -1.0
+            };
+            let first = self.vertex(mesh, center, normal, quad.voxel(), finish)?;
             let boundary =
                 u32::try_from(mesh.vertices.len()).map_err(|_| FineMeshError::OutputBudget)?;
             for edge in 0..4 {
@@ -288,31 +306,41 @@ impl<G: StaticGeometry> Builder<'_, G> {
                     if step == 0 || cuts[offset] {
                         let mut point = start;
                         point[axis] = t;
-                        self.vertex(mesh, point.map(|c| c as f32 / 256.0), normal, quad.voxel())?;
+                        self.vertex(
+                            mesh,
+                            point.map(|c| c as f32 / 256.0),
+                            normal,
+                            quad.voxel(),
+                            finish,
+                        )?;
                     }
                 }
             }
-            let last =
-                u32::try_from(mesh.vertices.len()).map_err(|_| FineMeshError::OutputBudget)?;
-            for index in boundary..last {
-                self.charge(1)?;
-                if self.report.indices + 3 > self.limits.indices {
-                    return Err(FineMeshError::OutputBudget);
-                }
-                mesh.indices
-                    .try_reserve(3)
-                    .map_err(|_| FineMeshError::Allocation)?;
-                mesh.indices.extend_from_slice(&[
-                    first,
-                    index,
-                    if index + 1 == last {
-                        boundary
-                    } else {
-                        index + 1
-                    },
-                ]);
-                self.report.indices += 3;
+            self.fan(mesh, first, boundary)?;
+        }
+        Ok(())
+    }
+
+    fn fan(&mut self, mesh: &mut CpuMesh, first: u32, boundary: u32) -> Result<(), FineMeshError> {
+        let last = u32::try_from(mesh.vertices.len()).map_err(|_| FineMeshError::OutputBudget)?;
+        for index in boundary..last {
+            self.charge(1)?;
+            if self.report.indices + 3 > self.limits.indices {
+                return Err(FineMeshError::OutputBudget);
             }
+            mesh.indices
+                .try_reserve(3)
+                .map_err(|_| FineMeshError::Allocation)?;
+            mesh.indices.extend_from_slice(&[
+                first,
+                index,
+                if index + 1 == last {
+                    boundary
+                } else {
+                    index + 1
+                },
+            ]);
+            self.report.indices += 3;
         }
         Ok(())
     }
@@ -323,6 +351,7 @@ impl<G: StaticGeometry> Builder<'_, G> {
         position: [f32; 3],
         normal: [f32; 3],
         voxel: Voxel,
+        finish: f32,
     ) -> Result<u32, FineMeshError> {
         if self.report.vertices == self.limits.vertices {
             return Err(FineMeshError::OutputBudget);
@@ -340,7 +369,7 @@ impl<G: StaticGeometry> Builder<'_, G> {
             metallic: base[4],
             material: u32::from(voxel.material as u8),
             damage: voxel_damage(voxel),
-            fracture_depth: -1.0,
+            fracture_depth: finish,
         });
         self.report.vertices += 1;
         Ok(index)

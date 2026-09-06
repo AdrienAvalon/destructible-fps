@@ -332,6 +332,31 @@ fn sample_scanned(
         max(length(position_dx), length(position_dy)));
 }
 
+// Explicit render-only authoring, independent of physical integrity and coarse wall layering.
+fn explicit_cut_core(marker: f32, material: u32) -> bool {
+    return marker == -2.0 && (material == 4u || material == 5u);
+}
+
+fn sample_cut_core(material: u32, position: vec3<f32>, normal: vec3<f32>, footprint: f32) -> SurfaceSample {
+    let frame = projection_frame(dominant_axis(normal), normal);
+    let uv = projection_uv(position, frame);
+    let coarse = weather_noise(uv * 9.0 + vec2<f32>(17.2, -6.3));
+    let grain_weight = 1.0 - smoothstep(0.002, 0.02, footprint);
+    let grain = (weather_noise(uv * 120.0) - 0.5) * grain_weight;
+    let aggregate = mix(0.25, smoothstep(0.48, 0.78, coarse), 1.0 - smoothstep(0.04, 0.25, footprint));
+    var surface: SurfaceSample;
+    surface.albedo = mix(vec3<f32>(0.19, 0.065, 0.028), vec3<f32>(0.36, 0.16, 0.075), aggregate);
+    if material == 5u {
+        surface.albedo = mix(vec3<f32>(0.20, 0.19, 0.16), vec3<f32>(0.38, 0.36, 0.31), aggregate);
+    }
+    surface.albedo = surface.albedo * (1.0 + grain * 0.22);
+    surface.roughness = 0.92 + grain * 0.08;
+    surface.metallic = 0.0;
+    // Do not inherit the exterior scan's mortar grooves or paint fictitious steel reinforcement.
+    surface.local_normal = normal;
+    return surface;
+}
+
 fn sample_material(
     input: VertexOutput,
     position_dx: vec3<f32>,
@@ -343,6 +368,9 @@ fn sample_material(
     let frame = projection_frame(dominant_axis(local_normal), local_normal);
     let uv = projection_uv(input.material_position, frame);
     let footprint = max(length(position_dx), length(position_dy));
+    if explicit_cut_core(input.fracture_depth, material) {
+        return sample_cut_core(material, input.material_position, local_normal, footprint);
+    }
     let detail_visibility = 1.0 - smoothstep(0.008, 0.085, footprint);
     var surface: SurfaceSample;
     if material >= 1u && material <= 5u {

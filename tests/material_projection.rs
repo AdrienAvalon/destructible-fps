@@ -4,7 +4,7 @@
 use destructible_fps::{environment::EnvironmentLibrary, render::create_environment};
 use glam::{Mat4, Vec3, Vec4};
 
-const OUTPUT_BYTES: u64 = (43 + 512 * 8) * 16;
+const OUTPUT_BYTES: u64 = (43 + 512 * 8 + 128 * 5) * 16;
 const WORLD_SHADER: &str = concat!(
     include_str!("../src/shaders/color.wgsl"),
     include_str!("../src/shaders/world.wgsl")
@@ -51,6 +51,24 @@ fn validate_material_projection() {
     results[41] = vec4<f32>(textureSampleLevel(environment_specular, environment_sampler,
         vec3<f32>(1.0, 0.0, 0.0), f32(textureNumLevels(environment_specular) - 1u)).rgb, 0.0);
     results[42] = vec4<f32>(fog_radiance(vec3<f32>(1.0, 0.0, 0.0)), 0.0);
+    for (var index = 0u; index < 128u; index = index + 1u) {
+        let material = 4u + index % 2u;
+        let p = vec3<f32>(f32(i32(index) - 64) * 16.0, 1.4, f32(index % 9u) * 0.3);
+        let n = normalize(vec3<f32>(0.1, 1.0, -0.2));
+        let near = sample_cut_core(material, p, n, 0.001);
+        let far = sample_cut_core(material, p, n, 1.0);
+        let left = sample_cut_core(material, p - vec3<f32>(0.0001, 0.0, 0.0), n, 0.001);
+        let right = sample_cut_core(material, p + vec3<f32>(0.0001, 0.0, 0.0), n, 0.001);
+        let offset = 4139u + index * 5u;
+        results[offset] = vec4<f32>(near.albedo, near.roughness);
+        results[offset + 1u] = vec4<f32>(far.albedo, far.roughness);
+        results[offset + 2u] = vec4<f32>(near.local_normal - n, near.metallic);
+        results[offset + 3u] = vec4<f32>(left.albedo - right.albedo, left.roughness - right.roughness);
+        let marker = array<f32, 5>(-2.0, -1.0, 0.0, 0.5, 1.0)[index % 5u];
+        results[offset + 4u] = select(vec4<f32>(0.0), vec4<f32>(1.0), vec4<bool>(
+            explicit_cut_core(marker, 4u), explicit_cut_core(marker, 5u),
+            explicit_cut_core(marker, 1u), explicit_cut_core(marker, 6u)));
+    }
     for (var index = 0u; index < 512u; index = index + 1u) {
         let materials = array<u32, 8>(1u, 1u, 4u, 5u, 2u, 3u, 6u, 7u);
         let material = materials[index % 8u];
@@ -226,6 +244,7 @@ fn production_shader_preserves_signed_projection_and_transformed_normals() {
     let values = execute_shader(&device, &queue);
     validate_environment(&values);
     validate_weathering(&values);
+    validate_cut_cores(&values);
     let normals = [
         Vec3::X,
         Vec3::NEG_X,
@@ -261,6 +280,36 @@ fn production_shader_preserves_signed_projection_and_transformed_normals() {
             .normalize()
             .extend(0.0),
     );
+}
+
+fn validate_cut_cores(values: &[[f32; 4]]) {
+    let mut range = (f32::MAX, f32::MIN);
+    for index in 0..128 {
+        let offset = 4139 + index * 5;
+        let near = values[offset];
+        let far = values[offset + 1];
+        assert!(
+            near.iter()
+                .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+        );
+        assert!((0.87..=0.97).contains(&near[3]));
+        assert_vector(values[offset + 2], Vec4::ZERO);
+        assert!(
+            values[offset + 3].iter().all(|v| v.abs() < 0.01),
+            "core seam {index}"
+        );
+        let expected = if index % 2 == 0 {
+            Vec4::new(0.2325, 0.08875, 0.03975, 0.92)
+        } else {
+            Vec4::new(0.245, 0.2325, 0.1975, 0.92)
+        };
+        assert_vector(far, expected);
+        let selected = f32::from(index % 5 == 0);
+        assert_vector(values[offset + 4], Vec4::new(selected, selected, 0.0, 0.0));
+        range.0 = range.0.min(near[0]);
+        range.1 = range.1.max(near[0]);
+    }
+    assert!(range.1 - range.0 > 0.05);
 }
 
 fn validate_weathering(values: &[[f32; 4]]) {

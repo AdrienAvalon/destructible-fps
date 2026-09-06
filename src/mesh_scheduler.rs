@@ -6,8 +6,9 @@ use crate::{
 };
 use crate::{
     mesh::fine::{
-        FineMeshBatch, FineMeshError, FineMeshLimits, MAX_FINE_MESH_CHUNKS, mesh_fine_chunks,
-        mesh_hybrid_chunks,
+        FineMeshBatch, FineMeshError, FineMeshLimits, MAX_FINE_MESH_CHUNKS,
+        finishes::SurfaceFinishes, mesh_fine_chunks, mesh_hybrid_chunks,
+        mesh_hybrid_chunks_with_finishes,
     },
     world::geometry::RefinedWorld,
 };
@@ -33,6 +34,7 @@ enum MeshJob {
         chunks: Vec<IVec3>,
         limits: FineMeshLimits,
         hybrid: bool,
+        finishes: Option<Arc<SurfaceFinishes>>,
     },
 }
 
@@ -45,6 +47,7 @@ pub enum CompletedMeshJob {
     Bodies(Vec<CpuBodyMesh>),
     Fine {
         world_fingerprint: u128,
+        finishes_fingerprint: u128,
         result: Result<FineMeshBatch, FineMeshError>,
     },
 }
@@ -112,7 +115,7 @@ impl MeshScheduler {
         chunks: Vec<IVec3>,
         limits: FineMeshLimits,
     ) -> Result<(), MeshScheduleError> {
-        self.submit_geometry(world, chunks, limits, false)
+        self.submit_geometry(world, chunks, limits, false, None)
     }
 
     /// Queues the shared fine/smoothed renderer on the same bounded worker.
@@ -124,7 +127,20 @@ impl MeshScheduler {
         chunks: Vec<IVec3>,
         limits: FineMeshLimits,
     ) -> Result<(), MeshScheduleError> {
-        self.submit_geometry(world, chunks, limits, true)
+        self.submit_geometry(world, chunks, limits, true, None)
+    }
+
+    /// Queues exact source-bound render finishes without altering physics or integrity.
+    /// # Errors
+    /// Same queue refusals as `submit_hybrid`; stale finish sources fail on the worker.
+    pub fn submit_hybrid_with_finishes(
+        &self,
+        world: Arc<RefinedWorld>,
+        chunks: Vec<IVec3>,
+        limits: FineMeshLimits,
+        finishes: Arc<SurfaceFinishes>,
+    ) -> Result<(), MeshScheduleError> {
+        self.submit_geometry(world, chunks, limits, true, Some(finishes))
     }
 
     fn submit_geometry(
@@ -133,6 +149,7 @@ impl MeshScheduler {
         chunks: Vec<IVec3>,
         limits: FineMeshLimits,
         hybrid: bool,
+        finishes: Option<Arc<SurfaceFinishes>>,
     ) -> Result<(), MeshScheduleError> {
         if chunks.is_empty() {
             return Err(MeshScheduleError::EmptyJob);
@@ -146,6 +163,7 @@ impl MeshScheduler {
             chunks,
             limits,
             hybrid,
+            finishes,
         }) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => Err(MeshScheduleError::Busy),
@@ -253,13 +271,22 @@ fn mesh_worker(receiver: &Receiver<MeshJob>, sender: &SyncSender<CompletedMeshJo
                 chunks,
                 limits,
                 hybrid,
+                finishes,
             } => CompletedMeshJob::Fine {
                 world_fingerprint: world.fingerprint(),
-                result: if hybrid {
-                    mesh_hybrid_chunks(world.as_ref(), &chunks, limits)
-                } else {
-                    mesh_fine_chunks(world.as_ref(), &chunks, limits)
-                },
+                finishes_fingerprint: finishes.as_ref().map_or(0, |s| s.fingerprint()),
+                result: finishes.map_or_else(
+                    || {
+                        if hybrid {
+                            mesh_hybrid_chunks(world.as_ref(), &chunks, limits)
+                        } else {
+                            mesh_fine_chunks(world.as_ref(), &chunks, limits)
+                        }
+                    },
+                    |finishes| {
+                        mesh_hybrid_chunks_with_finishes(world.as_ref(), &chunks, limits, &finishes)
+                    },
+                ),
             },
             MeshJob::Chunks { world, chunks } => {
                 let world_fingerprint = world.fingerprint();
@@ -318,12 +345,14 @@ mod tests {
             };
             let CompletedMeshJob::Fine {
                 world_fingerprint,
+                finishes_fingerprint,
                 result,
             } = completed
             else {
                 panic!("wrong fine result kind")
             };
             assert_eq!(world_fingerprint, fingerprint);
+            assert_eq!(finishes_fingerprint, 0);
             assert_eq!(result.is_ok(), success);
             if let Ok(batch) = result {
                 assert_eq!(batch.meshes.len(), chunks.len());

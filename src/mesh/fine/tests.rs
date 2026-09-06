@@ -33,6 +33,7 @@ fn closed_corner_contact_contributes_canonical_edge_cuts() {
     );
     let meter = WorkMeter::new(MAX_FINE_MESH_WORK);
     let mut builder = Builder {
+        finishes: None,
         world: &world,
         work: &meter,
         limits: FineMeshLimits::default(),

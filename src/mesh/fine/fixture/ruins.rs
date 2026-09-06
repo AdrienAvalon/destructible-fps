@@ -165,6 +165,18 @@ pub(super) fn bay_debris(source: &RefinedWorld) -> Result<RefinedWorld, Box<dyn 
     place(source, &bay_shards(), 16)
 }
 
+pub(super) fn surface_finishes(
+    source: &RefinedWorld,
+) -> Result<super::super::finishes::SurfaceFinishes, super::super::FineMeshError> {
+    let mut positions: Vec<_> = SHARDS
+        .iter()
+        .chain(bay_shards().iter())
+        .map(|s| s.cell)
+        .collect();
+    positions.sort_unstable();
+    super::super::finishes::SurfaceFinishes::cut_tops(source, &positions)
+}
+
 fn place(
     source: &RefinedWorld,
     shards: &[Shard],

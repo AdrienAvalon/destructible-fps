@@ -16,6 +16,15 @@ mod windows;
 
 pub const STAGE_NAMES: [&str; 4] = ["intact", "shallow chip", "through bore", "breach"];
 
+/// Explicit authored finishes for the industrial rubble, separate from physical world state.
+/// # Errors
+/// Refuses missing, unsupported or oversized source pages.
+pub fn industrial_surface_finishes(
+    world: &RefinedWorld,
+) -> Result<super::finishes::SurfaceFinishes, super::FineMeshError> {
+    ruins::surface_finishes(world)
+}
+
 /// The authored patch is the only changing source region in the industrial inspection.
 #[must_use]
 pub fn industrial_patch_positions() -> Vec<IVec3> {

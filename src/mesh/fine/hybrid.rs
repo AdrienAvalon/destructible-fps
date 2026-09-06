@@ -21,7 +21,19 @@ pub fn mesh_hybrid_chunks(
     chunks: &[IVec3],
     limits: FineMeshLimits,
 ) -> Result<FineMeshBatch, FineMeshError> {
-    mesh_chunks(world, chunks, limits, Some(world))
+    mesh_chunks(world, chunks, limits, Some(world), None)
+}
+
+/// Uses explicit immutable render finishes, validating their complete source before extraction.
+/// # Errors
+/// Same bounded atomic refusals as the default path, plus stale/invalid finish sources.
+pub fn mesh_hybrid_chunks_with_finishes(
+    world: &RefinedWorld,
+    chunks: &[IVec3],
+    limits: FineMeshLimits,
+    finishes: &super::finishes::SurfaceFinishes,
+) -> Result<FineMeshBatch, FineMeshError> {
+    mesh_chunks(world, chunks, limits, Some(world), Some(finishes))
 }
 
 /// Conservative complete invalidation for a fine edit, including collar and old masonry halo.

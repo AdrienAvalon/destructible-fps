@@ -3,6 +3,7 @@
 use destructible_fps::{
     mesh::fine::{
         FineMeshLimits, MAX_FINE_MESH_CHUNKS,
+        finishes::SurfaceFinishes,
         fixture::{
             STAGE_NAMES, industrial_inspection_world, industrial_patch_positions, inspection_world,
         },
@@ -49,6 +50,7 @@ struct Scene {
     renderer: Renderer,
     worker: MeshScheduler,
     worlds: Vec<Arc<RefinedWorld>>,
+    finishes: Option<Arc<SurfaceFinishes>>,
     stream: Stream,
     kind: WorldKind,
     desired: usize,
@@ -87,11 +89,24 @@ impl Scene {
             chunks.clone()
         };
         let fingerprints = std::array::from_fn(|i| worlds[i].fingerprint());
+        let finishes = if kind == WorldKind::Industrial {
+            Some(Arc::new(
+                destructible_fps::mesh::fine::fixture::industrial_surface_finishes(&worlds[0])
+                    .map_err(|e| e.to_string())?,
+            ))
+        } else {
+            None
+        };
+        let finishes_fingerprint = finishes.as_ref().map_or(0, |s| s.fingerprint());
+        println!(
+            "FINE_FINISHES fingerprint={finishes_fingerprint:032x} (render-only, source integrity unchanged)"
+        );
         Ok(Self {
             renderer: pollster::block_on(Renderer::new(Arc::clone(&window)))?,
             window,
             worker: MeshScheduler::new(),
             worlds,
+            finishes,
             stream: Stream::new(
                 chunks,
                 dirty,
@@ -101,6 +116,7 @@ impl Scene {
                 } else {
                     MAX_FINE_MESH_CHUNKS
                 },
+                finishes_fingerprint,
             )?,
             kind,
             desired: 0,
@@ -155,9 +171,13 @@ impl Scene {
         }
         if let Some((stage, chunks)) = self.stream.request(self.desired)? {
             let world = Arc::clone(&self.worlds[stage]);
-            let result = if self.kind == WorldKind::Industrial {
-                self.worker
-                    .submit_hybrid(world, chunks, FineMeshLimits::default())
+            let result = if let Some(finishes) = &self.finishes {
+                self.worker.submit_hybrid_with_finishes(
+                    world,
+                    chunks,
+                    FineMeshLimits::default(),
+                    Arc::clone(finishes),
+                )
             } else {
                 self.worker
                     .submit_fine(world, chunks, FineMeshLimits::default())

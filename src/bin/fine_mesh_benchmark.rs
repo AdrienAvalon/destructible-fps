@@ -3,10 +3,12 @@ use destructible_fps::{
     IVec3, SampleWindow,
     mesh::fine::{
         FineMeshBatch, FineMeshLimits, FineMeshReport,
+        finishes::SurfaceFinishes,
+        fixture::industrial_surface_finishes,
         fixture::{
             STAGE_NAMES, industrial_inspection_world, industrial_patch_positions, inspection_world,
         },
-        hybrid_dirty_chunks, mesh_fine_chunks, mesh_hybrid_chunks,
+        hybrid_dirty_chunks, mesh_fine_chunks, mesh_hybrid_chunks_with_finishes,
     },
     world::geometry::RefinedWorld,
 };
@@ -42,9 +44,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             inspection_world(stage)?
         };
-        if industrial && stage == 0 {
+        let finishes = if industrial {
+            Some(industrial_surface_finishes(&world)?)
+        } else {
+            None
+        };
+        if let Some(finishes) = finishes.as_ref().filter(|_| stage == 0) {
             let start = Instant::now();
-            let (report, max_work, batches) = hybrid_report(&world, &world.chunk_positions())?;
+            let (report, max_work, batches) =
+                hybrid_report(&world, &world.chunk_positions(), finishes)?;
             println!(
                 "FINE_BOOTSTRAP chunks={} elapsed_ms={:.3} max_job_work={max_work} {report:?}",
                 world.chunk_positions().len(),
@@ -62,8 +70,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut expected = None;
         for iteration in 0..iterations {
             let start = Instant::now();
-            let (report, max_work, batches) = if industrial {
-                hybrid_report(&world, &chunks)?
+            let (report, max_work, batches) = if let Some(finishes) = &finishes {
+                hybrid_report(&world, &chunks, finishes)?
             } else {
                 let batch = mesh_fine_chunks(&world, &chunks, FineMeshLimits::default())?;
                 (batch.report, batch.report.work, vec![batch])
@@ -97,12 +105,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn hybrid_report(
     world: &RefinedWorld,
     chunks: &[IVec3],
+    finishes: &SurfaceFinishes,
 ) -> Result<(FineMeshReport, usize, Vec<FineMeshBatch>), Box<dyn Error>> {
     let mut total = FineMeshReport::default();
     let mut max_work = 0;
     let mut batches = Vec::with_capacity(chunks.len());
     for chunk in chunks {
-        let batch = mesh_hybrid_chunks(world, &[*chunk], FineMeshLimits::default())?;
+        let batch = mesh_hybrid_chunks_with_finishes(
+            world,
+            &[*chunk],
+            FineMeshLimits::default(),
+            finishes,
+        )?;
         total.vertices += batch.report.vertices;
         total.indices += batch.report.indices;
         total.quads += batch.report.quads;

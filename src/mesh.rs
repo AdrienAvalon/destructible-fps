@@ -37,7 +37,7 @@ pub struct Vertex {
     pub material: u32,
     /// Render-only damage ratio derived from authoritative integer integrity.
     pub damage: f32,
-    /// Local coordinate through a fractured wall, or -1 for an ordinary surface.
+    /// Render-only finish: -1 ordinary, -2 explicit cut core, or 0..1 coarse wall depth.
     pub fracture_depth: f32,
 }
 

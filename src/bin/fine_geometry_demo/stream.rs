@@ -78,6 +78,7 @@ pub struct Stream {
     all: Vec<IVec3>,
     dirty: Vec<IVec3>,
     fingerprints: [u128; 4],
+    finishes_fingerprint: u128,
     replacement_job_chunks: usize,
     pub displayed: Option<usize>,
     candidate: Option<Candidate>,
@@ -94,6 +95,7 @@ impl Stream {
         dirty: Vec<IVec3>,
         fingerprints: [u128; 4],
         replacement_job_chunks: usize,
+        finishes_fingerprint: u128,
     ) -> Result<Self, String> {
         if all.is_empty()
             || all.len() > MAX_SCENE_CHUNKS
@@ -110,6 +112,7 @@ impl Stream {
             all,
             dirty,
             fingerprints,
+            finishes_fingerprint,
             replacement_job_chunks,
             displayed: None,
             candidate: None,
@@ -171,21 +174,32 @@ impl Stream {
         Ok(Some((desired, request)))
     }
 
-    pub fn complete(&mut self, desired: usize, job: CompletedMeshJob) -> Result<Delivery, String> {
-        let pending = self.pending.take().ok_or("unsolicited mesh result")?;
+    fn verify_identity(
+        &self,
+        pending: &Pending,
+        world: u128,
+        finishes: u128,
+    ) -> Result<(), String> {
         if pending.started.elapsed() > JOB_DEADLINE {
             return Err("inspection mesh worker deadline".into());
         }
+        if world != self.fingerprints[pending.stage] || finishes != self.finishes_fingerprint {
+            return Err("fine mesh fingerprint mismatch".into());
+        }
+        Ok(())
+    }
+
+    pub fn complete(&mut self, desired: usize, job: CompletedMeshJob) -> Result<Delivery, String> {
+        let pending = self.pending.take().ok_or("unsolicited mesh result")?;
         let CompletedMeshJob::Fine {
             world_fingerprint,
+            finishes_fingerprint,
             result,
         } = job
         else {
             return Err("unexpected mesh kind".into());
         };
-        if world_fingerprint != self.fingerprints[pending.stage] {
-            return Err("fine mesh fingerprint mismatch".into());
-        }
+        self.verify_identity(&pending, world_fingerprint, finishes_fingerprint)?;
         if pending.stage != desired {
             if let Err(error) = result {
                 eprintln!("FINE_STALE_FAILURE stage={} {error}", pending.stage);
@@ -290,12 +304,14 @@ mod tests {
             vec![IVec3::new(0, 0, 0), IVec3::new(1, 0, 0)],
             [1, 2, 3, 4],
             1,
+            0,
         )
         .unwrap()
     }
     fn result(stage: usize, chunks: Vec<IVec3>, vertices: usize) -> CompletedMeshJob {
         let count = chunks.len();
         CompletedMeshJob::Fine {
+            finishes_fingerprint: 0,
             world_fingerprint: (stage + 1) as u128,
             result: Ok(FineMeshBatch {
                 meshes: chunks
@@ -386,6 +402,7 @@ mod tests {
             s.complete(
                 1,
                 CompletedMeshJob::Fine {
+                    finishes_fingerprint: 0,
                     world_fingerprint: 2,
                     result: Err(FineMeshError::WorkBudget)
                 }
@@ -405,7 +422,7 @@ mod tests {
     }
     #[test]
     fn stage_and_chunk_bounds_and_worker_deadline_are_explicit() {
-        assert!(Stream::new(Vec::new(), Vec::new(), [0; 4], 1).is_err());
+        assert!(Stream::new(Vec::new(), Vec::new(), [0; 4], 1, 0).is_err());
         let mut s = stream();
         assert!(s.request(4).is_err());
         s.request(0).unwrap();
@@ -425,6 +442,7 @@ mod tests {
             .complete(
                 2,
                 CompletedMeshJob::Fine {
+                    finishes_fingerprint: 0,
                     world_fingerprint: 2,
                     result: Err(FineMeshError::WorkBudget),
                 },
@@ -468,5 +486,24 @@ mod tests {
         assert_eq!(delivery.meshes.len(), 2);
         assert_eq!(s.displayed, Some(1));
         assert!(s.idle());
+    }
+
+    #[test]
+    fn appearance_mismatch_is_rejected_before_any_candidate_or_resident_publication() {
+        let mut s = stream();
+        bootstrap(&mut s);
+        let before = s.resident.clone();
+        let (_, chunks) = s.request(1).unwrap().unwrap();
+        let mut job = result(1, chunks, 1);
+        if let CompletedMeshJob::Fine {
+            finishes_fingerprint,
+            ..
+        } = &mut job
+        {
+            *finishes_fingerprint = 42;
+        }
+        assert!(s.complete(1, job).is_err());
+        assert_eq!(s.resident, before);
+        assert_eq!(s.displayed, Some(0));
     }
 }

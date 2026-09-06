@@ -1,8 +1,11 @@
 //! Full-scene evidence for the inspection's incremental dirty-region publication contract.
 use destructible_fps::mesh::fine::{
     FineMeshLimits,
-    fixture::{STAGE_NAMES, industrial_inspection_world, industrial_patch_positions},
-    hybrid_dirty_chunks, mesh_hybrid_chunks,
+    fixture::{
+        STAGE_NAMES, industrial_inspection_world, industrial_patch_positions,
+        industrial_surface_finishes,
+    },
+    hybrid_dirty_chunks, mesh_hybrid_chunks_with_finishes,
 };
 use destructible_fps::{IVec3, Material, world::geometry::RefinedWorld};
 use std::collections::BTreeMap;
@@ -11,11 +14,12 @@ fn replacement_meshes(
     world: &RefinedWorld,
     chunks: &[IVec3],
 ) -> Vec<(IVec3, destructible_fps::mesh::CpuMesh)> {
+    let finishes = industrial_surface_finishes(world).unwrap();
     // Same one-chunk job partition as the native industrial inspector; every job keeps its cap.
     chunks
         .iter()
         .flat_map(|chunk| {
-            mesh_hybrid_chunks(world, &[*chunk], FineMeshLimits::default())
+            mesh_hybrid_chunks_with_finishes(world, &[*chunk], FineMeshLimits::default(), &finishes)
                 .unwrap()
                 .meshes
         })
@@ -43,9 +47,16 @@ fn window_positions(world: &RefinedWorld) -> Vec<IVec3> {
 fn every_industrial_stage_matches_full_remeshing_outside_the_complete_dirty_region() {
     let dirty = hybrid_dirty_chunks(&industrial_patch_positions()).unwrap();
     let first = industrial_inspection_world(0).unwrap();
+    let finishes = industrial_surface_finishes(&first).unwrap();
     let mut baseline = BTreeMap::new();
     for chunk in first.chunk_positions() {
-        let batch = mesh_hybrid_chunks(&first, &[chunk], FineMeshLimits::default()).unwrap();
+        let batch = mesh_hybrid_chunks_with_finishes(
+            &first,
+            &[chunk],
+            FineMeshLimits::default(),
+            &finishes,
+        )
+        .unwrap();
         baseline.insert(chunk, batch.meshes.into_iter().next().unwrap().1);
     }
     assert!(
@@ -68,7 +79,13 @@ fn every_industrial_stage_matches_full_remeshing_outside_the_complete_dirty_regi
         let mut unchanged_nonempty = 0;
         let mut changed = 0;
         for chunk in positions {
-            let batch = mesh_hybrid_chunks(&world, &[chunk], FineMeshLimits::default()).unwrap();
+            let batch = mesh_hybrid_chunks_with_finishes(
+                &world,
+                &[chunk],
+                FineMeshLimits::default(),
+                &finishes,
+            )
+            .unwrap();
             let mesh = &batch.meshes[0].1;
             if let Some(grouped_mesh) = grouped.get(&chunk) {
                 assert_eq!(
@@ -156,9 +173,14 @@ fn exact_inspection_reference_is_unchanged_and_industrial_rubble_is_persistent()
         let mut indices = 0;
         let mut total_work = 0;
         for chunk in chunks {
-            let report = mesh_hybrid_chunks(&world, &[chunk], FineMeshLimits::default())
-                .unwrap()
-                .report;
+            let report = mesh_hybrid_chunks_with_finishes(
+                &world,
+                &[chunk],
+                FineMeshLimits::default(),
+                &industrial_surface_finishes(&world).unwrap(),
+            )
+            .unwrap()
+            .report;
             max_work = max_work.max(report.work);
             total_work += report.work;
             vertices += report.vertices;

@@ -5,6 +5,10 @@ use destructible_fps::{environment::EnvironmentLibrary, render::create_environme
 use glam::{Mat4, Vec3, Vec4};
 
 const OUTPUT_BYTES: u64 = 43 * 16;
+const WORLD_SHADER: &str = concat!(
+    include_str!("../src/shaders/color.wgsl"),
+    include_str!("../src/shaders/world.wgsl")
+);
 const HARNESS: &str = r"
 @group(0) @binding(7) var<storage, read_write> results: array<vec4<f32>>;
 
@@ -75,7 +79,7 @@ async fn gpu() -> (wgpu::Device, wgpu::Queue) {
 }
 
 fn execute_shader(device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<[f32; 4]> {
-    let source = format!("{}\n{HARNESS}", include_str!("../src/shaders/world.wgsl"));
+    let source = format!("{WORLD_SHADER}\n{HARNESS}");
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("production material shader with compute assertions"),
         source: wgpu::ShaderSource::Wgsl(source.into()),

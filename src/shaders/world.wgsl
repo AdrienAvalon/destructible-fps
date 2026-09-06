@@ -4,7 +4,6 @@ struct Globals {
     light_view_projection: mat4x4<f32>,
     camera_time: vec4<f32>,
     sun_fog: vec4<f32>,
-    display: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -464,16 +463,6 @@ fn environment_lighting(normal: vec3<f32>, view: vec3<f32>, albedo: vec3<f32>,
     return visible_environment_lighting(normal, view, albedo, roughness, metallic, ao, vec2<f32>(1.0));
 }
 
-fn display_transform(linear_color: vec3<f32>) -> vec3<f32> {
-    var color = max(linear_color, vec3<f32>(0.0)) * globals.display.y;
-    color = (color * (2.51 * color + vec3<f32>(0.03)))
-        / (color * (2.43 * color + vec3<f32>(0.59)) + vec3<f32>(0.14));
-    if globals.display.x > 0.5 {
-        color = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
-    }
-    return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
 @vertex
 fn sky_vertex(@builtin(vertex_index) index: u32) -> SkyOutput {
     let positions = array<vec2<f32>, 3>(
@@ -492,7 +481,7 @@ fn sky_fragment(input: SkyOutput) -> @location(0) vec4<f32> {
     let far_point = globals.inverse_view_projection * vec4<f32>(input.ndc, 1.0, 1.0);
     let world_position = far_point.xyz / far_point.w;
     let view_direction = normalize(world_position - globals.camera_time.xyz);
-    return vec4<f32>(display_transform(atmosphere(view_direction)), 1.0);
+    return vec4<f32>(finite_hdr(atmosphere(view_direction)), 1.0);
 }
 
 @fragment
@@ -545,27 +534,6 @@ fn world_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
     let fog_light = fog_radiance(normalize(camera_to_surface));
     color = mix(color, fog_light, clamp(fog, 0.0, 0.92));
 
-    return vec4<f32>(display_transform(color), 1.0);
-}
-
-struct CrosshairOutput {
-    @builtin(position) clip_position: vec4<f32>,
-};
-
-@vertex
-fn crosshair_vertex(@builtin(vertex_index) index: u32) -> CrosshairOutput {
-    let points = array<vec2<f32>, 12>(
-        vec2<f32>(-0.0012, -0.018), vec2<f32>(0.0012, -0.018), vec2<f32>(0.0012, 0.018),
-        vec2<f32>(-0.0012, -0.018), vec2<f32>(0.0012, 0.018), vec2<f32>(-0.0012, 0.018),
-        vec2<f32>(-0.010, -0.0021), vec2<f32>(0.010, -0.0021), vec2<f32>(0.010, 0.0021),
-        vec2<f32>(-0.010, -0.0021), vec2<f32>(0.010, 0.0021), vec2<f32>(-0.010, 0.0021),
-    );
-    var output: CrosshairOutput;
-    output.clip_position = vec4<f32>(points[index], 0.0, 1.0);
-    return output;
-}
-
-@fragment
-fn crosshair_fragment() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.96, 0.98, 1.0, 0.92);
+    // Preserve linear radiance until spatial resolve; limit to finite RGBA16Float range.
+    return vec4<f32>(finite_hdr(color), 1.0);
 }

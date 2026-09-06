@@ -55,7 +55,9 @@ convolution and the prefiltered specular/BRDF separation.
 
 The same world-space environment supplies sky, diffuse light, reflections and fog color. Source
 radiance gain is 1; a shared fixed exposure 0.75 precedes the existing fitted tone curve/output
-encoding. There is no auto-exposure, HDR display output or HDR render-target/postprocessing chain.
+encoding. The [linear HDR frame](../../docs/hdr-display.md) preserves that radiance through spatial
+MSAA resolve before the shared display transform. There is no auto-exposure, HDR-monitor output,
+bloom or temporal postprocessing.
 The glass material remains opaque; sky reflections are not refraction or transparency.
 
 The pure-sky lower hemisphere becomes a **ground approximation**: upper cosine-convolved light

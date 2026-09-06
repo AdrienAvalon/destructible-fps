@@ -88,7 +88,7 @@ The existing material GPU test additionally verifies low-frequency haze sampling
 last-mip asset bytes. Renderer-level invalidation hooks are source-reviewed and exercised by the
 live smokes, but not isolated pixel assertions: these hardware fixtures explicitly invalidate after
 installing geometry/poses. There is no individual body-removal API; snapshot reset clears bodies.
-Ordinary headless tests intentionally ignore the four GPU tests and are not hardware evidence.
+Ordinary headless runs intentionally ignore hardware-only GPU tests and are not hardware evidence.
 
 The explicitly synthetic `--lighting-stress` fixture moves up to 32 render instances, capped by the
 current `MAX_SERVER_PEERS` (16 at this revision), on every frame while the camera orbits the breach.
@@ -96,8 +96,9 @@ Its smoke rejects cache hits or missing casters. It does not simulate those play
 movement authority or collisions; it measures sustained rendering refresh. The structural lab
 separately exercises real automatic fracture, body motion and mesh updates.
 
-The six-query bounded profiler reports sun depth, sky visibility and world/HUD separately. Each
+The eight-query bounded profiler reports sun depth, sky visibility, HDR scene/resolve and
+display/HUD separately. Each
 readback slot carries the matching refresh flag: the refresh-only distribution cannot be diluted
-by cached frames. Total GPU time includes all three stages. Reports also include cache hits,
+by cached frames. Total GPU time includes all four stages. Reports also include cache hits,
 rebuild count and last-frame sky draws. See `performance.md` for hardware, resolution, distributions,
 limits and actual capture evidence. A favorable cache-hit average is not a performance gate.

@@ -65,7 +65,10 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
   normal-aware mips and explicit-gradient body-local triplanar projection, procedural steel/glass
   and cut layers, and a view-correct HDR sky with offline diffuse/GGX image-based lighting,
   split-sum BRDF and fixed shared exposure (delivered); GPU block compression, material blending,
-  local reflections/bounced transport, and a full HDR postprocessing pipeline remain;
+  local reflections/bounced transport, and advanced postprocessing remain;
+- bounded linear RGBA16Float scene targets, explicit 1x/4x spatial MSAA, radiance resolve before
+  fixed exposure/tone mapping, exact output transfer and unexposed display-linear HUD (delivered);
+  temporal antialiasing, specular stability, HDR-monitor output and photographic exposure remain;
 - dynamic distant-sky visibility from sixteen bounded directional depth maps, actual rendered
   static/moving casters, cache invalidation, continuous coverage fade and refresh-only timings
   (delivered near the camera); higher-quality visibility, real bounce and large-world coverage remain;
@@ -260,7 +263,8 @@ documented tools and source assets.
 - calibrated physically based materials and physically plausible sun, sky, exposure, and atmosphere
   (scanned material/procedural atmosphere foundation, hybrid natural terrain and coarse
   integrity-driven masonry fracture plus layered cross-section shading delivered; calibration,
-  authored geometry, material blending and HDR exposure remain);
+  authored geometry, material blending and calibrated photographic exposure remain; the linear HDR
+  working frame and fixed exposure/SDR display transform are delivered);
 - terrain blending, decals, vegetation, weather, water, particles, volumetric dust, and destruction
   residue;
 - scalable indirect lighting/reflections with explicit quality tiers and stable temporal behavior;

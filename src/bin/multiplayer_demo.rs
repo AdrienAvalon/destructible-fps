@@ -287,6 +287,7 @@ impl MultiplayerGame {
         transport_options: &TransportOptions,
         smoke_motion: bool,
         smoke_drop_first_delta: bool,
+        msaa: u32,
     ) -> Result<Self, String> {
         let transport = GameTransport::connect(transport_options)?;
         let session_id = transport.session_id();
@@ -297,7 +298,7 @@ impl MultiplayerGame {
             .into_iter()
             .map(|chunk| (chunk, mesh_chunk(&world, chunk)))
             .collect();
-        let mut renderer = pollster::block_on(Renderer::new(Arc::clone(&window)))?;
+        let mut renderer = pollster::block_on(Renderer::with_msaa(Arc::clone(&window), msaa))?;
         renderer.upload_chunk_meshes(meshes);
         let now = Instant::now();
         println!(
@@ -1093,7 +1094,7 @@ impl MultiplayerGame {
             now.duration_since(self.started).as_secs_f32(),
         ) {
             RenderOutcome::Presented | RenderOutcome::Skipped => {}
-            RenderOutcome::Reconfigure => self.renderer.resize(self.window.inner_size()),
+            RenderOutcome::Reconfigure => self.renderer.resize(self.window.inner_size())?,
             RenderOutcome::RecreateSurface => self.renderer.recreate_surface()?,
         }
         let stats = self.renderer.stats();
@@ -1193,6 +1194,7 @@ struct App {
     transport: TransportOptions,
     exit_after: Option<Duration>,
     smoke_drop_first_delta: bool,
+    msaa: u32,
     failure: Option<String>,
 }
 
@@ -1215,6 +1217,7 @@ impl ApplicationHandler for App {
             &self.transport,
             self.exit_after.is_some(),
             self.smoke_drop_first_delta,
+            self.msaa,
         ) {
             Ok(game) => self.game = Some(game),
             Err(error) => {
@@ -1238,7 +1241,12 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => game.renderer.resize(size),
+            WindowEvent::Resized(size) => {
+                if let Err(error) = game.renderer.resize(size) {
+                    self.failure = Some(error);
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Focused(false) => game.release_cursor(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -1314,6 +1322,7 @@ struct Options {
     transport: TransportOptions,
     exit_after: Option<Duration>,
     smoke_drop_first_delta: bool,
+    msaa: u32,
 }
 
 fn options() -> Result<Options, Box<dyn Error>> {
@@ -1333,9 +1342,16 @@ where
     let mut secure_credential = None;
     let mut exit_after = None;
     let mut smoke_drop_first_delta = false;
+    let mut msaa = 4;
     let mut arguments = arguments.into_iter().map(Into::into);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "--msaa" => {
+                msaa = arguments.next().ok_or("--msaa exige 1 ou 4")?.parse()?;
+                if !matches!(msaa, 1 | 4) {
+                    return Err("--msaa exige exactement 1 ou 4".into());
+                }
+            }
             "--server" => {
                 legacy_server_selected = true;
                 server = arguments
@@ -1412,6 +1428,7 @@ where
         transport,
         exit_after,
         smoke_drop_first_delta,
+        msaa,
     })
 }
 
@@ -1424,6 +1441,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         transport: options.transport,
         exit_after: options.exit_after,
         smoke_drop_first_delta: options.smoke_drop_first_delta,
+        msaa: options.msaa,
         failure: None,
     };
     event_loop.run_app(&mut app)?;
@@ -1436,6 +1454,27 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msaa_cli_is_explicit_and_bounded() {
+        assert_eq!(options_from(Vec::<String>::new()).unwrap().msaa, 4);
+        for value in ["1", "4"] {
+            assert_eq!(
+                options_from(["--msaa", value]).unwrap().msaa.to_string(),
+                value
+            );
+        }
+        for arguments in [
+            vec!["--msaa"],
+            vec!["--msaa", "0"],
+            vec!["--msaa", "2"],
+            vec!["--msaa", "8"],
+            vec!["--msaa", "-1"],
+            vec!["--msaa", "NaN"],
+        ] {
+            assert!(options_from(arguments).is_err());
+        }
+    }
 
     #[test]
     fn movement_is_camera_relative_and_unit_bounded() {

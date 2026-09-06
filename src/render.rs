@@ -25,17 +25,21 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
+mod display;
 mod sky;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_MAP_SIZE: u32 = 2_048;
-const GPU_TIMESTAMP_COUNT: u32 = 6;
-const GPU_TIMESTAMP_BYTES: u64 = 6 * 8;
+const GPU_TIMESTAMP_COUNT: u32 = 8;
+const GPU_TIMESTAMP_BYTES: u64 = 8 * 8;
 const GPU_READBACK_SLOTS: usize = 4;
 const MAX_COMPLETED_GPU_SAMPLES: usize = 16;
 const BODY_INSTANCE_BYTES: u64 = 64;
 const PLAYER_INSTANCE_BYTES: u64 = BODY_INSTANCE_BYTES;
-const SHADER: &str = include_str!("shaders/world.wgsl");
+const SHADER: &str = concat!(
+    include_str!("shaders/color.wgsl"),
+    include_str!("shaders/world.wgsl")
+);
 const SCENE_EXPOSURE: f32 = 0.75;
 
 #[repr(C)]
@@ -46,10 +50,9 @@ struct Globals {
     light_view_projection: [[f32; 4]; 4],
     camera_time: [f32; 4],
     sun_fog: [f32; 4],
-    display: [f32; 4],
 }
 
-const _: () = assert!(size_of::<Globals>() == 240);
+const _: () = assert!(size_of::<Globals>() == 224);
 
 struct GpuMesh {
     vertex: wgpu::Buffer,
@@ -96,7 +99,8 @@ pub struct GpuFrameTime {
     pub shadow_ms: f64,
     pub sky_visibility_ms: f64,
     pub sky_refreshed: bool,
-    pub world_hud_ms: f64,
+    pub world_ms: f64,
+    pub display_hud_ms: f64,
     pub total_ms: f64,
 }
 
@@ -254,6 +258,8 @@ fn gpu_frame_time(timestamps: &[u64], period_ns: f64) -> Option<GpuFrameTime> {
         sky_end,
         world_begin,
         world_end,
+        display_begin,
+        display_end,
     ] = *timestamps
     else {
         return None;
@@ -263,6 +269,8 @@ fn gpu_frame_time(timestamps: &[u64], period_ns: f64) -> Option<GpuFrameTime> {
         || sky_end < sky_begin
         || world_begin < sky_end
         || world_end < world_begin
+        || display_begin < world_end
+        || display_end < display_begin
         || !period_ns.is_finite()
         || period_ns <= 0.0
     {
@@ -273,8 +281,9 @@ fn gpu_frame_time(timestamps: &[u64], period_ns: f64) -> Option<GpuFrameTime> {
         shadow_ms: ticks_to_ms(shadow_end - shadow_begin),
         sky_visibility_ms: ticks_to_ms(sky_end - sky_begin),
         sky_refreshed: false,
-        world_hud_ms: ticks_to_ms(world_end - world_begin),
-        total_ms: ticks_to_ms(world_end - shadow_begin),
+        world_ms: ticks_to_ms(world_end - world_begin),
+        display_hud_ms: ticks_to_ms(display_end - display_begin),
+        total_ms: ticks_to_ms(display_end - shadow_begin),
     })
 }
 
@@ -288,12 +297,15 @@ pub enum RenderOutcome {
 
 pub struct Renderer {
     instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    depth_view: wgpu::TextureView,
+    display: display::DisplayPass,
+    pending_resize: Option<PhysicalSize<u32>>,
+    rejected_resize: Option<PhysicalSize<u32>>,
     _shadow_texture: wgpu::Texture,
     shadow_view: wgpu::TextureView,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -301,7 +313,6 @@ pub struct Renderer {
     sky_pipeline: wgpu::RenderPipeline,
     world_pipeline: wgpu::RenderPipeline,
     body_world_pipeline: wgpu::RenderPipeline,
-    crosshair_pipeline: wgpu::RenderPipeline,
     globals_buffer: wgpu::Buffer,
     body_instance_buffer: wgpu::Buffer,
     body_instances: Vec<BodyInstance>,
@@ -327,6 +338,18 @@ impl Renderer {
     /// Returns a diagnostic when the window surface or a compatible GPU is unavailable.
     #[allow(clippy::too_many_lines)]
     pub async fn new(window: Arc<Window>) -> Result<Self, String> {
+        Self::with_msaa(window, 4).await
+    }
+
+    /// Builds a linear HDR renderer with explicitly requested 1x or 4x spatial sampling.
+    ///
+    /// # Errors
+    /// Rejects unsupported sample counts, target bounds, or unavailable GPU/surface resources.
+    #[allow(clippy::too_many_lines)]
+    pub async fn with_msaa(window: Arc<Window>, samples: u32) -> Result<Self, String> {
+        if !matches!(samples, 1 | 4) {
+            return Err("MSAA exige exactement 1 ou 4 echantillons".to_owned());
+        }
         let size = non_zero_size(window.inner_size());
         let mut instance_descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         instance_descriptor.backends = wgpu::Backends::VULKAN;
@@ -362,6 +385,22 @@ impl Renderer {
             })
             .await
             .map_err(|error| format!("creation du device Vulkan: {error}"))?;
+        display::validate_formats(
+            samples,
+            display::HDR_FORMAT.guaranteed_format_features(device.features()),
+            DEPTH_FORMAT.guaranteed_format_features(device.features()),
+        )?;
+        display::validate_formats(
+            samples,
+            adapter.get_texture_format_features(display::HDR_FORMAT),
+            adapter.get_texture_format_features(DEPTH_FORMAT),
+        )?;
+        let frame_plan = display::FramePlan::new(
+            size.width,
+            size.height,
+            samples,
+            device.limits().max_texture_dimension_2d,
+        )?;
         let mut config = surface
             .get_default_config(&adapter, size.width, size.height)
             .ok_or_else(|| "la surface Vulkan ne fournit aucun format utilisable".to_owned())?;
@@ -386,12 +425,6 @@ impl Renderer {
             light_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
             camera_time: [0.0; 4],
             sun_fog: [0.35, -0.90, 0.22, 0.0035],
-            display: [
-                f32::from(!config.format.is_srgb()),
-                SCENE_EXPOSURE,
-                0.0,
-                0.0,
-            ],
         };
         let globals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera and lighting globals"),
@@ -557,12 +590,12 @@ impl Renderer {
             attributes: &body_instance_attributes,
         };
         let color_target = wgpu::ColorTargetState {
-            format: config.format,
+            format: display::HDR_FORMAT,
             blend: None,
             write_mask: wgpu::ColorWrites::ALL,
         };
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("offline HDR sky pipeline"),
+            label: Some("offline linear HDR sky pipeline"),
             layout: Some(&world_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -582,7 +615,10 @@ impl Renderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("sky_fragment"),
@@ -593,7 +629,7 @@ impl Renderer {
             cache: None,
         });
         let world_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("voxel world pipeline"),
+            label: Some("linear HDR voxel world pipeline"),
             layout: Some(&world_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -614,7 +650,10 @@ impl Renderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("world_fragment"),
@@ -625,7 +664,7 @@ impl Renderer {
             cache: None,
         });
         let body_world_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("rigid body world pipeline"),
+            label: Some("linear HDR rigid body world pipeline"),
             layout: Some(&world_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -649,13 +688,16 @@ impl Renderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("world_fragment"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: display::HDR_FORMAT,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -725,46 +767,21 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
-        let crosshair_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("crosshair pipeline"),
-            layout: Some(&globals_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("crosshair_vertex"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("crosshair_fragment"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let depth_view = create_depth_view(&device, size);
+        let display = display::DisplayPass::new(&device, frame_plan, config.format);
+        println!(
+            "Frame HDR: {}x{}, MSAA {}x, {} octets de cibles GPU; tone mapping apres resolve",
+            frame_plan.width, frame_plan.height, frame_plan.samples, frame_plan.texel_bytes
+        );
         let renderer = Self {
             instance,
+            adapter,
             window,
             surface,
             device,
             queue,
-            depth_view,
+            display,
+            pending_resize: None,
+            rejected_resize: None,
             _shadow_texture: shadow_texture,
             shadow_view,
             shadow_pipeline,
@@ -773,7 +790,6 @@ impl Renderer {
             config,
             world_pipeline,
             body_world_pipeline,
-            crosshair_pipeline,
             globals_buffer,
             body_instance_buffer,
             body_instances: Vec::new(),
@@ -793,14 +809,63 @@ impl Renderer {
         Ok(renderer)
     }
 
-    pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width == 0 || size.height == 0 {
-            return;
+    /// Schedules a bounded resize; oversized requests restore the last valid window size.
+    ///
+    /// # Errors
+    /// Only unexpected device polling errors are fatal. Busy work is retried without waiting.
+    pub fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), String> {
+        let decide = |idle| {
+            display::resize_action(
+                self.display.plan,
+                size.width,
+                size.height,
+                self.device.limits().max_texture_dimension_2d,
+                idle,
+            )
+        };
+        let mut action = decide(false);
+        if action == display::ResizeAction::Defer {
+            let idle = match self.device.poll(wgpu::PollType::Poll) {
+                Ok(status) => status.is_queue_empty(),
+                Err(wgpu::PollError::Timeout) => false,
+                Err(error) => return Err(format!("poll GPU avant resize: {error}")),
+            };
+            action = decide(idle);
         }
-        self.config.width = size.width;
-        self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
-        self.depth_view = create_depth_view(&self.device, size);
+        match action {
+            display::ResizeAction::Ignore => self.pending_resize = None,
+            display::ResizeAction::Defer => self.pending_resize = Some(size),
+            display::ResizeAction::Restore(error) => {
+                self.pending_resize = None;
+                if self.rejected_resize != Some(size) {
+                    eprintln!(
+                        "Resize refuse ({error}); retour a {}x{} sans changer le MSAA",
+                        self.config.width, self.config.height
+                    );
+                    self.window.set_maximized(false);
+                    let _ = self.window.request_inner_size(PhysicalSize::new(
+                        self.config.width,
+                        self.config.height,
+                    ));
+                    self.rejected_resize = Some(size);
+                }
+            }
+            display::ResizeAction::Reuse => {
+                self.surface.configure(&self.device, &self.config);
+                self.pending_resize = None;
+                self.rejected_resize = None;
+            }
+            display::ResizeAction::Replace(plan) => {
+                let display = display::DisplayPass::new(&self.device, plan, self.config.format);
+                self.config.width = size.width;
+                self.config.height = size.height;
+                self.surface.configure(&self.device, &self.config);
+                self.display = display;
+                self.pending_resize = None;
+                self.rejected_resize = None;
+            }
+        }
+        Ok(())
     }
 
     /// Recreates a lost presentation surface while retaining device resources.
@@ -809,11 +874,19 @@ impl Renderer {
     ///
     /// Returns a diagnostic if the operating-system window can no longer expose a surface.
     pub fn recreate_surface(&mut self) -> Result<(), String> {
-        self.surface = self
+        let surface = self
             .instance
             .create_surface(Arc::clone(&self.window))
             .map_err(|error| format!("recreation de la surface Vulkan: {error}"))?;
-        self.surface.configure(&self.device, &self.config);
+        if !surface
+            .get_capabilities(&self.adapter)
+            .formats
+            .contains(&self.config.format)
+        {
+            return Err("la surface recreee ne supporte plus le format de presentation".to_owned());
+        }
+        surface.configure(&self.device, &self.config);
+        self.surface = surface;
         Ok(())
     }
 
@@ -1043,6 +1116,15 @@ impl Renderer {
         view_direction: Vec3,
         elapsed_seconds: f32,
     ) -> RenderOutcome {
+        if let Some(size) = self.pending_resize {
+            if let Err(error) = self.resize(size) {
+                eprintln!("Resize GPU impossible: {error}");
+                return RenderOutcome::Reconfigure;
+            }
+            if self.pending_resize.is_some() {
+                return RenderOutcome::Skipped;
+            }
+        }
         if let Some(profiler) = &mut self.gpu_profiler {
             profiler.poll(&self.device);
         }
@@ -1063,12 +1145,6 @@ impl Renderer {
                 elapsed_seconds,
             ],
             sun_fog: [0.35, -0.90, 0.22, 0.0035],
-            display: [
-                f32::from(!self.config.format.is_srgb()),
-                SCENE_EXPOSURE,
-                0.0,
-                0.0,
-            ],
         };
         self.queue
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
@@ -1178,26 +1254,13 @@ impl Renderer {
             .map(|profiler| profiler.timestamps(4, 5));
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("world and HUD pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.075,
-                            g: 0.19,
-                            b: 0.39,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                label: Some("linear HDR scene and spatial resolve"),
+                color_attachments: &[Some(self.display.color_attachment())],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
+                    view: &self.display.depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+                        store: wgpu::StoreOp::Discard,
                     }),
                     stencil_ops: None,
                 }),
@@ -1239,8 +1302,29 @@ impl Renderer {
                     0..u32::try_from(self.player_instances.len()).unwrap_or(u32::MAX),
                 );
             }
-            pass.set_pipeline(&self.crosshair_pipeline);
-            pass.draw(0..12, 0..1);
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("display transform and unexposed HUD"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: self
+                    .gpu_profiler
+                    .as_ref()
+                    .map(|profiler| profiler.timestamps(6, 7)),
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.display.pipeline);
+            pass.set_bind_group(0, &self.display.bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
         let readback_slot = self.gpu_profiler.as_mut().and_then(|profiler| {
             profiler.encode_readback(&mut encoder, self.sky_visibility.stats.refreshed)
@@ -1654,25 +1738,6 @@ fn environment_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-fn create_depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::TextureView {
-    device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("main depth texture"),
-            size: wgpu::Extent3d {
-                width: size.width.max(1),
-                height: size.height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        })
-        .create_view(&wgpu::TextureViewDescriptor::default())
-}
-
 fn create_shadow_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("shadow comparison sampler"),
@@ -1733,7 +1798,7 @@ mod tests {
 
     #[test]
     fn gpu_timestamps_are_split_into_pass_and_total_times() {
-        let times = [100, 160, 165, 175, 185, 285];
+        let times = [100, 160, 165, 175, 185, 285, 290, 310];
         let sample = gpu_frame_time(&times, 10.0).expect("valid timestamps");
 
         assert_eq!(
@@ -1742,13 +1807,14 @@ mod tests {
                 shadow_ms: 0.0006,
                 sky_visibility_ms: 0.0001,
                 sky_refreshed: false,
-                world_hud_ms: 0.001,
-                total_ms: 0.00185,
+                world_ms: 0.001,
+                display_hud_ms: 0.0002,
+                total_ms: 0.0021,
             }
         );
         assert!(gpu_frame_time(&[100, 99, 175, 275], 10.0).is_none());
         assert!(gpu_frame_time(&[100, 160, 175], 10.0).is_none());
-        for index in 1..6 {
+        for index in 1..8 {
             let mut invalid = times;
             invalid[index] = invalid[index - 1] - 1;
             assert!(gpu_frame_time(&invalid, 10.0).is_none());

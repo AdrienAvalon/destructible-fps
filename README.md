@@ -111,6 +111,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   screen-footprint detail fading, a view-correct atmospheric sky, altitude haze, single-transfer
   tone mapping, and a crosshair;
 - non-blocking real-GPU timestamp queries and bounded CPU/GPU p50/p95/p99 frame telemetry;
+- a bounded linear HDR working frame with 4× spatial MSAA, resolve before fixed tone mapping,
+  single sRGB transfer and a display-linear crosshair; both clients accept `--msaa 1` for an
+  explicit lower-cost presentation profile (see [HDR display contract](docs/hdr-display.md));
 - conservative per-chunk camera-frustum culling with visible and submitted draw counters.
 
 This is a **first playable engineering slice**, not yet a photorealistic or production multiplayer

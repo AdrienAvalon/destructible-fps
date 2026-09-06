@@ -31,7 +31,7 @@ use winit::{
 const FIXED_STEP_SECONDS: f32 = 1.0 / 120.0;
 const MAX_PENDING_MESH_CHUNKS: usize = 512;
 const INITIAL_MESH_BATCH_CHUNKS: usize = 16;
-const TELEMETRY_WINDOW: usize = 4_096;
+const TELEMETRY_WINDOW: usize = 16_384;
 const LIGHTING_STRESS_PLAYERS: usize = if MAX_SERVER_PEERS < 32 {
     MAX_SERVER_PEERS
 } else {
@@ -56,7 +56,8 @@ struct RuntimeTelemetry {
     gpu_shadow: SampleWindow,
     gpu_sky_visibility: SampleWindow,
     gpu_sky_refresh: SampleWindow,
-    gpu_world_hud: SampleWindow,
+    gpu_world: SampleWindow,
+    gpu_display_hud: SampleWindow,
     gpu_total: SampleWindow,
 }
 
@@ -68,7 +69,8 @@ impl RuntimeTelemetry {
             gpu_shadow: SampleWindow::new(TELEMETRY_WINDOW),
             gpu_sky_visibility: SampleWindow::new(TELEMETRY_WINDOW),
             gpu_sky_refresh: SampleWindow::new(TELEMETRY_WINDOW),
-            gpu_world_hud: SampleWindow::new(TELEMETRY_WINDOW),
+            gpu_world: SampleWindow::new(TELEMETRY_WINDOW),
+            gpu_display_hud: SampleWindow::new(TELEMETRY_WINDOW),
             gpu_total: SampleWindow::new(TELEMETRY_WINDOW),
         }
     }
@@ -80,7 +82,8 @@ impl RuntimeTelemetry {
             if sample.sky_refreshed {
                 self.gpu_sky_refresh.record_ms(sample.sky_visibility_ms);
             }
-            self.gpu_world_hud.record_ms(sample.world_hud_ms);
+            self.gpu_world.record_ms(sample.world_ms);
+            self.gpu_display_hud.record_ms(sample.display_hud_ms);
             self.gpu_total.record_ms(sample.total_ms);
         }
     }
@@ -95,7 +98,8 @@ impl RuntimeTelemetry {
             print_distribution("GPU ombres", self.gpu_shadow.summary());
             print_distribution("GPU visibilite ciel", self.gpu_sky_visibility.summary());
             print_distribution("GPU ciel recalcul seul", self.gpu_sky_refresh.summary());
-            print_distribution("GPU monde + HUD", self.gpu_world_hud.summary());
+            print_distribution("GPU scene HDR", self.gpu_world.summary());
+            print_distribution("GPU affichage + HUD", self.gpu_display_hud.summary());
             print_distribution("GPU frame totale", self.gpu_total.summary());
             println!(
                 "  echantillons GPU abandonnes {:>8}",
@@ -150,6 +154,7 @@ impl Game {
         window: Arc<Window>,
         showcase_view: Option<ShowcaseView>,
         structural_lab: bool,
+        msaa: u32,
     ) -> Result<Self, String> {
         let showcase = showcase_view.is_some();
         let mut session = if structural_lab {
@@ -194,7 +199,7 @@ impl Game {
             ));
         }
         let before = Instant::now();
-        let mut renderer = pollster::block_on(Renderer::new(Arc::clone(&window)))?;
+        let mut renderer = pollster::block_on(Renderer::with_msaa(Arc::clone(&window), msaa))?;
         if showcase_view == Some(ShowcaseView::LightingStress) {
             renderer.update_player_transforms(&lighting_stress_players(0.0), None)?;
             println!(
@@ -571,7 +576,10 @@ impl Game {
         {
             RenderOutcome::Presented | RenderOutcome::Skipped => {}
             RenderOutcome::Reconfigure => {
-                self.renderer.resize(self.window.inner_size());
+                if let Err(error) = self.renderer.resize(self.window.inner_size()) {
+                    event_loop.exit();
+                    return Some(error);
+                }
             }
             RenderOutcome::RecreateSurface => {
                 if let Err(error) = self.renderer.recreate_surface() {
@@ -738,6 +746,7 @@ struct App {
     showcase_view: Option<ShowcaseView>,
     failure: Option<String>,
     structural_lab: bool,
+    msaa: u32,
 }
 
 impl ApplicationHandler for App {
@@ -755,7 +764,12 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         };
-        match Game::new(Arc::new(window), self.showcase_view, self.structural_lab) {
+        match Game::new(
+            Arc::new(window),
+            self.showcase_view,
+            self.structural_lab,
+            self.msaa,
+        ) {
             Ok(game) => self.game = Some(game),
             Err(error) => {
                 eprintln!("initialisation impossible: {error}");
@@ -779,7 +793,12 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => game.renderer.resize(size),
+            WindowEvent::Resized(size) => {
+                if let Err(error) = game.renderer.resize(size) {
+                    self.failure = Some(error);
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Focused(false) => game.release_cursor(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -875,6 +894,7 @@ struct LaunchOptions {
     exit_after: Option<Duration>,
     showcase_view: Option<ShowcaseView>,
     structural_lab: bool,
+    msaa: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -885,14 +905,27 @@ enum ShowcaseView {
 }
 
 fn launch_options() -> Result<LaunchOptions, Box<dyn Error>> {
-    let mut arguments = std::env::args().skip(1);
+    launch_options_from(std::env::args().skip(1))
+}
+
+fn launch_options_from(
+    arguments: impl IntoIterator<Item = String>,
+) -> Result<LaunchOptions, Box<dyn Error>> {
+    let mut arguments = arguments.into_iter();
     let mut options = LaunchOptions {
         exit_after: None,
         showcase_view: None,
         structural_lab: false,
+        msaa: 4,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "--msaa" => {
+                options.msaa = arguments.next().ok_or("--msaa exige 1 ou 4")?.parse()?;
+                if !matches!(options.msaa, 1 | 4) {
+                    return Err("--msaa exige exactement 1 ou 4".into());
+                }
+            }
             "--structural-lab" => options.structural_lab = true,
             "--showcase" => options.showcase_view = Some(ShowcaseView::Orbit),
             "--showcase-closeup" => options.showcase_view = Some(ShowcaseView::BreachCloseup),
@@ -977,6 +1010,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         showcase_view: options.showcase_view,
         failure: None,
         structural_lab: options.structural_lab,
+        msaa: options.msaa,
     };
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.failure {
@@ -988,6 +1022,25 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msaa_cli_is_explicit_and_bounded() {
+        assert_eq!(launch_options_from(Vec::new()).unwrap().msaa, 4);
+        for value in ["1", "4"] {
+            let result = launch_options_from(vec!["--msaa".to_owned(), value.to_owned()]).unwrap();
+            assert_eq!(result.msaa.to_string(), value);
+        }
+        for args in [
+            vec!["--msaa"],
+            vec!["--msaa", "0"],
+            vec!["--msaa", "2"],
+            vec!["--msaa", "8"],
+            vec!["--msaa", "-1"],
+            vec!["--msaa", "NaN"],
+        ] {
+            assert!(launch_options_from(args.into_iter().map(str::to_owned)).is_err());
+        }
+    }
 
     #[test]
     fn lighting_stress_has_bounded_unique_and_actually_moving_render_instances() {

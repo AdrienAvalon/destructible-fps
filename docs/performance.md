@@ -3,6 +3,144 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-06 — linear HDR frame, spatial MSAA and bounded resize
+
+Source: parent `e4ef8fe` plus this HDR/display increment. World and sky retain linear RGBA16Float
+radiance through 1×/4× spatial resolve, followed by fixed exposure/tone mapping, display-linear HUD
+and one exact output transfer. Both clients default to 4× with explicit `--msaa 1` available.
+Eight timestamps now separate sun depth, sky visibility, HDR scene/resolve and display/HUD.
+Simulation, collision, authority, assets and wire formats are unchanged. This improves polygon-edge
+coverage, not coarse geometry, bounced illumination, temporal stability or photorealism. See
+[`hdr-display.md`](hdr-display.md) for equations, limits and reproduction commands.
+
+The live-verified host remains i7-13700H / RTX 4050 Laptop, NVIDIA 610.57.04, Linux
+7.2.2-1-cachyos, Rust 1.97.1 release, actual 1,440×900 desktop Vulkan presentation. No clocks were
+locked and no OS caches were purged. Final graphical runs were serial with all relevant binaries
+already built and no other game test, compilation, index build or GPU capture deliberately active.
+CPU frame wall includes acquisition/presentation waits; it is not isolated active CPU work.
+
+### Representative breach and sustained moving-caster load
+
+Two final twelve-second `--showcase-closeup` runs, 1× then 4×, keep the same 98,078 voxels,
+128 chunks, 48,684 faces, one sleeping body and two synthetic player instances. Visible counts
+remain 70 chunks / one body / two players, with 72 world and 130 sun-shadow draws.
+All table entries are p50 / p95 / p99 milliseconds.
+
+| Timing | 1× | 4× |
+| --- | --- | --- |
+| CPU frame wall | 2.358 / 9.598 / 13.146 | 2.499 / 11.590 / 13.844 |
+| GPU sun depth | 0.077 / 0.080 / 0.089 | 0.078 / 0.083 / 0.084 |
+| GPU sky, refreshes only | 0.751 / 1.165 / 1.170 | 0.675 / 0.681 / 0.807 |
+| GPU HDR scene/resolve | 1.181 / 1.280 / 1.506 | 1.509 / 1.540 / 1.549 |
+| GPU display/HUD | 0.027 / 0.028 / 0.036 | 0.026 / 0.027 / 0.027 |
+| GPU total | 1.430 / 1.545 / 2.335 | 1.636 / 1.670 / 2.294 |
+
+CPU counts are 3,253 / 2,929, completed GPU counts 3,251 / 2,927, zero dropped GPU samples;
+83 / 82 sky refreshes versus 3,170 / 2,847 cache hits. Maximum CPU wall is 17.443 / 17.345 ms,
+maximum GPU total 3.031 / 2.686 ms; initial streaming 51.9 / 56.2 ms. These are consecutive
+observations, not a controlled causal speedup comparison. Earlier first/repeat runs before the
+resize/CLI/telemetry review fixes gave 1× GPU total p95/p99 1.996/2.414 and 1.747/2.345 ms;
+4× gave 2.111/2.656 and 1.699/2.319 ms. Their CPU-wall p99 values were 16.925/13.957 and
+16.689/13.755 ms respectively. The variation is retained, not attributed to MSAA performance gains.
+
+Two final thirty-second `--msaa 4 --lighting-stress` runs keep sixteen synthetic casters moving
+and orbit the camera without destroying the scene. Every rendered frame rebuilds all sixteen sky
+views. This is rendering-only, not networked-player simulation, collision or sustained combat.
+The last frame has 92 chunks / one body / sixteen instances visible, 94 world draws, 130 sun-depth
+draws and 1,720 sky-depth draws.
+
+| Timing | First 30 s | Repeat 30 s |
+| --- | --- | --- |
+| CPU frame wall | 3.426 / 10.017 / 13.383 | 3.474 / 9.907 / 13.267 |
+| GPU sun depth | 0.073 / 0.077 / 0.091 | 0.073 / 0.086 / 0.092 |
+| GPU sky, refreshed every frame | 0.677 / 0.691 / 0.830 | 0.689 / 0.802 / 0.858 |
+| GPU HDR scene/resolve | 1.209 / 1.315 / 1.501 | 1.267 / 1.430 / 1.522 |
+| GPU display/HUD | 0.026 / 0.026 / 0.033 | 0.026 / 0.031 / 0.033 |
+| GPU total | 1.990 / 2.079 / 2.475 | 2.043 / 2.372 / 2.529 |
+
+The telemetry ceiling is now 16,384 per metric. These final distributions include **all completed
+samples from each run**, not just the final 4,096: CPU 6,340 / 6,367, GPU 6,338 / 6,365. The last
+two asynchronous readbacks are not drained on exit; zero samples were dropped by the ring.
+There are 6,340 / 6,367 depth rebuilds and no cache hits. CPU maxima are 18.669 / 20.081 ms,
+GPU-total maxima 2.523 / 2.567 ms; streaming 50.2 / 57.3 ms. The earlier candidate's last-4,096
+stress GPU p95/p99 was 2.120/2.135 ms; that narrower window is not substituted for the full runs.
+
+The declared local 4× promotion gate, representative plus stress GPU p95 ≤8.33 ms and p99 ≤16.67 ms,
+passes. It does **not** certify 1080p, whole-frame CPU pacing, large battles, other GPUs or other OSes.
+Cold-cache, allocation-count, sustained authority-tick, combat bandwidth and correction-rate gates
+remain unmeasured in this graphics increment.
+
+### Memory, regression gates and real presentation
+
+At 1,440×900, target texel storage is exactly 15,552,000 bytes at 1× and 72,576,000 at 4×;
+the latter includes single-sample resolved HDR, multisample HDR and matching depth. The common
+8,388,608-pixel cap limits one 4× set to 448 MiB. Old and candidate sets can coexist during resize;
+nonblocking queue drain prevents an unbounded chain of in-flight retired sets. These are not total
+VRAM budgets: sky visibility (64 MiB), material/environment arrays, geometry, swapchain and driver
+allocations are additional. Two separate eight-second fresh launcher processes recorded peak child
+RSS 264,792 / 264,644 KiB at 1×/4× (`resource.getrusage(RUSAGE_CHILDREN)`). This is whole-process
+resident CPU memory, not isolated renderer memory or evidence that 4× reduces memory use.
+
+Final debug and release matrices each passed 365 ordinary tests (268 library, 14 binary, 83
+integration); six normally ignored hardware tests were separately run successfully in each profile.
+New fixtures use production targets, resolve and display shaders, independent CPU expectations,
+actual per-sample radiance, real polygon coverage, NaN/Inf bit inputs, odd dimensions, HUD transfer
+and a cleared next frame. Existing sky/material assertions still pass. Formatting, strict
+all-target Clippy, named network/secure transport/authority/process/OIDC suites and 21 offline
+tooling tests pass. The pixel fixtures do not inject actual surface/device loss or certify other
+backends.
+
+A real owned XWayland window passed 900×600 → 1,280×720 → 900×600, rejected 5,000×3,000 before
+allocating HDR targets, restored 900×600, then accepted 1,440×900 and exited cleanly. KWin initially
+clamped the large request to 1,920×1,142, so the negative test temporarily set override-redirect on
+only this disposable PID-selected window. The recovery screenshot was inspected. No compositor,
+driver or desktop-wide setting changed. Resize/capture timings are excluded from performance tables.
+
+The final eight-second structural lab applied partial damage at 1.005 s, committed one automatic
+cut across three assessments, drained its queue and left both bodies asleep with no failure or
+overflow. GPU total was 0.544/0.666/0.672 ms, CPU wall 1.572/11.341/15.039 ms; 68 sky rebuilds and
+2,530 hits. The ordinary five-second 4× smoke streamed 128 chunks / 48,736 faces in 52.3 ms;
+CPU wall 2.678/13.785/14.671 ms, GPU total 1.603/1.713/2.256 ms, 1,005 CPU / 1,003 GPU samples,
+zero drops. Neither small functional case replaces the representative stress workload.
+
+The final two-client graphical QUIC/TLS test mixed 1× and 4× at 1,280×800. Both twelve-second
+clients saw one remote player and two world deltas; deliberate first-delta loss on the 1× client
+required one successful repair. Transport drops were zero. The finite loopback server completed
+1,500 ticks, admitted two sessions and accepted two commands with zero malformed input, admission
+failure, protocol rejection or queue drop. At client exit three predicted inputs and one/two mesh
+jobs remained pending; this is not a proof that every asynchronous queue drained. Existing core
+fingerprint/process tests separately prove convergence. All six ephemeral credential/config files
+and their empty private directory were removed after the run; no active service was touched.
+
+The required CPU fixtures were rerun serially after every benchmark binary had finished rebuilding:
+
+| Fixture | p50 / p95 / p99 ms | Additional evidence |
+| --- | --- | --- |
+| Destruction, 500 events | 0.014 / 0.292 / 0.579 | 29,631 changes; 908 frames / 0.567 MiB; replicas agree |
+| Detached slab, 100 iterations, combined | 4.233 / 4.354 / 4.425 | 8,192 voxels; max 4.656 ms |
+| Physics, 1,024 bodies / 300 ticks | 0.543 / 1.154 / 1.190 | max 1.224 ms; all bodies asleep |
+| Snapshot, 20 iterations, total | 12.239 / 12.736 / 13.656 | 1,181 frames / 1.351 MiB |
+
+The preceding mandatory batch rebuilt each CPU binary immediately before running it; destruction
+p99 was 0.459 ms, slab 4.640, physics 1.275 and snapshot 14.152. Neither batch establishes a
+simulation speedup or worst-case server tick. Simulation code is unchanged in this increment.
+
+RenderDoc 1.45 captured and replayed the final real Vulkan frame: 333,580,053 bytes, 204 draws,
+fourteen textures, below the existing finite 512 MiB file cap. Its actual thumbnail was inspected;
+frame 120 is a cached-sky frame, not the stress refresh-cost measurement. Captures remain visibly
+coarse, with angular lighting bands and missing interior bounce; no generated image is presented
+as runtime evidence. Raw logs/captures are in `/tmp/fps-hdr-msaa-6EruN1/` and ignored
+`target/tooling/renderdoc-e29v4fmy/`, not Git or shipping assets.
+
+Claude's single analysis and final review confirmed the color/resolve evidence and identified the
+oversize-resize exit, one-second blocking poll, missing multiplayer 1× option and partial telemetry
+window. Codex replaced those with last-valid-window restoration, deferred nonblocking resizing,
+explicit CLI parity and the larger bounded sample window, then reran the gates above. The alleged
+possible depth consumer was checked in source: scene depth is used only by the HDR scene pass.
+Actual surface loss remains missing coverage. No second review loop was run; follow-up changes and
+documentation were validated locally. No new dependency, tool installation or permission change
+was needed for this increment.
+
 ## 2026-09-06 — dynamic distant-sky visibility
 
 Source: parent `2e549ae` plus the directional-visibility increment. Sixteen world-space depth views

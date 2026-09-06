@@ -65,9 +65,7 @@ impl Fixture {
         let sky = SkyVisibility::new(&device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("production sky receiver test"),
-            source: wgpu::ShaderSource::Wgsl(
-                format!("{}\n{HARNESS}", include_str!("../../shaders/world.wgsl")).into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(format!("{}\n{HARNESS}", super::super::SHADER).into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: None,

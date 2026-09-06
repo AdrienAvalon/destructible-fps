@@ -6,6 +6,11 @@ future deliberate updates; it is not permission to alter Codex access, host secu
 drivers, infrastructure services, buy subscriptions, or publish captures. Prefer signed distribution
 packages or reviewed upstream sources, bounded tests and reversible changes over automatic updates.
 
+The planned [agent-callable interface](agent-tooling.md) wraps implemented operations with structured
+jobs and evidence; it is not yet installed or registered as an MCP server. The in-game
+[adaptive director](adaptive-director.md) is a separate, restricted runtime interface and must never
+inherit these development tools or their filesystem/process capabilities.
+
 ## Verified installation, 2026-09-05
 
 | Tool | Installed version | Actual validation | Remaining integration |
@@ -64,15 +69,18 @@ python tools/tooling_smoke.py renderdoc
 python tools/tooling_smoke.py renderdoc --world industrial
 cargo build --locked --release --bin fine-geometry-demo
 python tools/tooling_smoke.py renderdoc --world fine-inspection
+python tools/tooling_smoke.py renderdoc --world fine-industrial
 python tools/tooling_smoke.py blender
 python tools/tooling_smoke.py tracy
 python -m unittest discover -s tools -p 'test_*.py'
 shellcheck tools/tracy_viewer.sh
 ```
 
-RenderDoc accepts only the fixed `range` (default), `industrial` and `fine-inspection` scenes. The
-last selects the explicit `fine-geometry-demo` binary and captures frame 180; other scenes retain
-`playable-demo` and frame 120. See [`fine-rendering.md`](fine-rendering.md) for its non-gameplay scope.
+RenderDoc accepts only the fixed `range` (default), `industrial`, `fine-inspection` and
+`fine-industrial` scenes. The fine scenes select the explicit `fine-geometry-demo` binary and
+capture frames 180/400 respectively; the industrial fine smoke runs for twelve seconds so its
+bounded bootstrap and all stages can complete. Other scenes retain `playable-demo` and frame 120.
+See [`fine-rendering.md`](fine-rendering.md) for the authored fine scenes' non-gameplay scope.
 The launcher rejects
 paths, arbitrary names and `--world` on other tools; the capture helper maps the name to a literal
 game argument list. The industrial breach capture/replay on 2026-09-06 passed with Vulkan,

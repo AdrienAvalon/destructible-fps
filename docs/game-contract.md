@@ -32,6 +32,18 @@ runtime images and gameplay recordings demonstrate delivered image quality.
 | SAVE-01 | Every acknowledged persistent edit survives tested crash/restart and backup restoration | Mutation journal/checkpoint recovery and restore drills with client rejoin and canonical state verification |
 | OS-01 | Installable native clients and servers work on Linux, Windows and macOS with documented hardware tiers | Clean-machine installation, match, save/restore, update and rollback on each actual OS/backend |
 | TOOLS-01 | Content authoring, material cooking, map validation, profiling and distribution are reproducible and usable | Documented commands recreate a map, offline asset package and tested release from versioned sources |
+| TOOLS-02 | A reproducible map generator supports metric recipes, seeds, composable terrain/buildings and brief or photograph-guided authoring with explicit uncertainty | Regenerate identical geometry from a recipe; inspect a reference-guided map; reject invalid/oversized input; load, damage, save and restore the generated world |
+| TOOLS-03 | Versioned agent-callable tools support content creation, validation, native play/capture, profiling, replay and comparison without widening host or runtime authority | Actual connection discovers and runs implemented operations; verify structured evidence, bounded jobs, cancellation, stale/idempotent publication, scoped artifacts and failure reporting |
+| MODE-01 | A reusable FPS foundation separates engine, gameplay capabilities, authored content and mode rules for solo, cooperative and competitive sessions | The same world interactions use the same authoritative physics locally and with multiple clients; mode templates change rules without copying or weakening simulation |
+| SCEN-01 | Authorable objectives, events and NPC encounters react to the destructible world and retain consistent progress | Play an authored breach/encounter/objective sequence; verify NPC reaction, bounded event execution, duplicate suppression, late join and save/restart of both geometry and scenario state |
+| AI-01 | Optional adaptive direction changes NPC goals, scenario branches and supported world events through server-validated proposals while the game remains playable without inference | Opt-in native scenario with malformed/stale/duplicate proposal rejection, filtered observations, provider-down fallback, recorded-decision replay and matching multi-client/save-restore state |
+| AI-02 | Interchangeable tested local or remote model adapters preserve the same gameplay contract, privacy rules and resource budgets | Run one conformance scenario on two backends; prove capability rejection, shared-resource frame/tick budgets, local-only egress, no implicit paid fallback and explicit disable |
+
+Reusable content and scenario boundaries are described in [`gameplay-authoring.md`](gameplay-authoring.md).
+They are acceptance requirements, not a claim that generalized NPC AI or a scenario editor already exists.
+The same distinction applies to [agent-callable tools](agent-tooling.md) and the optional
+[adaptive director and backend interface](adaptive-director.md). These additions do not replace
+the native photorealism, material destruction, structural physics or multiplayer gates.
 
 "Everything destructible" requires meaningful physical outcomes. A small projectile may mark steel
 without penetrating it, while sufficient cumulative damage or an appropriate explosive can sever

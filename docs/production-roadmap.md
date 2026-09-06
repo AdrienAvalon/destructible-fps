@@ -37,6 +37,27 @@ developer impressions are never release evidence.
 
 ## Delivery sequence
 
+The production authoring scope also includes a reproducible, brief- and photograph-guided
+[map generator](map-generation.md), sharing the game's destructible material geometry. Its recipe,
+terrain, building, reference-analysis and export gates are tracked separately from the renderer.
+The reusable [gameplay/scenario layer](gameplay-authoring.md) adds mode templates, objectives,
+events and NPC encounters for solo, co-op and competitive use of the same authoritative core.
+The [agent-callable production interface](agent-tooling.md) covers creating, validating, playing,
+capturing, profiling and replaying content. A separate [optional adaptive director](adaptive-director.md)
+can propose NPC goals, scenario branches and supported world events through server validation.
+Its backend contract admits tested local models or explicitly enabled APIs, with a no-model fallback,
+no implicit paid-cloud switch and no developer rights exposed to in-game actors. These are planned
+requirements (TOOLS-02/03, MODE-01, SCEN-01, AI-01/02), not delivered integrations.
+Additional [design experiments](destruction-design-lab.md) are ranked hypotheses with promotion gates,
+not claims of new inventions or permission to postpone the native photorealistic destruction slice.
+
+| Added requirement | Owning exit gate | Relationship to the next visual demo |
+| --- | --- | --- |
+| MODE-01, SCEN-01 | Stage 4: shared mode/scenario runtime; Stage 5 supplies reusable authoring | Do not block the ongoing renderer/destruction slice on a general editor |
+| TOOLS-02 | Stage 5: seeded/reference-guided map authoring and playable export | Start after the existing industrial geometry integration |
+| TOOLS-03 | Stage 5: actual agent connection, bounded jobs and inspectable evidence | A single existing capture operation can be exposed earlier |
+| AI-01, AI-02 | Stage 5 adaptive extension, after Stage 4 NPC/scenario and recorded-event foundations | Optional to players, required for the agreed full product scope, not a prerequisite for the next visual demo |
+
 ### Stage 0 — deterministic playable foundation (delivered)
 
 - sparse 16³ multi-material chunks and integer destruction;
@@ -56,8 +77,9 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
 
 - bounded exact fine/uniform surface extraction with canonical shared edge subdivisions, explicit
   output/work failures and precision bounds, immutable worker delivery and a real native four-stage
-  inspection viewer (delivered; see `fine-rendering.md`); smooth-terrain transitions, authoritative
-  weapon/body/network activation and photoreal scene acceptance remain separate gates;
+  inspection viewer, one-cell exact collar to the existing smooth terrain, and bounded incremental
+  industrial-scene inspection (delivered; see `fine-rendering.md`); authoritative weapon/body/network
+  activation and photoreal scene acceptance remain separate gates;
 
 - real GPU timestamp queries and bounded CPU/GPU p50/p95/p99 telemetry (delivered; automated budget
   comparison remains);
@@ -255,11 +277,26 @@ impairment profile; four graphical clients remain synchronized through join, dam
 - bots able to traverse, attack, build, and re-plan after topology changes.
 
 Exit gate: a complete four-player match can start, finish, restart, and persist its intended world
-changes with no manual repair or authoritative divergence.
+changes with no manual repair or authoritative divergence. MODE-01 and SCEN-01 additionally require
+the same core interactions in local solo/co-op, one authored NPC/objective sequence, bounded event
+execution and late-join/save-restore progress. Model-driven adaptation is a separate Stage 5 gate.
 
 ### Stage 5 — world and asset toolchain
 
 - versioned material, weapon, structure, biome, and game-mode schemas;
+- bounded seeded map recipes and brief/reference-guided generation with explicit scale/uncertainty;
+- scenario graph/entity authoring, reusable mode templates and NPC encounter definitions backed by
+  implemented capabilities, with event budgets, replicated progress and save/restart acceptance;
+- optional adaptive NPC/scenario direction above ordinary fixed-step gameplay, with bounded filtered
+  observations, typed proposals, deterministic server policy and recorded accepted-decision replay;
+  prove the no-model fixture first, then two interchangeable backends, including local inference;
+- explicit participant opt-in, provider-down fallback, disabled-mode behavior and fixed disclosed
+  competitive rules; measure concurrent inference/combat costs before enabling adaptation;
+- structured agent/human tool operations with scoped artifacts, asynchronous bounded jobs,
+  cancellation and atomic candidate publication; optional MCP connection verified end to end with
+  actual native output, not merely registered configuration;
+- seeded automated play/stress fixtures and full gameplay incident replay, separate from GPU frame
+  replay; compare canonical decisions/state without asking an AI to regenerate the same answer;
 - importer/cooker for standard source assets with deterministic derived artifacts and content hashes;
 - native world editor for voxel sculpting, modular construction, support visualization, lighting,
   spawn/navigation markup, and play-in-editor;
@@ -269,7 +306,10 @@ changes with no manual repair or authoritative divergence.
 - migration tools for saved worlds and authored content.
 
 Exit gate: a new map can be authored, validated, cooked, hosted, joined, and restored using only
-documented tools and source assets.
+documented tools and source assets (TOOLS-02). TOOLS-03 requires actual agent discovery/invocation,
+bounded job cancellation and native artifact readback. The adaptive extension passes AI-01/02 only
+with the director's recorded-decision, consent, authority and resource fixtures on two backends,
+including local inference and no-model fallback; merely installing a runner does not pass.
 
 ### Stage 6 — photorealistic environments
 
@@ -283,6 +323,10 @@ documented tools and source assets.
 - scalable indirect lighting/reflections with explicit quality tiers and stable temporal behavior;
 - photogrammetry-friendly capture pipeline with aggressive runtime virtualization and LOD;
 - art direction and readability review so realism never hides players, hazards, or build affordances.
+- coherent intact/damaged/collapsed/repaired material presentation and shared breach consequences
+  for lighting, sound and traversal, promoted from the bounded design experiments;
+- temporal disocclusion, surface closure, rubble contact and competitive/accessibility checks across
+  quality tiers; visual detail reductions must not alter authoritative cover or structural behavior.
 
 Exit gate: representative indoor, outdoor, construction, and collapse scenes pass image-quality,
 temporal-stability, and frame-budget reviews on every quality tier.
@@ -338,6 +382,12 @@ See [`industrial-world.md`](industrial-world.md) and the dated performance evide
    in the same two-client build/breach loop (FPS-01, DEST-01/02/03, PHYS-01, BUILD-01, SYNC-01);
 3. advance authored industrial content, lighting, temporal stability, rubble/dust and first-person
    presentation until the runtime scene approaches the visual reference (VIS-01, FPS-01).
+
+Prepare authoring and agent interfaces alongside these slices only where they reuse an implemented
+engine capability. Start with one real inspection/capture operation, then gameplay replay, seeded
+map recipes and authored scenarios. Adaptive live AI follows the no-model scenario and validation
+gates; model installation, cloud spending and infrastructure changes are not prerequisites for the
+next visual demo. Keep the design-lab backlog subordinate to the priorities above.
 
 Before exposing a non-loopback server, automated certificate issuance, platform service permissions,
 production OIDC trust provisioning and the [`remote attack/failure matrix`](remote-exposure-gate.md)

@@ -168,14 +168,26 @@ pub(super) fn bay_debris(source: &RefinedWorld) -> Result<RefinedWorld, Box<dyn 
 pub(super) fn surface_finishes(
     source: &RefinedWorld,
 ) -> Result<super::super::finishes::SurfaceFinishes, super::super::FineMeshError> {
-    let mut positions: Vec<_> = SHARDS
+    use super::super::finishes::{FinishPolicy, SurfaceFinishes};
+    let mut policies: Vec<_> = SHARDS
         .iter()
-        .chain(bay_shards().iter())
-        .map(|s| s.cell)
+        .map(|s| (s.cell, FinishPolicy::CutTop))
         .collect();
-    positions.extend(super::bay::cut_top_cells(source));
-    positions.sort_unstable();
-    super::super::finishes::SurfaceFinishes::cut_tops(source, &positions)
+    policies.extend(bay_shards().iter().map(|s| {
+        // These upright authored chunks retain their courtyard-facing masonry skin.
+        // Other exposed sides are cut core; this is not inferred dynamic fracture history.
+        (
+            s.cell,
+            FinishPolicy::CutTopAndSides(crate::volume::surface::Face::PositiveZ),
+        )
+    }));
+    policies.extend(
+        super::bay::cut_top_cells(source)
+            .into_iter()
+            .map(|p| (p, FinishPolicy::CutTop)),
+    );
+    policies.sort_by_key(|&(p, _)| p);
+    SurfaceFinishes::with_policies(source, &policies)
 }
 
 fn place(

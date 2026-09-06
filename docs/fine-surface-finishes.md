@@ -3,6 +3,8 @@
 This receipt describes the original twenty-piece rollout. The subsequent
 [bay profile revision](industrial-bay-profile.md) extends the same bounded registry to authored
 facade caps and records its intentional source-layout changes and new scene fingerprints.
+The later [fragment-face policies](fragment-face-finishes.md) add explicit retained sides and
+version the appearance key without changing those physical scene fingerprints.
 
 ## Separate appearance from material integrity
 

@@ -40,6 +40,9 @@ bounded translation-only blending, retaining the physical texture scale and coll
 The [asymmetric bay revision](industrial-bay-profile.md) replaces the straight V profile with
 chipped shoulders and removes the thin bridge over the passage in actual collision geometry.
 
+The [fragment-face finish revision](fragment-face-finishes.md) distinguishes the retained facade
+skin from exposed cut sides on the large authored debris, without changing its physical geometry.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after

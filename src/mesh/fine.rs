@@ -225,11 +225,11 @@ impl<G: StaticGeometry> Builder<'_, G> {
         transition: [bool; 6],
     ) -> Result<(), FineMeshError> {
         self.charge(6)?;
-        let cut_top = self
+        let finish_policy = self
             .finishes
-            .map(|s| s.contains(p, self.work))
+            .map(|s| s.policy(p, self.work))
             .transpose()?
-            .unwrap_or(false);
+            .flatten();
         let volume = page(cell);
         let neighbors = std::array::from_fn::<_, 6, _>(|i| {
             let mut v = [p.x, p.y, p.z];
@@ -277,7 +277,11 @@ impl<G: StaticGeometry> Builder<'_, G> {
             }
             let center = std::array::from_fn(|i| (lo[i] as f32 + hi[i] as f32) / 512.0);
             let normal = normals::shading_normal(quad, terrace, &volume, self.work)?;
-            let finish = if cut_top && normal[1] > 0.5 {
+            if finish_policy.is_some() {
+                self.charge(4)?;
+            }
+            let finish = if finish_policy.is_some_and(|policy| policy.marks(quad.face(), normal[1]))
+            {
                 finishes::CUT_CORE_MARKER
             } else {
                 -1.0

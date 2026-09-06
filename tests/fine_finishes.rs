@@ -3,7 +3,7 @@ use destructible_fps::{
     IVec3, Material,
     mesh::fine::{
         FineMeshError, FineMeshLimits,
-        finishes::{CUT_CORE_MARKER, MAX_FINISH_CELLS, SurfaceFinishes},
+        finishes::{CUT_CORE_MARKER, FinishPolicy, MAX_FINISH_CELLS, SurfaceFinishes},
         fixture::{
             industrial_inspection_world, industrial_patch_positions, industrial_surface_finishes,
         },
@@ -59,7 +59,34 @@ fn authored_finishes_change_only_markers_and_never_mix_inside_triangles() {
                 }
                 for vertex in &mut b.vertices {
                     if vertex.fracture_depth.to_bits() == CUT_CORE_MARKER.to_bits() {
-                        assert!(vertex.normal[1] > 0.5);
+                        if vertex.normal[1] <= 0.5 {
+                            // An independent explicit authoring oracle, not the production list.
+                            // Rubble footprints stay strictly inside their x/z source cell.
+                            assert!(vertex.normal[0].abs() > 0.99 || vertex.normal[2] < -0.99);
+                            assert!((1.0..2.0).contains(&vertex.position[1]));
+                            assert!(
+                                [
+                                    (-19_i16, 16_i16),
+                                    (-18, 16),
+                                    (-16, 16),
+                                    (-12, 16),
+                                    (-11, 17),
+                                    (-18, 17),
+                                    (-17, 18),
+                                    (-16, 18),
+                                    (-14, 18),
+                                    (-12, 19),
+                                    (-14, 20),
+                                    (-18, 21),
+                                ]
+                                .into_iter()
+                                .any(|(x, z)| {
+                                    (f32::from(x)..f32::from(x + 1)).contains(&vertex.position[0])
+                                        && (f32::from(z)..f32::from(z + 1))
+                                            .contains(&vertex.position[2])
+                                })
+                            );
+                        }
                         assert!(
                             vertex.material == u32::from(Material::Brick as u8)
                                 || vertex.material == u32::from(Material::Concrete as u8)
@@ -232,4 +259,14 @@ fn finish_leaf_budget_cannot_be_bypassed_with_valid_unique_pages() {
             > destructible_fps::mesh::fine::finishes::MAX_FINISH_LEAVES
     );
     assert!(SurfaceFinishes::cut_tops(state.world(), &positions).is_err());
+    let policies: Vec<_> = positions
+        .into_iter()
+        .map(|p| {
+            (
+                p,
+                FinishPolicy::CutTopAndSides(destructible_fps::volume::surface::Face::PositiveZ),
+            )
+        })
+        .collect();
+    assert!(SurfaceFinishes::with_policies(state.world(), &policies).is_err());
 }

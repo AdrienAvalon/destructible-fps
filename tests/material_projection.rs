@@ -1,9 +1,10 @@
 //! Executes the production WGSL helpers, not a CPU reimplementation of the shader.
 //! Run explicitly with `cargo test --test material_projection -- --ignored` on a Vulkan GPU.
 
+use destructible_fps::{environment::EnvironmentLibrary, render::create_environment};
 use glam::{Mat4, Vec3, Vec4};
 
-const OUTPUT_BYTES: u64 = 21 * 16;
+const OUTPUT_BYTES: u64 = 42 * 16;
 const HARNESS: &str = r"
 @group(0) @binding(7) var<storage, read_write> results: array<vec4<f32>>;
 
@@ -27,6 +28,24 @@ fn validate_material_projection() {
         vec4<f32>(-3.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, 4.0, 0.0),
         vec4<f32>(7.0, 11.0, 13.0, 1.0));
     results[20] = vec4<f32>(normalize(normal_transform(model) * curved), 0.0);
+    // Deliberately asymmetric off-axis directions catch face flips invisible at face centers.
+    let directions = array<vec3<f32>, 6>(vec3<f32>(1.0, -0.25, -0.5), vec3<f32>(-1.0, -0.25, 0.5),
+        vec3<f32>(0.5, 1.0, 0.25), vec3<f32>(0.5, -1.0, -0.25),
+        vec3<f32>(0.5, -0.25, 1.0), vec3<f32>(-0.5, -0.25, -1.0));
+    for (var face = 0u; face < 6u; face = face + 1u) {
+        let direction = normalize(directions[face]);
+        results[21u + face] = vec4<f32>(atmosphere(direction), 0.0);
+        results[27u + face] = vec4<f32>(environment_lighting(direction, direction,
+            vec3<f32>(1.0), 0.0, 1.0, 1.0), 0.0);
+        results[33u + face] = vec4<f32>(textureSampleLevel(environment_specular, environment_sampler,
+            direction, f32(face)).rgb, 0.0);
+    }
+    results[39] = vec4<f32>(environment_lighting(vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.5), 1.0, 0.0, 0.0), 0.0);
+    results[40] = vec4<f32>(environment_lighting(vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.5), 1.0, 1.0, 1.0), 0.0);
+    results[41] = vec4<f32>(textureSampleLevel(environment_specular, environment_sampler,
+        vec3<f32>(1.0, 0.0, 0.0), 6.0).rgb, 0.0);
 }
 ";
 
@@ -60,9 +79,42 @@ fn execute_shader(device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<[f32; 4]> {
         label: Some("production material shader with compute assertions"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
+    let (environment_layout, environment_group) = create_environment(device, queue).unwrap();
+    let output_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[],
+    });
+    let empty = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &empty_layout,
+        entries: &[],
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[
+            Some(&output_layout),
+            Some(&empty_layout),
+            Some(&empty_layout),
+            Some(&environment_layout),
+        ],
+        immediate_size: 0,
+    });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("material projection validation"),
-        layout: None,
+        layout: Some(&layout),
         module: &shader,
         entry_point: Some("validate_material_projection"),
         compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -93,6 +145,9 @@ fn execute_shader(device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<[f32; 4]> {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bindings, &[]);
+        pass.set_bind_group(1, &empty, &[]);
+        pass.set_bind_group(2, &empty, &[]);
+        pass.set_bind_group(3, &environment_group, &[]);
         pass.dispatch_workgroups(1, 1, 1);
     }
     encoder.copy_buffer_to_buffer(&result, 0, &readback, 0, OUTPUT_BYTES);
@@ -129,6 +184,7 @@ fn assert_vector(actual: [f32; 4], expected: Vec4) {
 fn production_shader_preserves_signed_projection_and_transformed_normals() {
     let (device, queue) = pollster::block_on(gpu());
     let values = execute_shader(&device, &queue);
+    validate_environment(&values);
     let normals = [
         Vec3::X,
         Vec3::NEG_X,
@@ -163,5 +219,85 @@ fn production_shader_preserves_signed_projection_and_transformed_normals() {
             .transform_vector3(curved)
             .normalize()
             .extend(0.0),
+    );
+}
+
+fn half_value(bytes: &[u8]) -> f32 {
+    let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
+    let exponent = i32::from((bits >> 10) & 31);
+    let fraction = f32::from(bits & 1023);
+    if exponent == 0 {
+        fraction * 2_f32.powi(-24)
+    } else {
+        (1024.0 + fraction) * 2_f32.powi(exponent - 25)
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn face_sample(data: &[u8], edge: usize, face: usize) -> Vec4 {
+    // Independent CPU bilinear sample at u=+0.5,v=+0.25 in the selected WebGPU face.
+    let x = 0.75_f32.mul_add(edge as f32, -0.5);
+    let y = 0.625_f32.mul_add(edge as f32, -0.5);
+    let ix = x.floor() as usize;
+    let iy = y.floor() as usize;
+    let tx = x.fract();
+    let ty = y.fract();
+    let pixel = |dx: usize, dy: usize| {
+        let start = ((face * edge + (iy + dy).min(edge - 1)) * edge + (ix + dx).min(edge - 1)) * 8;
+        Vec4::new(
+            half_value(&data[start..]),
+            half_value(&data[start + 2..]),
+            half_value(&data[start + 4..]),
+            0.0,
+        )
+    };
+    pixel(0, 0)
+        .lerp(pixel(1, 0), tx)
+        .lerp(pixel(0, 1).lerp(pixel(1, 1), tx), ty)
+}
+
+fn validate_environment(values: &[[f32; 4]]) {
+    let library = EnvironmentLibrary::embedded().unwrap();
+    for face in 0..6 {
+        let actual = Vec4::from_array(values[21 + face]);
+        let expected = face_sample(library.sky(), 256, face);
+        assert!(
+            actual.abs_diff_eq(expected, 0.002),
+            "sky face {face}: {actual:?} != {expected:?}"
+        );
+        let mirror = Vec4::from_array(values[27 + face]);
+        let reflected = face_sample(library.specular(), 64, face);
+        assert!(
+            mirror.abs_diff_eq(reflected, 0.004),
+            "mirror face {face}: {mirror:?} != {reflected:?}"
+        );
+        // Verify every non-final mip's upload ordering, not only the base mirror image.
+        let offset: usize = (0..face).map(|mip| 6 * (64_usize >> mip).pow(2) * 8).sum();
+        let filtered = face_sample(&library.specular()[offset..], 64 >> face, face);
+        let actual = Vec4::from_array(values[33 + face]);
+        assert!(
+            actual.abs_diff_eq(filtered, 0.002),
+            "prefilter mip {face}: {actual:?} != {filtered:?}"
+        );
+    }
+    assert_vector(values[39], Vec4::ZERO);
+    let final_mip = &library.specular()[library.specular().len() - 48..];
+    assert_vector(
+        values[41],
+        Vec4::new(
+            half_value(final_mip),
+            half_value(&final_mip[2..]),
+            half_value(&final_mip[4..]),
+            0.0,
+        ),
+    );
+    assert!(
+        values[40]
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0 && *v < 6.0)
     );
 }

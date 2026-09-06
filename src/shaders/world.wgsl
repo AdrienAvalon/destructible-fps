@@ -28,6 +28,12 @@ struct MaterialScales {
 @group(2) @binding(3)
 var<uniform> material_scales: MaterialScales;
 
+@group(3) @binding(0) var environment_sky: texture_cube<f32>;
+@group(3) @binding(1) var environment_diffuse: texture_cube<f32>;
+@group(3) @binding(2) var environment_specular: texture_cube<f32>;
+@group(3) @binding(3) var environment_brdf: texture_2d<f32>;
+@group(3) @binding(4) var environment_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -383,29 +389,30 @@ fn fresnel_schlick(cosine: f32, reflectance_at_normal: vec3<f32>) -> vec3<f32> {
 }
 
 fn atmosphere(direction: vec3<f32>) -> vec3<f32> {
-    let ray = normalize(direction);
-    let sun_direction = normalize(-globals.sun_fog.xyz);
-    let elevation = clamp(ray.y * 0.5 + 0.5, 0.0, 1.0);
-    let zenith = vec3<f32>(0.105, 0.215, 0.39);
-    let horizon = vec3<f32>(0.51, 0.58, 0.64);
-    var color = mix(horizon, zenith, pow(elevation, 0.62));
-    let sun_alignment = max(dot(ray, sun_direction), 0.0);
-    color = color + vec3<f32>(1.0, 0.77, 0.51) * pow(sun_alignment, 480.0) * 7.0;
-    color = color + vec3<f32>(0.52, 0.38, 0.24) * pow(sun_alignment, 18.0) * 0.20;
+    // World space, shared by sky, fog and reflections. Linear HDR, never sRGB-decoded.
+    return textureSampleLevel(environment_sky, environment_sampler, direction, 0.0).rgb;
+}
 
-    if ray.y > -0.08 {
-        let cloud_projection = ray.xz / max(ray.y + 0.24, 0.16);
-        let drift = vec2<f32>(globals.camera_time.w * 0.0025, globals.camera_time.w * 0.0011);
-        let cloud_field = fbm(cloud_projection * 0.42 + drift);
-        let cloud_mask = smoothstep(0.43, 0.64, cloud_field) * smoothstep(-0.04, 0.18, ray.y);
-        let lit_cloud = mix(vec3<f32>(0.34, 0.37, 0.40), vec3<f32>(0.88, 0.86, 0.80), pow(sun_alignment, 2.0));
-        color = mix(color, lit_cloud, cloud_mask * 0.72);
-    }
-    return color;
+fn environment_lighting(normal: vec3<f32>, view: vec3<f32>, albedo: vec3<f32>,
+    roughness: f32, metallic: f32, ao: f32) -> vec3<f32> {
+    let r = clamp(roughness, 0.0, 1.0);
+    let ndotv = clamp(dot(normal, view), 0.0, 1.0);
+    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+    let coefficients = textureSampleLevel(environment_brdf, environment_sampler,
+        vec2<f32>(ndotv, r), 0.0).rg;
+    let integrated_fresnel = f0 * coefficients.x + vec3<f32>(coefficients.y);
+    let diffuse_weight = max(vec3<f32>(0.0), vec3<f32>(1.0) - integrated_fresnel) * (1.0 - metallic);
+    let diffuse = textureSampleLevel(environment_diffuse, environment_sampler, normal, 0.0).rgb;
+    let reflection = reflect(-view, normal);
+    let last_mip = f32(textureNumLevels(environment_specular) - 1u);
+    let specular = textureSampleLevel(environment_specular, environment_sampler, reflection, r * last_mip).rgb;
+    // Diffuse map stores E/pi already. Local visibility is still the approximate vertex AO;
+    // this distant probe does not contain the building, moving debris or local reflections.
+    return (diffuse_weight * albedo * diffuse + integrated_fresnel * specular) * ao;
 }
 
 fn display_transform(linear_color: vec3<f32>) -> vec3<f32> {
-    var color = max(linear_color, vec3<f32>(0.0));
+    var color = max(linear_color, vec3<f32>(0.0)) * globals.display.y;
     color = (color * (2.51 * color + vec3<f32>(0.03)))
         / (color * (2.43 * color + vec3<f32>(0.59)) + vec3<f32>(0.14));
     if globals.display.x > 0.5 {
@@ -464,18 +471,14 @@ fn world_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
         / max(4.0 * normal_dot_view * normal_dot_light, 0.0001);
     let diffuse_weight = (vec3<f32>(1.0) - fresnel) * (1.0 - metallic);
     let direct_occlusion = mix(0.58, 1.0, ambient_occlusion);
-    let sun_radiance = vec3<f32>(3.75, 3.28, 2.66);
+    // Small artistic fill, not a second calibrated sun extracted from the overcast HDR.
+    // Each channel is <= 0.35 (less than 1/4 of this source's upper-hemisphere mean).
+    let sun_radiance = vec3<f32>(0.35, 0.33, 0.30);
     let direct = (diffuse_weight * albedo / 3.14159265 + specular)
         * sun_radiance * normal_dot_light * shadow * direct_occlusion;
 
-    let sky_factor = normal.y * 0.5 + 0.5;
-    let sky_irradiance = mix(vec3<f32>(0.045, 0.040, 0.035), vec3<f32>(0.22, 0.28, 0.36), sky_factor);
-    let ambient_fresnel = fresnel_schlick(normal_dot_view, reflectance_at_normal);
-    let ambient_diffuse = albedo * sky_irradiance * ambient_occlusion * (1.0 - metallic);
-    let ambient_specular = ambient_fresnel
-        * mix(vec3<f32>(0.025, 0.028, 0.032), vec3<f32>(0.15, 0.18, 0.22), 1.0 - roughness)
-        * ambient_occlusion;
-    var color = direct + ambient_diffuse + ambient_specular;
+    var color = direct + environment_lighting(normal, view_direction, albedo,
+        roughness, metallic, ambient_occlusion);
 
     let camera_to_surface = input.world_position - globals.camera_time.xyz;
     let distance_from_camera = length(camera_to_surface);

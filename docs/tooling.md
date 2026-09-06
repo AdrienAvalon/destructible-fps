@@ -158,6 +158,15 @@ CARGO_TARGET_DIR=target/profiling CARGO_PROFILE_RELEASE_DEBUG=1 \
 That symbol-rich build and per-function sampling remain follow-up work, not validated by the
 initial counter smoke. Keep diagnostic binaries and all traces out of shipping archives and Git.
 
+## HDR environment authoring
+
+`tools/cook_environment.py` prepares the fixed CC0 HDR sky, diffuse convolution, GGX roughness
+mips and BRDF lookup offline using the existing Python/zlib installation; no additional package,
+GPU compiler or runtime decoder is installed. Source hashes, bounded import, byte-for-byte rebuild
+and actual shader/cube-orientation validation are described in
+[`assets/environment/README.md`](../assets/environment/README.md). `--check` is read-only for the
+committed asset. Keep imports/convolution out of normal builds and frame/network paths.
+
 ## Review and validation boundary
 
 The advisory Claude analysis reinforced the explicit listener, lifecycle and provenance checks.

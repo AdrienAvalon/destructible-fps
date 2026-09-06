@@ -40,6 +40,9 @@ Generation prompt (built-in image generation):
   surface normals, with inverse-transpose support for scaled instances;
 - the sky reconstructs each view ray from the inverse view-projection matrix and shares its
   atmosphere with distance haze;
+- one CC0 HDR environment drives sky, diffuse convolution, GGX roughness-prefiltered reflections
+  and split-sum BRDF with shared exposure; offline cooking, bounded half-float packages and
+  real-GPU orientation/mip tests replace the former fixed ambient colors;
 - a fixed 3×3 PCF kernel softens the existing bounded 2,048² directional shadow map.
 - soil and stone now use crack-free Surface Nets while authored brick, concrete, wood, steel and
   glass preserve exact architectural edges;
@@ -63,8 +66,8 @@ Generation prompt (built-in image generation):
   spawn, authoritative shot corridor, voxel fingerprints, physics, or network formats.
 
 The generated concept is not shipped as a runtime texture. The game loads only the fixed local
-cooked pack, never the upstream JPEGs or live asset endpoints. See `../assets/materials/README.md`
-for provenance, reproduction and resource bounds. The initial 1K scans still visibly repeat on
+cooked packs, never upstream JPEG/HDR images or live asset endpoints. See `../assets/materials/README.md`
+and `../assets/environment/README.md` for provenance, reproduction and bounds. The initial scans still visibly repeat on
 large surfaces; material blending, authored scale variation and proper geometry remain necessary.
 
 ## Promotion order
@@ -79,8 +82,9 @@ large surfaces; material blending, authored scale variation and proper geometry 
 3. Asset/material pipeline (five scans, versioned arrays, bounded offline cooking and normal-aware
    mips delivered): add GPU block compression, material blending, larger libraries and residency/LOD
    tiers with deterministic fallbacks.
-4. Lighting/post: cascaded sun shadows, image-based sky lighting, reflection probes, HDR exposure,
-   temporal anti-aliasing, contact refinement and quality tiers.
+4. Lighting/post (offline image-based sky lighting and fixed shared exposure delivered): cascaded
+   sun shadows, local reflection/visibility probes, HDR postprocessing, temporal anti-aliasing,
+   contact refinement and quality tiers. Distant sky IBL alone does not occlude indoor light.
 5. World dressing: instanced vegetation, decals, drainage/puddles, terrain blending, props and sound
    without making gameplay targets unreadable.
 

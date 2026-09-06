@@ -5,6 +5,10 @@
 use crate::{
     BodyId, CHUNK_EDGE, FixedMicrometers3, IVec3, MAX_SERVER_PEERS, Material, PLAYER_HEIGHT_UM,
     PLAYER_RADIUS_UM, ReplicatedPlayerState, Voxel, World,
+    environment::{
+        DIFFUSE_EDGE, ENVIRONMENT_BYTES, EnvironmentLibrary, LUT_EDGE, SKY_EDGE, SPECULAR_EDGE,
+        SPECULAR_MIPS,
+    },
     material_library::{
         MATERIAL_TEXTURE_BYTES, MATERIAL_TEXTURE_EDGE, MATERIAL_TEXTURE_LAYERS,
         MATERIAL_TEXTURE_MIPS, MaterialLibrary,
@@ -31,6 +35,7 @@ const MAX_COMPLETED_GPU_SAMPLES: usize = 16;
 const BODY_INSTANCE_BYTES: u64 = 64;
 const PLAYER_INSTANCE_BYTES: u64 = BODY_INSTANCE_BYTES;
 const SHADER: &str = include_str!("shaders/world.wgsl");
+const SCENE_EXPOSURE: f32 = 0.75;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -273,6 +278,7 @@ pub struct Renderer {
     globals_bind_group: wgpu::BindGroup,
     shadow_sampling_bind_group: wgpu::BindGroup,
     material_bind_group: wgpu::BindGroup,
+    environment_bind_group: wgpu::BindGroup,
     gpu_profiler: Option<GpuProfiler>,
     chunks: HashMap<IVec3, GpuMesh>,
     bodies: HashMap<BodyId, GpuBody>,
@@ -346,7 +352,12 @@ impl Renderer {
             light_view_projection: Mat4::IDENTITY.to_cols_array_2d(),
             camera_time: [0.0; 4],
             sun_fog: [0.35, -0.90, 0.22, 0.0035],
-            display: [f32::from(!config.format.is_srgb()), 0.0, 0.0, 0.0],
+            display: [
+                f32::from(!config.format.is_srgb()),
+                SCENE_EXPOSURE,
+                0.0,
+                0.0,
+            ],
         };
         let globals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera and lighting globals"),
@@ -435,6 +446,7 @@ impl Renderer {
             ],
         });
         let (material_layout, material_bind_group) = create_material_library(&device, &queue)?;
+        let (environment_layout, environment_bind_group) = create_environment(&device, &queue)?;
         let world_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("world pipeline layout"),
@@ -442,6 +454,7 @@ impl Renderer {
                     Some(&globals_layout),
                     Some(&shadow_sampling_layout),
                     Some(&material_layout),
+                    Some(&environment_layout),
                 ],
                 immediate_size: 0,
             });
@@ -487,8 +500,8 @@ impl Renderer {
             write_mask: wgpu::ColorWrites::ALL,
         };
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("procedural atmosphere pipeline"),
-            layout: Some(&globals_pipeline_layout),
+            label: Some("offline HDR sky pipeline"),
+            layout: Some(&world_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("sky_vertex"),
@@ -708,6 +721,7 @@ impl Renderer {
             globals_bind_group,
             shadow_sampling_bind_group,
             material_bind_group,
+            environment_bind_group,
             gpu_profiler,
             chunks: HashMap::new(),
             bodies: HashMap::new(),
@@ -977,7 +991,12 @@ impl Renderer {
                 elapsed_seconds,
             ],
             sun_fog: [0.35, -0.90, 0.22, 0.0035],
-            display: [f32::from(!self.config.format.is_srgb()), 0.0, 0.0, 0.0],
+            display: [
+                f32::from(!self.config.format.is_srgb()),
+                SCENE_EXPOSURE,
+                0.0,
+                0.0,
+            ],
         };
         self.queue
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
@@ -1100,6 +1119,9 @@ impl Renderer {
             });
             pass.set_pipeline(&self.sky_pipeline);
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            pass.set_bind_group(1, &self.shadow_sampling_bind_group, &[]);
+            pass.set_bind_group(2, &self.material_bind_group, &[]);
+            pass.set_bind_group(3, &self.environment_bind_group, &[]);
             pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.world_pipeline);
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
@@ -1410,6 +1432,139 @@ fn material_library_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 count: None,
             },
         ],
+    })
+}
+
+/// Creates the fixed offline environment bindings, also used by the explicit Vulkan validation.
+///
+/// # Errors
+/// Returns an error when the embedded environment violates its size, digest or texel contract.
+pub fn create_environment(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(wgpu::BindGroupLayout, wgpu::BindGroup), String> {
+    let started = std::time::Instant::now();
+    let library = EnvironmentLibrary::embedded().map_err(|error| error.to_string())?;
+    let decoded_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    let texture = |label, edge, mips, cube, data: &[u8]| {
+        device
+            .create_texture_with_data(
+                queue,
+                &wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: edge,
+                        height: edge,
+                        depth_or_array_layers: if cube { 6 } else { 1 },
+                    },
+                    mip_level_count: mips,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::MipMajor,
+                data,
+            )
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(if cube {
+                    wgpu::TextureViewDimension::Cube
+                } else {
+                    wgpu::TextureViewDimension::D2
+                }),
+                ..Default::default()
+            })
+    };
+    let views = [
+        texture("HDR sky radiance", SKY_EDGE, 1, true, library.sky()),
+        texture(
+            "HDR diffuse E over pi",
+            DIFFUSE_EDGE,
+            1,
+            true,
+            library.diffuse(),
+        ),
+        texture(
+            "HDR GGX roughness prefilter",
+            SPECULAR_EDGE,
+            SPECULAR_MIPS,
+            true,
+            library.specular(),
+        ),
+        texture(
+            "split-sum BRDF coefficients",
+            LUT_EDGE,
+            1,
+            false,
+            library.brdf(),
+        ),
+    ];
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("linear clamped HDR environment"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        min_filter: wgpu::FilterMode::Linear,
+        mag_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    });
+    let layout = environment_layout(device);
+    let mut bindings: Vec<_> = (0..4)
+        .zip(&views)
+        .map(|(binding, view)| wgpu::BindGroupEntry {
+            binding,
+            resource: wgpu::BindingResource::TextureView(view),
+        })
+        .collect();
+    bindings.push(wgpu::BindGroupEntry {
+        binding: 4,
+        resource: wgpu::BindingResource::Sampler(&sampler),
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("offline HDR environment"),
+        layout: &layout,
+        entries: &bindings,
+    });
+    println!(
+        "Environnement HDR: pack {} octets, GPU {ENVIRONMENT_BYTES} octets; decodage {decoded_ms:.1} ms, \
+        preparation/envoi CPU {:.1} ms; exposition {SCENE_EXPOSURE}",
+        EnvironmentLibrary::packed_bytes(),
+        started
+            .elapsed()
+            .as_secs_f64()
+            .mul_add(1_000.0, -decoded_ms)
+    );
+    Ok((layout, group))
+}
+
+fn environment_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let mut entries: Vec<_> = (0..4)
+        .map(|binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: if binding == 3 {
+                    wgpu::TextureViewDimension::D2
+                } else {
+                    wgpu::TextureViewDimension::Cube
+                },
+                multisampled: false,
+            },
+            count: None,
+        })
+        .collect();
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: 4,
+        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    });
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("offline HDR environment layout"),
+        entries: &entries,
     })
 }
 

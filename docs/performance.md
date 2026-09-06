@@ -3,6 +3,75 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-06 — offline HDR environment lighting
+
+Source: parent `08aca03` plus the HDR environment increment. Rendering and asset tools only;
+voxel state, geometry, structural policy and wire protocols are unchanged. The fixed ambient colors
+become an offline CC0 HDR sky, diffuse E/pi, GGX roughness mips and split-sum BRDF with shared
+exposure 0.75. See [`environment contract`](../assets/environment/README.md) for provenance,
+approximations, layout and reproduction. This is not photorealistic fidelity or a full GI promotion.
+
+Same local Linux machine: i7-13700H, RTX 4050 Laptop, NVIDIA 610.57.04, CachyOS 7.2.2-1-cachyos,
+Rust 1.97.1, release. Authoring reference: Linux x86_64, glibc 2.44, Python 3.14.7, zlib-ng
+1.3.1.zlib-ng. Actual 1,440×900 desktop Vulkan presentation, no driver changes or clock locks.
+The representative `--showcase-closeup --smoke-seconds 12` contains 98,078 voxels, 128 chunks,
+48,684 faces, one sleeping body and two displayed player instances: 70 chunks/one body/two players
+visible, 72 world draws and 130 shadow draws. Two consecutive runs followed the normal five-second
+smoke; caches were **not** purged, so “first/repeat” below does not mean cold/warm hardware caches.
+
+| Timing in ms | First p50 / p95 / p99 | Repeat p50 / p95 / p99 |
+| --- | --- | --- |
+| CPU frame wall | 1.931 / 16.718 / 16.844 | 1.910 / 10.281 / 14.523 |
+| GPU shadows | 0.068 / 0.687 / 0.706 | 0.068 / 0.073 / 0.075 |
+| GPU world/HUD | 0.768 / 3.176 / 3.197 | 0.817 / 0.873 / 0.913 |
+| GPU total | 0.846 / 3.890 / 3.921 | 0.896 / 0.956 / 1.000 |
+
+CPU sample counts were 2,133/3,724; GPU 2,131/3,722, zero dropped samples. GPU maxima were
+3.983/1.011 ms; CPU maxima 28.185/16.758 ms. Frame wall includes surface/presentation waits and is
+not active CPU cost alone. Initial mesh streaming took 54.0/46.9 ms. The wide timing variation is
+retained, with no identified cause or speedup claim. This is a static breach view, not sustained
+combat, 32-player load, 1080p High certification or a cross-OS validation.
+
+The environment adds exactly 3,452,912 GPU texel bytes (3.29 MiB), excluding driver overhead, and a
+1,096,466-byte embedded compressed asset. Runtime CPU decode took 7.5/7.8 ms and CPU preparation/
+enqueue 0.7/0.7 ms. Those are startup costs, not GPU upload completion or per-frame work. Existing
+material arrays remain 55,924,040 bytes. No allocation-count or isolated VRAM delta was measured.
+A separate eight-second closeup process exited cleanly with Linux child peak RSS 264,184 KiB
+(257.99 MiB), obtained from `getrusage(RUSAGE_CHILDREN)` in a fresh launcher. This is whole-process
+resident memory, not the environment's incremental allocation or GPU memory. Its timings are not
+mixed into the table.
+
+Quiet required CPU baselines (serial, no simultaneous GPU capture, index build or other benchmark):
+
+| Fixture | p50 / p95 / p99 ms | Additional evidence |
+| --- | --- | --- |
+| Destruction, 500 events | 0.013 / 0.228 / 0.384 | 29,631 changes; 908 frames; 0.567 MiB; replicas agree |
+| Detached slab, 100 iterations, combined | 4.194 / 4.298 / 4.374 | 8,192 voxels; max 4.534 ms |
+| Physics, 1,024 bodies / 300 ticks | 0.530 / 1.137 / 1.155 | max 1.194 ms; all bodies asleep |
+| Snapshot, 20 iterations, total | 12.255 / 12.555 / 13.674 | 1,181 frames / 1.351 MiB |
+
+The eight-second structural-lab smoke still applied its partial charge at 1.003 s, committed one
+automatic structural cut, drained all work and put both bodies to sleep; three assessments and
+zero failures/stale jobs/overflows. Its much smaller scene is not used for graphics performance.
+
+358 ordinary tests passed per debug/release profile, strict Clippy passed, and all named network,
+QUIC/authority/process and OIDC guards were separately rerun. The ignored shader test was explicitly
+executed on real Vulkan in both profiles; it checks the production upload and actual WGSL, including
+asymmetric cube orientation, mirror response and all mip levels. All 19 offline tool tests passed.
+The pack reconstructed byte-for-byte and the full source decode matched an independent ImageMagick
+linear-float decode exactly. No runtime source downloader or new dependency was introduced.
+
+Separate before/after XWayland captures of only the owned game window were inspected. The new sky
+and reflections are visible, but interior sky visibility/contact lighting is still inadequate;
+neither capture is the generated target image. RenderDoc 1.45 also captured and replayed a real
+Vulkan frame (204 draws, 11 textures, 235,833,146-byte capture), and its exported thumbnail was
+inspected. Instrumented/capture timings are excluded from the table. Raw captures/logs stay under
+ignored `target/tooling/` and `/tmp/fps-sky-light-PzxsET/`, not in Git or the shipping asset package.
+Claude's final bounded source review reported no blocking defect and confirmed the parser/shader
+contracts; it did not receive the binary pack or full documentation and is not an asset audit.
+Codex verified the pack locally, retained the documented cross-platform/CI/lighting limitations,
+and renamed the exposure constant to clarify that it applies to the complete scene.
+
 ## 2026-09-05 — adaptive repair and four-client trace replay
 
 Source state: parent `f5ca8ce` plus the network-timing increment documented here. The graphical

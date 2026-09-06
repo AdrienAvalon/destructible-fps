@@ -1,0 +1,23 @@
+{
+  "asset": "overcast_soil_puresky",
+  "authors": {
+    "Jarod Guest": "Sky Edits",
+    "Sergej Majboroda": "Original"
+  },
+  "bytes": 1195816,
+  "cooker": {
+    "python": "3.14.7",
+    "schema": 1,
+    "zlib": "1.3.1.zlib-ng"
+  },
+  "height": 512,
+  "license": "CC0-1.0",
+  "license_url": "https://polyhaven.com/license",
+  "schema": 1,
+  "sha256": "2dbbbbb1323a8e8989db2e8306bd13099b215539e5adba41b85738a250a7904e",
+  "source": "https://polyhaven.com/a/overcast_soil_puresky",
+  "source_gain": 1.0,
+  "upstream_md5": "7fbca6264f4618a787092b9e1679a578",
+  "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/overcast_soil_puresky_1k.hdr",
+  "width": 1024
+}

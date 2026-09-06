@@ -63,8 +63,9 @@ Exit evidence: debug/release tests, strict Clippy, real-GPU smoke, benchmark, an
 - energy-aware Cook-Torrance GGX direct lighting, explicit material identity and metalness in the
   vertex contract, five attributed scanned PBR materials in versioned offline-cooked texture arrays,
   normal-aware mips and explicit-gradient body-local triplanar projection, procedural steel/glass
-  and cut layers, and a view-correct atmosphere (delivered); GPU block compression, material blending,
-  image-based lighting, reflections, and a full HDR pipeline remain;
+  and cut layers, and a view-correct HDR sky with offline diffuse/GGX image-based lighting,
+  split-sum BRDF and fixed shared exposure (delivered); GPU block compression, material blending,
+  local reflections/sky visibility, and a full HDR postprocessing pipeline remain;
 - 3×3 PCF sun-shadow filtering (delivered); cascaded sun shadows, local lights, temporal
   anti-aliasing, and measured dynamic resolution remain;
 - hybrid chunk meshing with fixed-cache Surface Nets for soil/stone, exact authored architecture,

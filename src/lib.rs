@@ -8,6 +8,7 @@ pub mod character;
 pub mod deployment_policy;
 pub mod destruction;
 pub mod elasticity;
+pub mod environment;
 pub mod generator;
 pub mod host_attestation;
 pub mod material;

@@ -64,6 +64,10 @@ name = "rifle-benchmark"
 path = "src/bin/rifle_benchmark.rs"
 
 [[bin]]
+name = "volume-benchmark"
+path = "src/bin/volume_benchmark.rs"
+
+[[bin]]
 name = "secure-dedicated-server"
 path = "src/bin/secure_dedicated_server.rs"
 

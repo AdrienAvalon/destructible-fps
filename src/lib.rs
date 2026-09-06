@@ -40,6 +40,7 @@ pub mod structural_lab;
 pub mod structural_runtime;
 pub mod telemetry;
 pub mod transport;
+pub mod volume;
 pub mod world;
 
 pub use certificate_attestation::{

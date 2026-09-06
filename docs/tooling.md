@@ -170,6 +170,11 @@ client must be reviewed, version-compatible and disabled in distributed/default 
 
 ## CPU profiling without loosening host protections
 
+The isolated `volume-benchmark --iterations 500` measures candidate fine-volume edits, boundary
+extraction and strict codec round trips, with bounded geometry/work counters and an intentionally
+refused high-complexity cut. It requires no new package or privilege. See
+[`refined-volumes.md`](refined-volumes.md) for its experimental scope and runtime integration gates.
+
 The repository-native `rifle-benchmark --iterations 500` additionally measures reset three-shot
 material fixtures through two framed replicas, with first/p50/p95/p99/max timings and exact payload
 counts. It uses the existing pinned Rust toolchain without a new package or profiler permission.

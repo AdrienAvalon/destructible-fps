@@ -91,6 +91,8 @@ pub struct NetworkTickReport {
     pub player_spawn_rejections: usize,
     pub player_state_broadcasts: usize,
     pub player_state_drops: usize,
+    pub weapon_state_broadcasts: usize,
+    pub weapon_state_drops: usize,
     pub outbound_attempts: usize,
     pub outbound_datagrams: usize,
     pub outbound_drops: usize,
@@ -157,6 +159,8 @@ struct QueuedCommand {
 
 #[derive(Clone, Copy)]
 enum GameplayCommand {
+    Rifle(crate::ballistics::RifleCommand),
+    Reload(u64),
     Explosion(ExplosionCommand),
     Build(BuildCommand),
 }
@@ -398,6 +402,19 @@ where
             return;
         };
         match message {
+            ClientControlMessage::Rifle {
+                session_id,
+                command,
+            } => self.enqueue_command(source, session_id, GameplayCommand::Rifle(command), report),
+            ClientControlMessage::Reload {
+                session_id,
+                command_id,
+            } => self.enqueue_command(
+                source,
+                session_id,
+                GameplayCommand::Reload(command_id),
+                report,
+            ),
             ClientControlMessage::Hello { nonce } => {
                 if self
                     .peers
@@ -474,6 +491,7 @@ where
         self.simulate_players(&mut report);
         self.broadcast_player_states(sender, &mut report)?;
         self.simulate_commands(sender, &mut report)?;
+        self.broadcast_weapon_states(sender, &mut report)?;
         if let Some(runtime) = &mut self.structural {
             let packet = runtime.tick(&mut self.authority);
             report.structural = runtime.status();
@@ -1008,6 +1026,28 @@ where
                 break;
             };
             let result = match queued.command {
+                GameplayCommand::Rifle(command) => self
+                    .players
+                    .get(&queued.session_id)
+                    .map(AuthoritativePlayer::build_context)
+                    .ok_or(crate::CommandError::MissingAuthoritativePlayer(
+                        queued.session_id,
+                    ))
+                    .and_then(|player| {
+                        self.authority
+                            .execute_rifle(queued.session_id, command, player, self.tick)
+                    })
+                    .map(|(packet, _report)| packet),
+                GameplayCommand::Reload(command_id) => self
+                    .players
+                    .get(&queued.session_id)
+                    .ok_or(crate::CommandError::MissingAuthoritativePlayer(
+                        queued.session_id,
+                    ))
+                    .and_then(|_player| {
+                        self.authority
+                            .execute_reload(queued.session_id, command_id, self.tick)
+                    }),
                 GameplayCommand::Explosion(command) => self
                     .players
                     .get(&queued.session_id)
@@ -1093,6 +1133,43 @@ where
             } else {
                 report.outbound_drops += 1;
                 report.player_state_drops += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn broadcast_weapon_states(
+        &self,
+        sender: &mut impl FnMut(PeerId, &[u8]) -> bool,
+        report: &mut NetworkTickReport,
+    ) -> Result<(), NetworkRuntimeError> {
+        if !self
+            .tick
+            .is_multiple_of(PLAYER_STATE_BROADCAST_INTERVAL_TICKS)
+        {
+            return Ok(());
+        }
+        for (&destination, peer) in &self.peers {
+            let packet = crate::ballistics::state_wire::WeaponStatePacket {
+                session_id: peer.session_id,
+                server_tick: self.tick,
+                last_command_id: self.authority.last_command_id(peer.session_id),
+                rifle: self.authority.rifle_state(peer.session_id, self.tick),
+            }
+            .encode()
+            .ok_or_else(|| io::Error::other("invalid authoritative weapon state"))?;
+            if report.outbound_attempts >= MAX_OUTBOUND_DATAGRAMS_PER_TICK {
+                report.weapon_state_drops += 1;
+                report.outbound_drops += 1;
+                continue;
+            }
+            report.outbound_attempts += 1;
+            if sender(destination, &packet) {
+                report.outbound_datagrams += 1;
+                report.weapon_state_broadcasts += 1;
+            } else {
+                report.outbound_drops += 1;
+                report.weapon_state_drops += 1;
             }
         }
         Ok(())
@@ -1999,13 +2076,19 @@ mod tests {
             )
             .expect("third player tick");
         assert_eq!(third.player_state_broadcasts, 1);
-        assert_eq!(datagrams.len(), 1);
+        assert_eq!(third.weapon_state_broadcasts, 1);
+        assert_eq!(datagrams.len(), 2);
         let packet = crate::decode_player_state_packet(&datagrams[0]).expect("player-state packet");
         assert_eq!(packet.server_tick, 3);
         assert_eq!(packet.players.len(), 1);
         assert_eq!(packet.players[0].session_id, 19);
         assert_eq!(packet.players[0].last_input_sequence, 1);
         assert!(packet.players[0].position_um.x > 0);
+        let weapon =
+            crate::ballistics::state_wire::WeaponStatePacket::decode(&datagrams[1]).unwrap();
+        assert_eq!(weapon.session_id, 19);
+        assert_eq!(weapon.server_tick, 3);
+        assert_eq!(weapon.rifle.magazine, crate::ballistics::RIFLE_MAGAZINE);
     }
 
     #[test]

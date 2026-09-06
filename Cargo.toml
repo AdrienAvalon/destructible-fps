@@ -60,6 +60,10 @@ name = "snapshot-benchmark"
 path = "src/bin/snapshot_benchmark.rs"
 
 [[bin]]
+name = "rifle-benchmark"
+path = "src/bin/rifle_benchmark.rs"
+
+[[bin]]
 name = "secure-dedicated-server"
 path = "src/bin/secure_dedicated_server.rs"
 

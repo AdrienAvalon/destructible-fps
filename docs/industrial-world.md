@@ -60,8 +60,9 @@ three canopy support bases leaves a connection; removing the fourth disconnects 
 remaining canopy cells, not an accidental wall or terrain anchor. Real bounded blasts additionally
 create ordinary replicated rigid bodies, preserve every undestroyed cell and produce falling motion.
 The optional elastic structural lab is not silently enabled or claimed calibrated for this map.
-The existing "rifle" remains the prototype radial damage profile; the low-energy timber regression
-tests cumulative material integrity, not realistic bullet ballistics.
+The [directional rifle](ballistics.md) now uses material/chord-dependent finite work and authoritative
+ammunition; the timber remains a coarse cell-integrity target, not realistic bullet-sized geometry.
+The older low-energy radial regression remains a material/topology test, not ballistic calibration.
 
 ## Client loading and invalidation
 

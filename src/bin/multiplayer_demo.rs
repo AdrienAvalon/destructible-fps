@@ -22,6 +22,14 @@ use destructible_fps::{
     player::{Player, raycast},
     render::{RenderOutcome, Renderer},
 };
+use destructible_fps::{
+    ballistics::{
+        RifleCommand,
+        state_wire::{WeaponStateInbox, is_weapon_state},
+    },
+    player::quantized_direction,
+    transport::{encode_reload_request, encode_rifle_request},
+};
 use glam::Vec3;
 use std::{
     collections::{BTreeSet, HashSet},
@@ -265,6 +273,13 @@ impl GameTransport {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SmokeScenario {
+    Disabled,
+    Blast,
+    Rifle,
+}
+
 struct MultiplayerGame {
     window: Arc<Window>,
     renderer: Renderer,
@@ -301,20 +316,22 @@ struct MultiplayerGame {
     started: Instant,
     accumulator: f32,
     last_status: String,
-    smoke_motion: bool,
+    smoke_scenario: SmokeScenario,
     initial_position_um: Option<FixedMicrometers3>,
     maximum_horizontal_displacement_um: u64,
     applied_world_deltas: u64,
     smoke_actions_sent: u8,
+    smoke_next_action_at: Instant,
     smoke_resnapshot: SmokeResnapshot,
     last_authoritative_input_sequence: u64,
+    weapon_state: WeaponStateInbox,
 }
 
 impl MultiplayerGame {
     fn new(
         window: Arc<Window>,
         transport_options: &TransportOptions,
-        smoke_motion: bool,
+        smoke_scenario: SmokeScenario,
         smoke_drop_first_delta: bool,
         smoke_resnapshot: bool,
         msaa: u32,
@@ -331,7 +348,7 @@ impl MultiplayerGame {
             renderer.stats().chunks
         );
         println!(
-            "Commandes: clic pour capturer | ZQSD/WASD | Maj sprint | Espace saut | clic gauche/droit destruction | molette construction | Echap"
+            "Commandes: clic pour capturer | ZQSD/WASD | Maj sprint | Espace saut | gauche fusil | R recharger | droit explosion prototype | molette construction | Echap"
         );
         let mut game = Self {
             window,
@@ -377,17 +394,19 @@ impl MultiplayerGame {
             } else {
                 "connexion au serveur".to_owned()
             },
-            smoke_motion,
+            smoke_scenario,
             initial_position_um: None,
             maximum_horizontal_displacement_um: 0,
             applied_world_deltas: 0,
             smoke_actions_sent: 0,
+            smoke_next_action_at: now + Duration::from_secs(3),
             smoke_resnapshot: if smoke_resnapshot {
                 SmokeResnapshot::Pending
             } else {
                 SmokeResnapshot::Disabled
             },
             last_authoritative_input_sequence: 0,
+            weapon_state: WeaponStateInbox::default(),
         };
         if let Some(session_id) = session_id {
             game.request_snapshot(session_id)?;
@@ -439,9 +458,7 @@ impl MultiplayerGame {
                         >= 60 => {}
             _ => return Err("smoke sans reprise autoritaire apres le second snapshot".to_owned()),
         }
-        if self.smoke_actions_sent < 2 {
-            return Err("smoke termine avant les deux actions autoritaires".to_owned());
-        }
+        self.validate_smoke_actions()?;
         if self.delta_impairment != DeltaImpairment::None
             && (!matches!(self.delta_impairment, DeltaImpairment::Completed { .. })
                 || self.delta_repairs_sent == 0)
@@ -485,6 +502,44 @@ impl MultiplayerGame {
         Ok(())
     }
 
+    fn validate_smoke_actions(&self) -> Result<(), String> {
+        if self.smoke_scenario != SmokeScenario::Rifle {
+            return if self.smoke_actions_sent >= 2 {
+                Ok(())
+            } else {
+                Err("smoke termine avant les deux actions autoritaires".to_owned())
+            };
+        }
+        let packet = self
+            .weapon_state
+            .latest()
+            .ok_or("smoke sans etat du fusil")?;
+        let shooter = !packet.session_id.is_multiple_of(2);
+        let (magazine, reserve) = if shooter { (29, 87) } else { (30, 90) };
+        if self.smoke_actions_sent != 5
+            || packet.rifle.magazine != magazine
+            || packet.rifle.reserve != reserve
+            || packet.rifle.reload_complete_tick.is_some()
+            || (shooter && packet.last_command_id < 5)
+        {
+            return Err(format!("smoke fusil incomplet: {packet:?}"));
+        }
+        let target = self.replica.world().voxel(IVec3::new(-6, 2, -7));
+        let adjacent = self.replica.world().voxel(IVec3::new(-5, 2, -7));
+        if target.is_solid() || adjacent.material != Material::Wood || adjacent.integrity != 255 {
+            return Err(
+                "smoke fusil sans breche localisee dans la barricade industrielle".to_owned(),
+            );
+        }
+        println!(
+            "RIFLE_SMOKE shooter={shooter} actions={} magazine={magazine} reserve={reserve} last_command={} fingerprint={:032x} timber=breached adjacent=intact",
+            self.smoke_actions_sent,
+            packet.last_command_id,
+            self.replica.world().fingerprint()
+        );
+        Ok(())
+    }
+
     fn capture_cursor(&mut self) {
         let result = self
             .window
@@ -506,7 +561,11 @@ impl MultiplayerGame {
     fn pump_network(&mut self) -> Result<(), String> {
         let datagrams = self.transport.drain()?;
         for payload in datagrams {
-            if is_player_state_datagram(&payload) {
+            if is_weapon_state(&payload) {
+                if let Some(session_id) = self.session_id {
+                    self.weapon_state.receive(session_id, &payload)?;
+                }
+            } else if is_player_state_datagram(&payload) {
                 self.receive_player_state(&payload)?;
             } else if is_snapshot_datagram(&payload) {
                 self.receive_snapshot(&payload)?;
@@ -729,7 +788,9 @@ impl MultiplayerGame {
             }
             self.renderer
                 .update_body_transforms(self.replica.body_states());
-            self.applied_world_deltas = self.applied_world_deltas.saturating_add(1);
+            if !packet.changes.is_empty() || !packet.body_updates.is_empty() {
+                self.applied_world_deltas = self.applied_world_deltas.saturating_add(1);
+            }
             self.last_status = format!(
                 "delta {} applique | {} corps{rtt_suffix}",
                 packet.sequence,
@@ -959,7 +1020,11 @@ impl MultiplayerGame {
             return Ok(());
         };
         let mut input = movement_command(self.next_input_sequence, self.view.yaw, &self.pressed);
-        if self.smoke_motion {
+        if self.smoke_scenario != SmokeScenario::Disabled
+            && (self.smoke_scenario != SmokeScenario::Rifle
+                || (self.smoke_actions_sent == 5
+                    && self.started.elapsed() >= Duration::from_secs(6)))
+        {
             if session_id.is_multiple_of(2) {
                 input.movement_x_per_mille = 0;
                 input.movement_z_per_mille = -1_000;
@@ -1017,6 +1082,43 @@ impl MultiplayerGame {
         Ok(())
     }
 
+    fn send_rifle(&mut self, direction: Vec3) -> Result<(), String> {
+        if !self.snapshot_ready() || self.prediction.is_none() {
+            return Ok(());
+        }
+        let Some(session_id) = self.session_id else {
+            return Ok(());
+        };
+        let direction = quantized_direction(direction).ok_or("visee non finie")?;
+        let command = RifleCommand {
+            command_id: self.take_command_id()?,
+            direction,
+        };
+        self.transport
+            .send(encode_rifle_request(session_id, command))
+            .map_err(|error| format!("envoi tir: {error}"))?;
+        self.last_status = format!(
+            "tir {} demande, impact et munitions decides par le serveur",
+            command.command_id
+        );
+        Ok(())
+    }
+
+    fn send_reload(&mut self) -> Result<(), String> {
+        if !self.snapshot_ready() {
+            return Ok(());
+        }
+        let Some(session_id) = self.session_id else {
+            return Ok(());
+        };
+        let command_id = self.take_command_id()?;
+        self.transport
+            .send(encode_reload_request(session_id, command_id))
+            .map_err(|error| format!("envoi rechargement: {error}"))?;
+        "rechargement demande".clone_into(&mut self.last_status);
+        Ok(())
+    }
+
     fn send_build(&mut self, material: Material) -> Result<(), String> {
         if !self.snapshot_ready() {
             "action suspendue pendant la synchronisation".clone_into(&mut self.last_status);
@@ -1058,9 +1160,15 @@ impl MultiplayerGame {
     }
 
     fn send_smoke_action(&mut self) -> Result<(), String> {
+        if self.smoke_scenario == SmokeScenario::Rifle {
+            return self.send_rifle_smoke_action();
+        }
         let elapsed = self.started.elapsed().as_secs_f32();
         let due_actions = u8::from(elapsed >= 3.0) + u8::from(elapsed >= 4.0);
-        if !self.smoke_motion || !self.snapshot_ready() || self.smoke_actions_sent >= due_actions {
+        if self.smoke_scenario == SmokeScenario::Disabled
+            || !self.snapshot_ready()
+            || self.smoke_actions_sent >= due_actions
+        {
             return Ok(());
         }
         let Some(session_id) = self.session_id else {
@@ -1083,6 +1191,41 @@ impl MultiplayerGame {
                 .map_err(|error| format!("envoi destruction smoke: {error}"))?;
         }
         self.smoke_actions_sent = self.smoke_actions_sent.saturating_add(1);
+        Ok(())
+    }
+
+    fn send_rifle_smoke_action(&mut self) -> Result<(), String> {
+        if self.smoke_actions_sent >= 5
+            || Instant::now() < self.smoke_next_action_at
+            || !self.snapshot_ready()
+            || self.prediction.is_none()
+        {
+            return Ok(());
+        }
+        let Some(session_id) = self.session_id else {
+            return Ok(());
+        };
+        if !session_id.is_multiple_of(2) {
+            if self.smoke_actions_sent > 0
+                && self.weapon_state.latest().is_none_or(|packet| {
+                    packet.last_command_id < u64::from(self.smoke_actions_sent)
+                })
+            {
+                return Ok(());
+            }
+            if self.smoke_actions_sent == 3 {
+                self.send_reload()?;
+            } else {
+                // Aim through the industrial loading bay at the timber barricade. The client
+                // supplies direction only: the actual origin and hit remain server-owned.
+                let direction = Vec3::new(-5.5, 2.65, -6.5) - self.view.camera_position();
+                self.send_rifle(direction)?;
+            }
+        }
+        // Relative to the actual send, never catch up several overdue shots in one frame/tick.
+        self.smoke_next_action_at =
+            Instant::now() + rifle_smoke_action_spacing(self.smoke_actions_sent);
+        self.smoke_actions_sent += 1;
         Ok(())
     }
 
@@ -1182,8 +1325,23 @@ impl MultiplayerGame {
         }
         let stats = self.renderer.stats();
         let transport_drops = self.transport.dropped_datagrams();
+        let weapon = self.weapon_state.latest().map_or_else(
+            || "arme en synchronisation".to_owned(),
+            |packet| {
+                format!(
+                    "munitions {}/{}{}",
+                    packet.rifle.magazine,
+                    packet.rifle.reserve,
+                    if packet.rifle.reload_complete_tick.is_some() {
+                        " recharge..."
+                    } else {
+                        ""
+                    }
+                )
+            },
+        );
         self.window.set_title(&format!(
-            "Destructible FPS multijoueur | session {} | {} joueurs | drops {} | {}",
+            "Destructible FPS multijoueur | session {} | {} joueurs | drops {} | {weapon} | {}",
             self.session_id
                 .map_or_else(|| "...".to_owned(), |id| id.to_string()),
             stats
@@ -1278,6 +1436,7 @@ struct App {
     exit_after: Option<Duration>,
     smoke_drop_first_delta: bool,
     smoke_resnapshot: bool,
+    smoke_rifle: bool,
     msaa: u32,
     failure: Option<String>,
 }
@@ -1299,7 +1458,13 @@ impl ApplicationHandler for App {
         match MultiplayerGame::new(
             Arc::new(window),
             &self.transport,
-            self.exit_after.is_some(),
+            if self.smoke_rifle {
+                SmokeScenario::Rifle
+            } else if self.exit_after.is_some() {
+                SmokeScenario::Blast
+            } else {
+                SmokeScenario::Disabled
+            },
             self.smoke_drop_first_delta,
             self.smoke_resnapshot,
             self.msaa,
@@ -1338,6 +1503,14 @@ impl ApplicationHandler for App {
                     match event.state {
                         ElementState::Pressed => {
                             game.pressed.insert(code);
+                            if code == KeyCode::KeyR
+                                && game.cursor_captured
+                                && !event.repeat
+                                && let Err(error) = game.send_reload()
+                            {
+                                self.failure = Some(error);
+                                event_loop.exit();
+                            }
                             if code == KeyCode::Escape {
                                 if game.cursor_captured {
                                     game.release_cursor();
@@ -1359,7 +1532,7 @@ impl ApplicationHandler for App {
             } => {
                 if game.cursor_captured {
                     let result = match button {
-                        MouseButton::Left => game.send_explosion(2, 7_500),
+                        MouseButton::Left => game.send_rifle(game.view.view_direction()),
                         MouseButton::Right => game.send_explosion(6, 42_000),
                         MouseButton::Middle => game.send_build(Material::Wood),
                         _ => Ok(()),
@@ -1408,6 +1581,7 @@ struct Options {
     exit_after: Option<Duration>,
     smoke_drop_first_delta: bool,
     smoke_resnapshot: bool,
+    smoke_rifle: bool,
     msaa: u32,
 }
 
@@ -1429,6 +1603,7 @@ where
     let mut exit_after = None;
     let mut smoke_drop_first_delta = false;
     let mut smoke_resnapshot = false;
+    let mut smoke_rifle = false;
     let mut msaa = 4;
     let mut arguments = arguments.into_iter().map(Into::into);
     while let Some(argument) = arguments.next() {
@@ -1471,17 +1646,11 @@ where
                 ));
             }
             "--smoke-seconds" => {
-                let seconds: f64 = arguments
-                    .next()
-                    .ok_or("--smoke-seconds exige une duree")?
-                    .parse()?;
-                if !seconds.is_finite() || seconds <= 0.0 {
-                    return Err("duree de smoke test invalide".into());
-                }
-                exit_after = Some(Duration::from_secs_f64(seconds));
+                exit_after = Some(smoke_duration(arguments.next())?);
             }
             "--smoke-drop-first-delta" => smoke_drop_first_delta = true,
             "--smoke-resnapshot" => smoke_resnapshot = true,
+            "--smoke-rifle" => smoke_rifle = true,
             _ => return Err(format!("argument inconnu: {argument}").into()),
         }
     }
@@ -1512,13 +1681,29 @@ where
     if (smoke_drop_first_delta || smoke_resnapshot) && exit_after.is_none() {
         return Err("les scenarios de reparation exigent --smoke-seconds".into());
     }
+    if smoke_rifle && exit_after.is_none_or(|duration| duration < Duration::from_secs(9)) {
+        return Err("--smoke-rifle exige --smoke-seconds >= 9 et la carte industrial".into());
+    }
     Ok(Options {
         transport,
         exit_after,
         smoke_drop_first_delta,
         smoke_resnapshot,
+        smoke_rifle,
         msaa,
     })
+}
+
+fn smoke_duration(value: Option<String>) -> Result<Duration, Box<dyn Error>> {
+    let seconds: f64 = value.ok_or("--smoke-seconds exige une duree")?.parse()?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err("duree de smoke test invalide".into());
+    }
+    Ok(Duration::try_from_secs_f64(seconds)?)
+}
+
+const fn rifle_smoke_action_spacing(previous_action: u8) -> Duration {
+    Duration::from_millis(if previous_action == 3 { 2200 } else { 200 })
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -1531,6 +1716,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         exit_after: options.exit_after,
         smoke_drop_first_delta: options.smoke_drop_first_delta,
         smoke_resnapshot: options.smoke_resnapshot,
+        smoke_rifle: options.smoke_rifle,
         msaa: options.msaa,
         failure: None,
     };
@@ -1544,6 +1730,33 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rifle_smoke_requires_time_for_reload_and_rejects_duration_overflow() {
+        for arguments in [
+            vec!["--smoke-rifle"],
+            vec!["--smoke-rifle", "--smoke-seconds", "8"],
+            vec!["--smoke-seconds", "1e100"],
+        ] {
+            assert!(options_from(arguments).is_err());
+        }
+        assert!(
+            options_from(["--smoke-rifle", "--smoke-seconds", "10"])
+                .unwrap()
+                .smoke_rifle
+        );
+    }
+
+    #[test]
+    fn delayed_rifle_smoke_does_not_compress_cadence_or_reload() {
+        let delayed_send = Instant::now() + Duration::from_secs(8);
+        assert_eq!(
+            delayed_send + rifle_smoke_action_spacing(0),
+            delayed_send + Duration::from_millis(200)
+        );
+        assert_eq!(rifle_smoke_action_spacing(3), Duration::from_millis(2200));
+        assert!(rifle_smoke_action_spacing(2) > Duration::from_millis(100));
+    }
 
     #[test]
     fn mesh_completion_from_replaced_world_is_never_current_even_with_reused_body_ids() {

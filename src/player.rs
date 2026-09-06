@@ -19,6 +19,17 @@ const GRAVITY: f32 = 24.0;
 const JUMP_SPEED: f32 = 8.25;
 const COLLISION_EPSILON: f32 = 0.001;
 
+/// Quantizes a local visual aim. The authority normalizes and bounds the integer request again.
+#[must_use]
+pub fn quantized_direction(direction: Vec3) -> Option<[i16; 3]> {
+    if !direction.is_finite() {
+        return None;
+    }
+    let unit = direction.try_normalize()?;
+    let quantized = unit.to_array().map(|axis| (axis * 32_767.0).round() as i16);
+    quantized.iter().any(|&axis| axis != 0).then_some(quantized)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MovementInput {
     pub forward: f32,

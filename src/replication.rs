@@ -14,6 +14,7 @@ use crate::world::{IVec3, VoxelChange, World, WorldError};
 use core::fmt;
 use std::collections::{BTreeMap, HashMap};
 
+mod rifle;
 mod structural_failure;
 
 const MAGIC: [u8; 4] = *b"DFPS";
@@ -147,10 +148,12 @@ pub struct AuthoritativeServer {
     next_sequence: u64,
     last_command_id: HashMap<u64, u64>,
     construction_units: HashMap<u64, u32>,
+    rifles: HashMap<u64, crate::ballistics::RifleState>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandError {
+    Ballistic(crate::ballistics::BallisticError),
     ZeroRadius,
     RadiusTooLarge(u16),
     EnergyTooLarge(u32),
@@ -195,6 +198,7 @@ pub enum CommandError {
 impl fmt::Display for CommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Ballistic(error) => error.fmt(formatter),
             Self::ZeroRadius => write!(formatter, "explosion radius must be non-zero"),
             Self::RadiusTooLarge(radius) => {
                 write!(formatter, "explosion radius {radius} exceeds 16")
@@ -327,6 +331,7 @@ impl AuthoritativeServer {
             next_sequence: 1,
             last_command_id: HashMap::new(),
             construction_units: HashMap::new(),
+            rifles: HashMap::new(),
         }
     }
 
@@ -398,11 +403,28 @@ impl AuthoritativeServer {
 
         let base_fingerprint = self.world.fingerprint();
         let base_body_fingerprint = self.body_fingerprint;
-        let mut report = self.world.apply_explosion(Explosion {
+        let report = self.world.apply_explosion(Explosion {
             center: command.center,
             radius_voxels: command.radius_voxels,
             peak_energy: command.peak_energy,
         });
+        self.commit_damage(
+            client_id,
+            command.command_id,
+            report,
+            Some(command),
+            [base_fingerprint, base_body_fingerprint],
+        )
+    }
+
+    fn commit_damage(
+        &mut self,
+        client_id: u64,
+        command_id: u64,
+        mut report: DestructionReport,
+        blast: Option<ExplosionCommand>,
+        base: [u128; 2],
+    ) -> Result<(DeltaPacket, DestructionReport), CommandError> {
         let bodies = match self.prepare_detached_bodies(&report.changes) {
             Ok(bodies) => bodies,
             Err(error) => {
@@ -430,7 +452,15 @@ impl AuthoritativeServer {
             return Err(CommandError::TooManyActiveBodyVoxels(active_body_voxels));
         }
         let (changes, body_assignments) = merged_detachment_changes(&self.world, &report, &bodies);
-        let (spawned_states, body_updates) = initial_blast_states(&bodies, command);
+        let (spawned_states, body_updates) = blast.map_or_else(
+            || {
+                (
+                    bodies.iter().map(RigidBodyState::at_spawn).collect(),
+                    Vec::new(),
+                )
+            },
+            |command| initial_blast_states(&bodies, command),
+        );
         if !payload_fits_protocol(
             changes.len(),
             body_assignments.len(),
@@ -460,16 +490,16 @@ impl AuthoritativeServer {
         let packet = DeltaPacket {
             sequence: self.next_sequence,
             tick,
-            base_fingerprint,
+            base_fingerprint: base[0],
             final_fingerprint: self.world.fingerprint(),
-            base_body_fingerprint,
+            base_body_fingerprint: base[1],
             final_body_fingerprint: self.body_fingerprint,
             changes: report.changes.clone(),
             body_assignments,
             body_updates,
         };
         self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.last_command_id.insert(client_id, command.command_id);
+        self.last_command_id.insert(client_id, command_id);
         Ok((packet, report))
     }
 
@@ -603,6 +633,7 @@ impl AuthoritativeServer {
     pub fn release_client(&mut self, client_id: u64) {
         self.last_command_id.remove(&client_id);
         self.construction_units.remove(&client_id);
+        self.rifles.remove(&client_id);
     }
 
     #[must_use]

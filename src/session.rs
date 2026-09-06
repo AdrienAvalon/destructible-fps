@@ -102,6 +102,7 @@ pub struct DemoSession {
     client: ClientReplica,
     assembler: FrameAssembler,
     next_command_id: u64,
+    simulation_tick: u64,
     structural: Option<StructuralRuntime>,
 }
 
@@ -127,6 +128,7 @@ impl DemoSession {
             client: ClientReplica::new(world),
             assembler: FrameAssembler::default(),
             next_command_id: 1,
+            simulation_tick: 0,
             structural: None,
         }
     }
@@ -216,6 +218,7 @@ impl DemoSession {
     ///
     /// Returns codec, reassembly, replication, or final consistency failures.
     pub fn advance_physics(&mut self) -> Result<PhysicsTickReport, SessionError> {
+        self.simulation_tick = self.simulation_tick.saturating_add(1);
         let (packet, report) = self.server.advance_physics();
         if let Some(packet) = packet {
             let mut encoded = encode_frames(&packet, DATAGRAM_MTU)?;
@@ -251,11 +254,14 @@ impl DemoSession {
         direction: Vec3,
         mode: FireMode,
     ) -> Result<Option<ShotResult>, SessionError> {
+        if mode == FireMode::Rifle {
+            return self.fire_rifle(origin, direction);
+        }
         let Some(hit) = raycast(self.client.world(), origin, direction, 120.0) else {
             return Ok(None);
         };
         let (radius_voxels, peak_energy) = match mode {
-            FireMode::Rifle => (2, 7_500),
+            FireMode::Rifle => unreachable!("rifle uses directional authority above"),
             FireMode::Explosive => (6, 42_000),
             FireMode::TestCharge => (1, 1_000),
         };
@@ -307,6 +313,84 @@ impl DemoSession {
             datagrams,
             encoded_bytes,
         }))
+    }
+
+    fn fire_rifle(
+        &mut self,
+        origin: Vec3,
+        direction: Vec3,
+    ) -> Result<Option<ShotResult>, SessionError> {
+        let player = local_build_context(origin).ok_or(SessionError::InvalidBuildOrigin)?;
+        let direction = crate::player::quantized_direction(direction).ok_or(
+            CommandError::Ballistic(crate::ballistics::BallisticError::ZeroDirection),
+        )?;
+        let command = crate::ballistics::RifleCommand {
+            command_id: self.next_command_id,
+            direction,
+        };
+        self.next_command_id = self.next_command_id.saturating_add(1);
+        let (packet, report) =
+            self.server
+                .execute_rifle(CLIENT_ID, command, player, self.simulation_tick)?;
+        let (datagrams, encoded_bytes) = self.receive_action_packet(&packet)?;
+        Ok(report.first_hit.map(|target| ShotResult {
+            target,
+            report: report.destruction,
+            datagrams,
+            encoded_bytes,
+            dirty_chunks: dirty_chunks(&packet.changes),
+            spawned_body_ids: packet
+                .body_assignments
+                .iter()
+                .map(|assignment| assignment.body_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            active_bodies: self.client.bodies().len(),
+        }))
+    }
+
+    /// Starts a finite-reserve authoritative reload; R in the playable client.
+    /// # Errors
+    /// Reports ordinary command, wire and replica validation errors.
+    pub fn reload_rifle(&mut self) -> Result<(), SessionError> {
+        let id = self.next_command_id;
+        self.next_command_id = self.next_command_id.saturating_add(1);
+        let packet = self
+            .server
+            .execute_reload(CLIENT_ID, id, self.simulation_tick)?;
+        self.receive_action_packet(&packet)?;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn rifle_state(&self) -> crate::ballistics::RifleState {
+        self.server.rifle_state(CLIENT_ID, self.simulation_tick)
+    }
+
+    fn receive_action_packet(
+        &mut self,
+        packet: &crate::DeltaPacket,
+    ) -> Result<(usize, usize), SessionError> {
+        if let Some(runtime) = &mut self.structural {
+            runtime.observe_changes(&self.server, &packet.changes);
+        }
+        let encoded = encode_frames(packet, DATAGRAM_MTU)?;
+        let sizes = (encoded.len(), encoded.iter().map(Vec::len).sum());
+        let mut assembled = None;
+        for bytes in encoded.into_iter().rev() {
+            assembled = self.assembler.push(decode_frame(&bytes)?)?.or(assembled);
+        }
+        self.client
+            .receive(&assembled.ok_or(SessionError::MissingCompletePacket)?)?;
+        if self.client.world().fingerprint() != self.server.world().fingerprint()
+            || self.client.body_fingerprint() != self.server.body_fingerprint()
+            || self.client.body_states() != self.server.body_states()
+            || self.client.next_body_id() != self.server.next_body_id()
+        {
+            return Err(SessionError::DivergedReplica);
+        }
+        Ok(sizes)
     }
 
     /// Finds the empty voxel immediately before a ray hit and requests a validated construction
@@ -499,15 +583,21 @@ mod tests {
     }
 
     #[test]
-    fn a_miss_does_not_advance_world() {
+    fn a_rifle_miss_preserves_geometry_but_commits_ammunition_and_sequence() {
         let mut session = DemoSession::new(World::default());
+        let before = session.world().fingerprint();
         assert!(
             session
                 .fire(Vec3::ZERO, -Vec3::Z, FireMode::Rifle)
                 .expect("miss is valid")
                 .is_none()
         );
-        assert_eq!(session.world().tick(), 0);
+        assert_eq!(session.world().tick(), 1);
+        assert_eq!(session.world().fingerprint(), before);
+        assert_eq!(
+            session.rifle_state().magazine,
+            crate::ballistics::RIFLE_MAGAZINE - 1
+        );
     }
 
     #[test]

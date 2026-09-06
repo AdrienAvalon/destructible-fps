@@ -3,6 +3,105 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-06 — directional rifle, ammunition and bounded profiling tools
+
+Source: parent `b1e50ee` plus this rifle/tooling increment, including the final conservative
+sub-micrometre grazing-contact correction. No dependency, world preset, shader or renderer pipeline
+was changed. The rifle now resolves direction from the server eye and shares atomic damage/body
+transactions; [the contract](ballistics.md) explicitly retains coarse one-metre geometry, fictional
+work units, conservative non-destructible dynamic cover, ephemeral ammo and debug radial explosives.
+
+Hardware rechecked: i7-13700H, RTX 4050 Laptop, NVIDIA 610.57.04, Linux 7.2.2-1-cachyos,
+Rust 1.97.1. All measurements below ran serially on the final release binaries, after compilers,
+instrumented capture, tool smokes and functional network processes had ended. The active desktop,
+unlocked clocks and uncontrolled OS caches remain sources of variance. First and repeated launches
+are not controlled cold/warm cache experiments.
+
+### Sustained rifle fixtures and CPU regression checks
+
+`rifle-benchmark --iterations 500` resets each fixture outside timing. Every sample performs three
+authoritative shots and frames/reassembles/applies two replicas at 1,100/1,200-byte MTUs. Validation
+then compares world fingerprints, complete bodies/states and invariant workload counts. Times below
+are **milliseconds for the complete three-shot/two-replica sample**, not per frame or a full tick.
+
+| Fixture | First sample | p50 / p95 / p99 | Maximum | Payload / frames / changes / bodies |
+| --- | ---: | --- | ---: | --- |
+| Wood | 0.0225 | 0.0083 / 0.0087 / 0.0106 | 0.0225 | 672 B / 6 / 3 / 0 |
+| Glass then wood | 0.0088 | 0.0075 / 0.0076 / 0.0099 | 0.0115 | 704 B / 6 / 4 / 0 |
+| Steel | 0.0068 | 0.0064 / 0.0065 / 0.0067 | 0.0086 | 672 B / 6 / 3 / 0 |
+| Severed support | 0.0253 | 0.0151 / 0.0153 / 0.0169 | 0.0253 | 1,028 B / 8 / 4 / 1 |
+
+The warm repeat retains exactly those payload/workload counts. Its p50/p95/p99 values are
+0.0087/0.0089/0.0102, 0.0078/0.0080/0.0085, 0.0067/0.0068/0.0087 and
+0.0156/0.0159/0.0176 ms respectively. Its support maximum is **0.1327 ms**; this outlier is retained,
+not removed from the evidence. These deliberately small fixtures do not measure 1,024-body rifle
+cover, maximum-size structural detachment or sustained multi-player server tick cost.
+
+| Existing regression fixture | Samples | p50 / p95 / p99 ms | Maximum ms |
+| --- | ---: | --- | ---: |
+| Destruction + framing/replica | 500 | 0.013 / 0.236 / 0.387 | not reported |
+| 8,192-cell slab analysis | 100 | 2.515 / 2.553 / 2.574 | not reported |
+| Slab promotion | 100 | 1.647 / 1.694 / 1.706 | not reported |
+| Slab combined | 100 | 4.164 / 4.239 / 4.258 | 5.842 |
+| 1,024-body stacking tick | 300 | 0.551 / 1.143 / 1.181 | 1.218 |
+| Snapshot encode | 20 | 5.329 / 5.539 / 10.609 | 10.609 |
+| Snapshot reassemble/decode | 20 | 6.245 / 6.426 / 6.851 | 6.851 |
+| Snapshot validate/install | 20 | 0.375 / 0.382 / 0.383 | 0.383 |
+| Snapshot total | 20 | 11.949 / 12.284 / 17.844 | 17.844 |
+
+The legacy destruction workload still has 29,631 changes, 908 frames and 0.567 MiB with exact
+replicas; unlike the rifle fixtures, it becomes cheaper as cells disappear. Stacking settles all
+1,024 bodies with 768 maximum broad-phase pairs. The snapshot remains 1,181 frames / 1.351 MiB.
+Its worst total exceeds a 16.67 ms frame reference; this offline complete-transfer benchmark is
+not evidence of budgeted in-frame snapshot decoding. No allocation-count, complete server-tick,
+combat-scale or cross-OS performance claim is made.
+
+### Actual Vulkan views
+
+Final release, 1,440×900, 4× MSAA. The close-up breach runs eight seconds; the two sustained
+moving-light inspections run fifteen seconds each with sixteen synthetic casters and fixed scene
+geometry. They are not sixteen players firing. The 96,113-solid/132-chunk/50,723-face breached
+industrial scene is unchanged, and all GPU readback sample losses are zero.
+
+| View | CPU / GPU samples | CPU frame wall p50 / p95 / p99 ms | GPU total p50 / p95 / p99 ms | GPU max ms |
+| --- | ---: | --- | --- | ---: |
+| Close breach | 1,588 / 1,586 | 2.986 / 13.634 / 16.588 | 1.972 / 2.045 / 2.104 | 2.849 |
+| Moving light, first | 3,003 / 3,001 | 3.341 / 12.783 / 13.422 | 1.995 / 2.482 / 2.526 | 2.543 |
+| Moving light, repeat | 2,952 / 2,950 | 3.407 / 12.873 / 16.151 | 1.972 / 2.371 / 2.421 | 2.434 |
+
+CPU frame wall includes presentation/acquisition waits. Maxima are 17.843 / 20.856 / 19.007 ms;
+this is not a claim that every frame meets 60 Hz. Initial mesh streaming takes 74.5 / 70.4 / 68.7 ms.
+The fresh close-up process peaks at 264,948 KiB RSS, measured by a fresh `resource.getrusage`
+launcher. This is resident process memory, not allocations or complete device memory. Separate
+five-second ordinary range and range-showcase runs also end successfully, including the now
+directional rifle removing the showcase's support and its single body settling.
+
+### Synchronization, tools and review
+
+Two real 1,280×800 graphical QUIC clients, distinct short-lived credentials and an industrial
+authority pass the thirteen-second rifle scenario. The shooter requests a second snapshot and
+deliberately drops the first delta. Both finish with world fingerprint
+`10943d403c41c0e67acdae3a0a76c4c7`, four geometry deltas, the targeted timber cell removed and its
+neighbour intact. Ammo is 29/87 for the shooter and 30/90 for the observer; five authoritative
+commands were accepted. One repair completes with one 16 ms RTT sample and a 100 ms RTO; both
+transport queues report zero drops and mesh queues drain (four/five completed jobs). Pending
+player inputs at exit are three/one, not unfinished mesh jobs. Temporary credentials were deleted
+after the owned server and both clients exited; no loopback listener remains.
+
+Final validation: **402 ordinary tests plus six explicitly executed real-GPU tests in each of
+debug and release**, strict all-target Clippy, formatting, 22 offline tool tests, full release
+binaries and the targeted network/TLS/OIDC matrix. Fresh isolated RenderDoc industrial replay,
+Blender GLB round trip and Tracy capture/CSV proofs also pass; [tooling.md](tooling.md) records the
+recoverable capture archive. Instrumented capture timings are excluded above.
+
+The initial Claude analysis strengthened conservative seam and transaction tests. Local review
+also found the parallel-plane/tied-corner and sub-micrometre grazing gaps, proved the latter with
+a failing fixture and corrected it. The first GUI smoke exposed compressed scheduling after slow
+loading; it now spaces actual sends and waits for command acknowledgements without weakening
+server cadence. Graphify was updated and checked against source. The single scoped final Claude
+review failed without usable output (helper exit 75); it is **not external approval**. Rendering
+remains visibly coarse and non-photorealistic; those release gates and the full game goal remain open.
+
 ## 2026-09-06 — authored industrial world and asynchronous map replacement
 
 Source: parent `6e7df1d` plus this world/client/tooling increment. The new explicit `industrial`

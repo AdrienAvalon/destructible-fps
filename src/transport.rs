@@ -6,7 +6,7 @@ use crate::{
 use core::fmt;
 
 const CONTROL_MAGIC: [u8; 4] = *b"DFCT";
-const CONTROL_VERSION: u8 = 3;
+const CONTROL_VERSION: u8 = 4;
 const HELLO_KIND: u8 = 1;
 const WELCOME_KIND: u8 = 2;
 const EXPLOSION_KIND: u8 = 3;
@@ -16,6 +16,10 @@ const SNAPSHOT_FRAGMENTS_REQUEST_KIND: u8 = 6;
 const SNAPSHOT_ACK_KIND: u8 = 7;
 const BUILD_KIND: u8 = 8;
 const PLAYER_INPUT_KIND: u8 = 9;
+const RIFLE_KIND: u8 = 10;
+const RELOAD_KIND: u8 = 11;
+const RIFLE_BYTES: usize = 28;
+const RELOAD_BYTES: usize = 22;
 const HELLO_BYTES: usize = 14;
 const WELCOME_BYTES: usize = 22;
 const EXPLOSION_BYTES: usize = 40;
@@ -29,6 +33,14 @@ pub const MAX_UDP_DATAGRAM_BYTES: usize = 1_200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientControlMessage {
+    Rifle {
+        session_id: u64,
+        command: crate::ballistics::RifleCommand,
+    },
+    Reload {
+        session_id: u64,
+        command_id: u64,
+    },
     Hello {
         nonce: u64,
     },
@@ -129,6 +141,25 @@ pub fn encode_explosion_request(session_id: u64, command: ExplosionCommand) -> V
 }
 
 #[must_use]
+pub fn encode_rifle_request(session_id: u64, command: crate::ballistics::RifleCommand) -> Vec<u8> {
+    let mut bytes = control_prefix(RIFLE_KIND, RIFLE_BYTES);
+    push_u64(&mut bytes, session_id);
+    push_u64(&mut bytes, command.command_id);
+    for axis in command.direction {
+        push_i16(&mut bytes, axis);
+    }
+    bytes
+}
+
+#[must_use]
+pub fn encode_reload_request(session_id: u64, command_id: u64) -> Vec<u8> {
+    let mut bytes = control_prefix(RELOAD_KIND, RELOAD_BYTES);
+    push_u64(&mut bytes, session_id);
+    push_u64(&mut bytes, command_id);
+    bytes
+}
+
+#[must_use]
 pub fn encode_build_request(session_id: u64, command: BuildCommand) -> Vec<u8> {
     let mut bytes = control_prefix(BUILD_KIND, BUILD_BYTES);
     push_u64(&mut bytes, session_id);
@@ -208,6 +239,23 @@ pub fn encode_server_welcome(nonce: u64, session_id: u64) -> Vec<u8> {
 pub fn decode_client_control(bytes: &[u8]) -> Result<ClientControlMessage, ControlCodecError> {
     let mut cursor = decode_prefix(bytes)?;
     match cursor.kind {
+        RIFLE_KIND => {
+            require_length(bytes, RIFLE_BYTES)?;
+            Ok(ClientControlMessage::Rifle {
+                session_id: cursor.take_u64(),
+                command: crate::ballistics::RifleCommand {
+                    command_id: cursor.take_u64(),
+                    direction: [cursor.take_i16(), cursor.take_i16(), cursor.take_i16()],
+                },
+            })
+        }
+        RELOAD_KIND => {
+            require_length(bytes, RELOAD_BYTES)?;
+            Ok(ClientControlMessage::Reload {
+                session_id: cursor.take_u64(),
+                command_id: cursor.take_u64(),
+            })
+        }
         HELLO_KIND => {
             require_length(bytes, HELLO_BYTES)?;
             Ok(ClientControlMessage::Hello {
@@ -420,6 +468,46 @@ fn push_i32(bytes: &mut Vec<u8>, value: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rifle_and_reload_commands_reject_truncation_trailing_bytes_and_old_control_version() {
+        let rifle = crate::ballistics::RifleCommand {
+            command_id: 13,
+            direction: [-30_000, 17, 5],
+        };
+        let shot = encode_rifle_request(7, rifle);
+        assert_eq!(shot.len(), RIFLE_BYTES);
+        assert_eq!(
+            decode_client_control(&shot),
+            Ok(ClientControlMessage::Rifle {
+                session_id: 7,
+                command: rifle
+            })
+        );
+        let reload = encode_reload_request(7, 14);
+        assert_eq!(reload.len(), RELOAD_BYTES);
+        assert_eq!(
+            decode_client_control(&reload),
+            Ok(ClientControlMessage::Reload {
+                session_id: 7,
+                command_id: 14
+            })
+        );
+        for bytes in [shot, reload] {
+            for length in 0..bytes.len() {
+                assert!(decode_client_control(&bytes[..length]).is_err());
+            }
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert!(decode_client_control(&extra).is_err());
+            let mut old = bytes;
+            old[4] = 3;
+            assert_eq!(
+                decode_client_control(&old),
+                Err(ControlCodecError::UnsupportedVersion(3))
+            );
+        }
+    }
 
     #[test]
     fn control_messages_round_trip_at_exact_sizes() {

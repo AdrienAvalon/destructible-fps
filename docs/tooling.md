@@ -36,6 +36,24 @@ Primary references: [RenderDoc](https://github.com/baldurk/renderdoc),
 [Tracy manual](https://github.com/wolfpld/tracy/blob/v0.14.1/manual/tracy.md),
 [Blender](https://www.blender.org/).
 
+## Revalidation and recoverable capture archive, 2026-09-06
+
+Package queries still match the installation receipt. The directional-rifle increment required no
+new external package, host setting, driver update or profiler privilege. All three real isolated
+smokes passed again: RenderDoc replayed the industrial Vulkan frame (320,050,190 bytes, 220 draws,
+14 textures), Blender round-tripped the 1,956-byte GLB with its 2×3×4 m dimensions/UV/material
+checks, and Tracy exported exactly 200 known standalone zones with no surviving listener. The
+render thumbnail was inspected as actual engine output; it remains visibly non-photorealistic.
+
+Before those checks, active evidence exceeded the existing 2 GiB guard. Four completed local
+RenderDoc runs (`ckt_5j85`, `uou54l88`, `lxz8ei39`, `l0zo83bz`, each with the `renderdoc-` prefix)
+were explicitly moved, without deletion, into ignored `target/tooling-archive-lHJXgO/`. Their
+original result artifacts and captures remain together and recoverable. This moved about 904 MiB
+out of the active working set, not off the disk; it is not a backup or an automatic retention
+policy. After the fresh smokes the active directory is about 1.5 GiB. The 2 GiB/2,000-entry guard,
+per-file limits, namespace isolation and deadlines are unchanged. Review both archive and active
+disk usage before future runs; do not automate unbounded archives or raise the guard to hide growth.
+
 ## Repeatable checks
 
 From the repository root, with the Linux desktop session active:
@@ -151,6 +169,11 @@ and `TRACY_NO_SAMPLING`. The Rust engine currently has no Tracy dependency; an e
 client must be reviewed, version-compatible and disabled in distributed/default builds.
 
 ## CPU profiling without loosening host protections
+
+The repository-native `rifle-benchmark --iterations 500` additionally measures reset three-shot
+material fixtures through two framed replicas, with first/p50/p95/p99/max timings and exact payload
+counts. It uses the existing pinned Rust toolchain without a new package or profiler permission.
+See [`ballistics.md`](ballistics.md) for workload boundaries; it is not a full combat-tick benchmark.
 
 ```bash
 cargo build --locked --release --bin structural-load-benchmark

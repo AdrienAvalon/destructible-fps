@@ -2731,7 +2731,7 @@ const fn combined_response(body: u16, surface: u16) -> u16 {
     u16::midpoint(body, surface)
 }
 
-fn body_aabb(
+pub(crate) fn body_aabb(
     body: &RigidBodyDescriptor,
     state: RigidBodyState,
 ) -> (FixedMicrometers3, FixedMicrometers3) {

@@ -233,7 +233,10 @@ impairment profile; four graphical clients remain synchronized through join, dam
 
 ### Stage 4 — complete FPS loop
 
-- data-driven weapons, recoil, reload, ballistics, penetration, ricochet, and material energy loss;
+- directional fixed-point rifle intent from the authoritative eye, finite magazine/reserve,
+  fixed-tick cadence/reload, material/chord work, coarse penetration and personal weapon HUD
+  (delivered as the [rifle slice](ballistics.md)); data-driven weapons, recoil, sub-cell cavities,
+  dynamic-body damage, ricochet, calibrated ballistics and production explosive policy remain;
 - health, armour, inventory, resources, building tools, death, respawn, and match rules;
 - server-side hit validation and replayable authoritative combat timeline;
 - animation graph, first/third-person rigs, inverse kinematics, camera feedback, and accessibility

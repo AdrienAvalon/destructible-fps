@@ -3,6 +3,7 @@
 //! The simulation and wire protocol stay independent from rendering. The playable
 //! milestone adds a safe Vulkan presentation layer without moving authority into it.
 
+pub mod ballistics;
 pub mod certificate_attestation;
 pub mod character;
 pub mod deployment_policy;

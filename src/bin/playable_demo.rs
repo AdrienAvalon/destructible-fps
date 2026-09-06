@@ -594,6 +594,7 @@ impl Game {
             let world = self.session.world().stats();
             let render = self.renderer.stats();
             let structural = self.session.structural_status();
+            let rifle = self.session.rifle_state();
             let structural_label = if self.lab.is_some() {
                 format!(
                     " | structure: {} attente, actif={}, {} ruptures, {} echecs, incomplete={}",
@@ -607,7 +608,7 @@ impl Game {
                 String::new()
             };
             self.window.set_title(&format!(
-                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {}/{} chunks + {}/{} corps + {} joueurs | {} | {}{structural_label}",
+                "Destructible FPS | {fps:.0} FPS {frame_ms:.2} ms | {} voxels | {}/{} chunks + {}/{} corps + {} joueurs | {} | {}{structural_label} | munitions {}/{}{}",
                 world.solid_voxels,
                 render.visible_chunks,
                 render.chunks,
@@ -619,7 +620,10 @@ impl Game {
                 } else {
                     "cliquez pour jouer"
                 },
-                self.last_action
+                self.last_action,
+                rifle.magazine,
+                rifle.reserve,
+                if rifle.reload_complete_tick.is_some() { " recharge..." } else { "" }
             ));
             self.frames_since_stats = 0;
             self.stats_since = now;
@@ -799,6 +803,12 @@ impl ApplicationHandler for App {
                     match event.state {
                         ElementState::Pressed => {
                             game.pressed.insert(code);
+                            if code == KeyCode::KeyR && game.cursor_captured && !event.repeat {
+                                game.last_action = match game.session.reload_rifle() {
+                                    Ok(()) => "rechargement autoritaire".to_owned(),
+                                    Err(error) => format!("rechargement refuse: {error}"),
+                                };
+                            }
                             if code == KeyCode::KeyF
                                 && game.lab.is_some()
                                 && game.cursor_captured

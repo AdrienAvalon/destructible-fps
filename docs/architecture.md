@@ -411,7 +411,7 @@ meshing stalls under the agreed destruction load, and holds its frame budget at 
   restitution, off-centre angular impulse, momentum-preserving tangential friction, impact wake-up,
   fail-closed coarse separation on pair-budget exhaustion, and deterministic short-chain propagation
   (delivered);
-- control-protocol-v3 static construction with shared command replay ordering, per-session resource
+- control-protocol-v4 static construction with shared command replay ordering, per-session resource
   budgets, deterministic material costs, coordinate/occupancy/face-support validation, conservative
   dynamic-body exclusion, six-metre authoritative-player reach, conservative integer line of sight,
   fingerprinted delta replication, and local plus authenticated-QUIC execution (delivered);

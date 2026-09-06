@@ -59,7 +59,7 @@ The Linux demo now combines the authoritative core with a real-time first-person
   bounded angular velocity using compact server-monotonic 64-bit entity IDs, independent 128-bit
   geometry fingerprints, pre/post body fingerprints, and full client-side connectivity, material,
   mass, identity, and state revalidation;
-- control-protocol-v3 construction requests with replay protection, fixed per-session resources,
+- control-protocol-v4 construction requests with replay protection, fixed per-session resources,
   material costs, bounded coordinates, face-support and occupancy checks, conservative dynamic-body
   exclusion, six-metre authoritative-player reach, integer line-of-sight traversal, and ordinary
   fingerprinted world deltas shared by local, UDP, and authenticated QUIC clients;
@@ -107,7 +107,9 @@ The Linux demo now combines the authoritative core with a real-time first-person
   sweep-and-prune broad phase, atomic overload rollback, and replicated GPU transforms about the
   mass centre;
 - a 120 Hz fixed-step first-person controller with gravity, jumping, collision, and mouse look;
-- server-authorized rifle and explosive impacts rendered from the replicated world;
+- directional fixed-point rifle intents resolved from the server eye, material/chord work,
+  finite server-owned ammunition/cadence/reload and personal HUD state (see
+  [rifle contract and limitations](docs/ballistics.md)); experimental radial explosive impacts;
 - five attributed CC0 scanned PBR materials at real-world scale, two bounded offline-cooked texture
   arrays with full mip chains, explicit-gradient triplanar projection and body-local normal mapping;
 - per-vertex voxel ambient occlusion, a 2,048² directional shadow map with 3×3 PCF filtering,
@@ -254,7 +256,8 @@ cargo run --example secure_local_fixture -- /tmp/destructible-fps-secure-demo
 
 This first networked graphical slice synchronizes character movement, remote players, authoritative
 destruction, construction, and moving rigid debris. Once the cursor is captured, left click fires a
-rifle blast, right click an explosive blast, and middle click builds wood. Start every client before
+directional rifle shot, R requests reload, right click an experimental explosive blast, and middle
+click builds wood. Rebuild clients and server together for control protocol v4. Start every client before
 or after modifying the world: each admission installs an atomic snapshot, selectively requests lost
 fragments, acknowledges installation, and resumes with ordered catch-up deltas. Recovery UI, remote
 secure-server exposure, large-world residency streaming, and asset-quality presentation remain later
@@ -355,6 +358,7 @@ microbenchmark.
 - click the window to capture the pointer;
 - `ZQSD` or `WASD` to move, `Shift` to sprint, and `Space` to jump;
 - left click for a localized rifle impact;
+- R to reload from finite reserve ammunition;
 - right click for a larger explosive blast;
 - middle click to place a full-integrity wood voxel on the targeted supported face;
 - `Escape` releases the pointer; press it again to quit.

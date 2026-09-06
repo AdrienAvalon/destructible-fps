@@ -1,9 +1,12 @@
-//! Canonical locally refined material volumes. A uniform metre needs one leaf, not 256³ voxels.
+//! Canonical locally refined material volumes, with rectangular runs instead of dyadic cubes.
 //!
-//! Coordinates are dyadic local indices; physical interpretation belongs to a separate transform.
-//! This is the fine-geometry core, not yet a replacement for the legacy world's uniform cells.
+//! Precision remains 256 units per page; physical interpretation belongs to a separate transform.
+//! This is not yet a replacement for the legacy world's uniform cells.
 
 pub mod codec;
+mod edit;
+mod query;
+pub mod ray;
 pub mod surface;
 
 use crate::{Material, Voxel};
@@ -15,9 +18,6 @@ pub const VOLUME_EDGE: u16 = 1 << VOLUME_DEPTH;
 pub const VOLUME_UNITS: u32 = 1 << (3 * VOLUME_DEPTH);
 pub const MAX_VOLUME_LEAVES: usize = 8_192;
 pub const MAX_EDIT_VISITS: usize = 65_536;
-// A canonical Morton prefix can retain seven pending siblings at each tree level before
-// subsequent leaves coalesce it. Bound that carry explicitly, even for a one-leaf result.
-const CANONICAL_CARRY: usize = 7 * VOLUME_DEPTH as usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalBox {
@@ -31,7 +31,7 @@ impl LocalBox {
         maximum: [VOLUME_EDGE; 3],
     };
 
-    /// Half-open, nonempty bounds in the local dyadic lattice.
+    /// Half-open, nonempty integer bounds in the local page.
     /// # Errors
     /// Rejects empty, inverted or out-of-page boxes.
     pub fn new(minimum: [u16; 3], maximum: [u16; 3]) -> Result<Self, VolumeError> {
@@ -70,7 +70,6 @@ pub struct VolumeLimits {
     pub leaves: usize,
     pub visits: usize,
 }
-
 impl Default for VolumeLimits {
     fn default() -> Self {
         Self {
@@ -79,7 +78,6 @@ impl Default for VolumeLimits {
         }
     }
 }
-
 impl VolumeLimits {
     fn validate(self) -> Result<(), VolumeError> {
         if !(1..=MAX_VOLUME_LEAVES).contains(&self.leaves)
@@ -95,15 +93,16 @@ impl VolumeLimits {
 pub enum VolumeError {
     InvalidBox,
     InvalidPoint,
+    InvalidSegment,
     InvalidLimits,
     LeafBudget,
     VisitBudget,
     SurfaceBudget,
+    RayBudget,
     Allocation,
     InvalidEncoding,
     NonCanonical,
 }
-
 impl fmt::Display for VolumeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "refined volume refused: {self:?}")
@@ -111,41 +110,25 @@ impl fmt::Display for VolumeError {
 }
 impl std::error::Error for VolumeError {}
 
-/// A disjoint dyadic cube in a complete, Morton-ordered partition. Fields stay private so callers
-/// cannot manufacture a leaf outside the validated partition or skip canonical coalescing.
+/// A rectangular run in a complete canonical Z-slab/Y-band/X-run partition. Fields stay private.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VolumeLeaf {
-    start: u32,
-    depth: u8,
+    bounds: LocalBox,
     voxel: Voxel,
 }
-
-const _: () = assert!(size_of::<VolumeLeaf>() == 8);
-
+const _: () = assert!(size_of::<VolumeLeaf>() == 14);
 impl VolumeLeaf {
-    #[must_use]
-    pub const fn depth(self) -> u8 {
-        self.depth
-    }
     #[must_use]
     pub const fn voxel(self) -> Voxel {
         self.voxel
     }
     #[must_use]
-    pub const fn units(self) -> u32 {
-        1 << (3 * (VOLUME_DEPTH - self.depth))
+    pub fn units(self) -> u32 {
+        self.bounds.units()
     }
     #[must_use]
-    pub const fn edge(self) -> u16 {
-        VOLUME_EDGE >> self.depth
-    }
-    #[must_use]
-    pub fn bounds(self) -> LocalBox {
-        let minimum = unmorton(self.start);
-        LocalBox {
-            minimum,
-            maximum: minimum.map(|value| value + self.edge()),
-        }
+    pub const fn bounds(self) -> LocalBox {
+        self.bounds
     }
 }
 
@@ -155,26 +138,32 @@ pub struct RefinedVolume {
     fingerprint: u128,
     material_units: [u32; 8],
 }
-
 impl RefinedVolume {
     #[must_use]
     pub fn uniform(voxel: Voxel) -> Self {
         Self::from_canonical(Arc::from([VolumeLeaf {
-            start: 0,
-            depth: 0,
+            bounds: LocalBox::FULL,
             voxel: canonical_voxel(voxel),
         }]))
     }
 
     fn from_canonical(leaves: Arc<[VolumeLeaf]>) -> Self {
-        let mut fingerprint = 0xb6db_4d95_af68_cba9_613d_85b9_dced_7f81_u128;
+        // New schema domain: the former Morton-v1 fingerprint is not reused.
+        let mut fingerprint = 0x241e_b873_8f95_bae1_5317_20c4_f1ad_a702_u128;
         let mut material_units = [0; 8];
         for leaf in &*leaves {
             material_units[material_slot(leaf.voxel.material)] += leaf.units();
-            let packed = u128::from(leaf.start)
-                | (u128::from(leaf.depth) << 32)
-                | (u128::from(leaf.voxel.material as u8) << 40)
-                | (u128::from(leaf.voxel.integrity) << 48);
+            let mut packed = u128::from(leaf.voxel.material as u8) << 96
+                | u128::from(leaf.voxel.integrity) << 104;
+            for (index, value) in leaf
+                .bounds
+                .minimum
+                .into_iter()
+                .chain(leaf.bounds.maximum)
+                .enumerate()
+            {
+                packed |= u128::from(value) << (16 * index);
+            }
             fingerprint = (fingerprint ^ packed)
                 .rotate_left(31)
                 .wrapping_mul(0x9e37_79b9_7f4a_7c15_d6e8_feb8_6659_fd93);
@@ -207,8 +196,8 @@ impl RefinedVolume {
         (self.leaves.len() == 1).then_some(self.leaves[0].voxel)
     }
 
-    /// Exact density-weighted volume numerator, in kg / `VOLUME_UNITS` for a metre-sized page.
-    /// Consumers must retain the fraction until summing a complete fragment, not round each leaf.
+    /// Exact density-weighted mass numerator in kg / `VOLUME_UNITS` for a metre page.
+    /// Retain fractions until summing a complete fragment, not rounding individual leaves.
     #[must_use]
     pub fn mass_numerator(&self) -> u64 {
         self.leaves
@@ -219,187 +208,101 @@ impl RefinedVolume {
             .sum()
     }
 
-    /// # Errors
-    /// Rejects coordinates outside the half-open local page.
-    pub fn leaf_at(&self, point: [u16; 3]) -> Result<VolumeLeaf, VolumeError> {
-        if point.iter().any(|&value| value >= VOLUME_EDGE) {
-            return Err(VolumeError::InvalidPoint);
-        }
-        let address = morton(point);
-        let index = self.leaves.partition_point(|leaf| leaf.start <= address) - 1;
-        Ok(self.leaves[index])
-    }
-
-    /// Exact intersection against disjoint solid leaf boxes; no coarse whole-page cover fallback.
+    /// Compatibility scan bounded by the maximum page leaf count, not intended for hot physics
+    /// loops. Use `overlaps_solid_bounded` for interval skipping and an explicit work budget.
     #[must_use]
     pub fn overlaps_solid(&self, bounds: LocalBox) -> bool {
         self.leaves
             .iter()
-            .any(|leaf| leaf.voxel.is_solid() && leaf.bounds().intersection(bounds).is_some())
-    }
-
-    /// Creates an independent bounded candidate; the original and every retained reader stay
-    /// unchanged on a visit, leaf or vector-allocation refusal. Uniform siblings coalesce exactly.
-    /// The final standard-library Arc allocation follows the process allocator's OOM policy.
-    /// # Errors
-    /// Reports invalid limits or an exhausted edit budget without installing a partial volume.
-    pub fn replace_box(
-        &self,
-        bounds: LocalBox,
-        voxel: Voxel,
-        limits: VolumeLimits,
-    ) -> Result<(Self, EditStats), VolumeError> {
-        limits.validate()?;
-        let mut builder = LeafBuilder::new(limits.leaves)?;
-        let mut visited = 0;
-        for &leaf in &*self.leaves {
-            edit_leaf(
-                leaf,
-                bounds,
-                canonical_voxel(voxel),
-                &mut builder,
-                &mut visited,
-                limits.visits,
-            )?;
-        }
-        let peak_leaves = builder.peak;
-        let scratch_capacity_bytes = builder.leaves.capacity() * size_of::<VolumeLeaf>();
-        let leaves = builder.finish()?;
-        let changed = leaves.as_slice() != &*self.leaves;
-        let candidate = if changed {
-            Self::from_canonical(leaves.into())
-        } else {
-            self.clone()
-        };
-        Ok((
-            candidate,
-            EditStats {
-                visited,
-                peak_leaves,
-                scratch_capacity_bytes,
-                changed,
-            },
-        ))
+            .any(|leaf| leaf.voxel.is_solid() && leaf.bounds.intersection(bounds).is_some())
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EditStats {
     pub visited: usize,
+    /// Peak combined live leaves in page/slab/band candidate vectors, not retained source readers.
     pub peak_leaves: usize,
-    /// Leaf-vector capacity only; excludes allocator metadata and the final immutable Arc copy.
+    /// Combined vector capacities only; excludes metadata and final immutable Arc copy.
     pub scratch_capacity_bytes: usize,
     pub changed: bool,
 }
 
-fn edit_leaf(
-    leaf: VolumeLeaf,
-    bounds: LocalBox,
-    voxel: Voxel,
-    builder: &mut LeafBuilder,
-    visited: &mut usize,
-    maximum_visits: usize,
+struct WorkBudget {
+    visited: usize,
+    maximum: usize,
+}
+impl WorkBudget {
+    const fn new(maximum: usize) -> Self {
+        Self {
+            visited: 0,
+            maximum,
+        }
+    }
+    const fn tick(&mut self) -> Result<(), VolumeError> {
+        self.charge(1)
+    }
+    const fn charge(&mut self, steps: usize) -> Result<(), VolumeError> {
+        if steps > self.maximum - self.visited {
+            return Err(VolumeError::VisitBudget);
+        }
+        self.visited += steps;
+        Ok(())
+    }
+}
+
+fn reserve_bounded<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    maximum: usize,
 ) -> Result<(), VolumeError> {
-    if *visited == maximum_visits {
-        return Err(VolumeError::VisitBudget);
+    if additional > maximum.saturating_sub(values.len()) {
+        return Err(VolumeError::LeafBudget);
     }
-    *visited += 1;
-    if leaf.voxel == voxel {
-        return builder.push(leaf);
-    }
-    let leaf_bounds = leaf.bounds();
-    let Some(intersection) = leaf_bounds.intersection(bounds) else {
-        return builder.push(leaf);
-    };
-    if intersection == leaf_bounds {
-        return builder.push(VolumeLeaf { voxel, ..leaf });
-    }
-    let child_depth = leaf.depth + 1;
-    let span = 1 << (3 * (VOLUME_DEPTH - child_depth));
-    for child in 0..8 {
-        edit_leaf(
-            VolumeLeaf {
-                start: leaf.start + child * span,
-                depth: child_depth,
-                voxel: leaf.voxel,
-            },
-            bounds,
-            voxel,
-            builder,
-            visited,
-            maximum_visits,
-        )?;
+    let required = values.len() + additional;
+    if required > values.capacity() {
+        let target = required
+            .max(values.capacity().saturating_mul(2).max(8))
+            .min(maximum);
+        values
+            .try_reserve_exact(target - values.len())
+            .map_err(|_| VolumeError::Allocation)?;
     }
     Ok(())
 }
 
-struct LeafBuilder {
-    leaves: Vec<VolumeLeaf>,
-    maximum: usize,
-    peak: usize,
+// Called only on a sorted sibling slice (entire page for Z, one slab for Y).
+fn group_end(leaves: &[VolumeLeaf], first: usize, axis: usize) -> usize {
+    let coordinate = leaves[first].bounds.minimum[axis];
+    first + leaves[first..].partition_point(|leaf| leaf.bounds.minimum[axis] == coordinate)
 }
 
-impl LeafBuilder {
-    fn new(maximum: usize) -> Result<Self, VolumeError> {
-        let mut leaves = Vec::new();
-        leaves
-            .try_reserve_exact((maximum + CANONICAL_CARRY).min(64))
-            .map_err(|_| VolumeError::Allocation)?;
-        Ok(Self {
-            leaves,
-            maximum,
-            peak: 0,
-        })
+// Profiles ignore the axis being coalesced and outer axes, but retain all inner bounds/material.
+fn same_profile(
+    a: &[VolumeLeaf],
+    b: &[VolumeLeaf],
+    axis: usize,
+    work: &mut WorkBudget,
+) -> Result<bool, VolumeError> {
+    work.tick()?;
+    if a.len() != b.len() {
+        return Ok(false);
     }
-
-    fn push(&mut self, leaf: VolumeLeaf) -> Result<(), VolumeError> {
-        if self.leaves.len() == self.maximum + CANONICAL_CARRY {
-            return Err(VolumeError::LeafBudget);
+    for (left, right) in a.iter().zip(b) {
+        work.tick()?;
+        if left.voxel != right.voxel
+            || (0..axis).any(|inner| {
+                left.bounds.minimum[inner] != right.bounds.minimum[inner]
+                    || left.bounds.maximum[inner] != right.bounds.maximum[inner]
+            })
+        {
+            return Ok(false);
         }
-        if self.leaves.len() == self.leaves.capacity() {
-            let target = (self.leaves.capacity() * 2).min(self.maximum + CANONICAL_CARRY);
-            self.leaves
-                .try_reserve_exact(target - self.leaves.len())
-                .map_err(|_| VolumeError::Allocation)?;
-        }
-        self.leaves.push(leaf);
-        self.peak = self.peak.max(self.leaves.len());
-        while let Some(parent) = coalesced_tail(&self.leaves) {
-            self.leaves.truncate(self.leaves.len() - 8);
-            self.leaves.push(parent);
-        }
-        Ok(())
     }
-
-    fn finish(self) -> Result<Vec<VolumeLeaf>, VolumeError> {
-        if self.leaves.len() > self.maximum {
-            return Err(VolumeError::LeafBudget);
-        }
-        Ok(self.leaves)
-    }
+    Ok(true)
 }
 
-fn coalesced_tail(leaves: &[VolumeLeaf]) -> Option<VolumeLeaf> {
-    let siblings = leaves.get(leaves.len().checked_sub(8)?..)?;
-    let first = siblings[0];
-    if first.depth == 0 || !first.start.is_multiple_of(first.units() * 8) {
-        return None;
-    }
-    if siblings.iter().enumerate().any(|(index, leaf)| {
-        leaf.depth != first.depth
-            || leaf.voxel != first.voxel
-            || leaf.start != first.start + u32::try_from(index).unwrap_or(8) * first.units()
-    }) {
-        return None;
-    }
-    Some(VolumeLeaf {
-        depth: first.depth - 1,
-        ..first
-    })
-}
-
-// Exhaustiveness forces a deliberate volume-schema update if a new Material variant is added;
-// no unchecked enum discriminant can silently grow beyond the fixed eight-slot accounting table.
+// Exhaustive so new Material variants require a deliberate accounting-schema decision.
 const fn material_slot(material: Material) -> usize {
     match material {
         Material::Air => 0,
@@ -412,30 +315,8 @@ const fn material_slot(material: Material) -> usize {
         Material::Glass => 7,
     }
 }
-
 const fn canonical_voxel(voxel: Voxel) -> Voxel {
     if voxel.is_solid() { voxel } else { Voxel::AIR }
-}
-
-fn morton(point: [u16; 3]) -> u32 {
-    let mut result = 0;
-    for bit in 0..VOLUME_DEPTH {
-        for (axis, &value) in point.iter().enumerate() {
-            result |= u32::from((value >> bit) & 1) << (3 * usize::from(bit) + axis);
-        }
-    }
-    result
-}
-
-fn unmorton(address: u32) -> [u16; 3] {
-    std::array::from_fn(|axis| {
-        let mut value = 0;
-        for bit in 0..VOLUME_DEPTH {
-            value |=
-                u16::try_from((address >> (3 * usize::from(bit) + axis)) & 1).unwrap_or(0) << bit;
-        }
-        value
-    })
 }
 
 #[cfg(test)]

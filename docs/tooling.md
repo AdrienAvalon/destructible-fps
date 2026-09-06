@@ -171,8 +171,10 @@ client must be reviewed, version-compatible and disabled in distributed/default 
 ## CPU profiling without loosening host protections
 
 The isolated `volume-benchmark --iterations 500` measures candidate fine-volume edits, boundary
-extraction and strict codec round trips, with bounded geometry/work counters and an intentionally
-refused high-complexity cut. It requires no new package or privilege. See
+extraction and strict codec round trips, with bounded geometry/work counters. Its formerly refused
+off-grid box now completes with the rectangular-run representation. The companion
+`volume-stress-benchmark` compares fixed sphere, diagonal and accumulated-damage sequences in six
+axis orders, reporting incomplete/refused cases explicitly. Neither needs a new package or privilege. See
 [`refined-volumes.md`](refined-volumes.md) for its experimental scope and runtime integration gates.
 
 The repository-native `rifle-benchmark --iterations 500` additionally measures reset three-shot

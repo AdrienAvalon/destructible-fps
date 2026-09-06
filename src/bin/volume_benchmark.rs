@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("finest-cell", [17, 31, 59], [18, 32, 60], false),
         ("thin-bore", [120, 120, 0], [122, 122, 32], false),
         ("aligned-breach", [64, 64, 0], [192, 192, 128], false),
-        ("offgrid-budget", [1, 2, 3], [27, 38, 49], true),
+        ("offgrid-budget", [1, 2, 3], [27, 38, 49], false),
     ] {
         let bounds = LocalBox::new(minimum, maximum)?;
         let mut total = SampleWindow::new(count);

@@ -1,177 +1,245 @@
-# Experimental bounded fine-volume core
+# Bounded fine volumes: rectangular runs and exact physical ray chords
 
-`volume.rs`, `volume/codec.rs` and `volume/surface.rs` are an isolated geometry foundation for
-DEST-01/02, PHYS-01 and VIS-01. They do **not** change the playable world's one-metre cells,
-collision, ray hits, structural graph, fragments, mesh workers or network protocols. The current
-native demo remains visibly non-photorealistic. This module is not a claim of delivered localized
-bullet holes, smooth fractures, realistic collapse or fine multiplayer destruction.
+The experimental fine-volume core advances DEST-01/02, PHYS-01 and VIS-01 without changing the
+playable world's one-metre cells or its current authority/physics/network contracts. It now
+provides exact material occupancy, box edits, boundary rectangles and physical segment
+intersections from the **same** immutable geometry. It is not yet installed in World, the rifle
+damage transaction, character/rigid-body collision, structural analysis or asynchronous render
+workers. The native demo still does not meet the photoreal reference.
 
-## Representation and invariants
+## Why the octree was replaced
 
-A page has exact half-open integer coordinates `[0, 256)` on each axis. Interpreting a page as one
-metre gives a finest nominal cell of 3.90625 mm. Uniform regions use a single eight-byte leaf, not
-a dense 256³ allocation. A flat, Morton-ordered leaf stream partitions the complete page into
-aligned dyadic cubes. Eight equal siblings recursively merge; material **and integrity** participate
-in equality. Air always has zero integrity. Different edit orders producing the same field yield
-the same canonical partition, bytes and deterministic 128-bit fingerprint. That fingerprint is a
-corruption/divergence witness, not cryptographic authentication.
+The initial Morton cube implementation at `8fd7231` refused the small off-grid box
+`[1,2,3)..[27,38,49)` under its 8,192-leaf bound. The replacement retains the same 256-unit page
+and exact materials/integrity but uses rectangular runs. It needs seven leaves for that complete
+cut, without coarsening geometry, hiding a refusal or increasing the leaf/work limits.
 
-Leaves stay immutable behind `Arc` so candidate edits cannot change retained readers. Box edits
-construct a separate stream and publish it only on success. Limits are explicit:
+Each immutable flat leaf stores six u16 bounds and a two-byte Voxel: fourteen bytes. Leaves form
+a complete nested partition: Z slabs, Y bands within a slab, X runs within a band. Canonicalization
+runs **inside-out**: merge equal X materials/integrity, then identical X profiles across adjacent
+Y bands, then identical XY profiles across adjacent Z slabs. Fixed axis order makes the result
+unique for a given field; it does not guarantee orientation-independent cost or minimal box count.
+Air integrity is always zero. Other materials remain occupied even at integrity zero, matching
+the existing Voxel contract.
 
-| Resource | Hard per-page bound |
+This is a custom discrete material field, not a signed-distance solver or implementation of
+[Houston, Wiebe and Batty's RLE sparse level sets](https://benhouston3d.com/siggraph/2004-1.html).
+Their use of runs and efficient indexed access informs the direction; their complexity/performance
+claims are not transferred to this implementation.
+
+## Atomic candidates and resource contracts
+
+Box edits stream inner-normalized profiles through separate page/slab/band candidate buffers.
+When a completed slab matches the last candidate slab, only that candidate's upper Z bounds
+extend. The original page and all retained readers stay immutable. A failed edit returns an
+error with no partially installed geometry.
+
+| Resource | Hard bound |
 | --- | --- |
-| Finest subdivision depth | 8 |
-| Canonical leaves | 8,192 |
-| Edit node visits | 65,536 |
-| Temporary canonical sibling carry | 56 additional leaves |
-| Encoded page | 24,585 bytes |
-| Extracted boundary squares | 32,768 |
-| Surface visits | 262,144 |
+| Finest coordinate precision | 256 units/page axis, nominal 3.90625 mm in a metre |
+| Accepted page leaves | 8,192 |
+| Edit work steps | 65,536 |
+| Candidate buffers | page 8,192 + slab 8,192 + band min(256, requested leaf cap) |
+| Standalone encoded page | 65,545 bytes |
+| Boundary rectangles / traversal steps | 32,768 / 262,144 |
+| Material ray chords / traversal steps | 768 / 32,768 |
 
-Leaf-vector storage is at most 65,536 bytes per accepted page, excluding Arc/allocator metadata.
-The edit scratch may retain at most 8,248 leaves (65,984 payload bytes); geometric growth starts
-small instead of allocating the maximum for a uniform edit. The final immutable copy, old page,
-retained readers and encoded buffers must be counted separately. Fallible vector reservation is
-handled; the standard-library Arc allocation still follows the process allocator's OOM policy.
-These are local data/work bounds, not a global process-memory guarantee or an allocation profiler.
+Each source step, profile-comparison leaf and merge/copy leaf is charged to the edit budget.
+Already canonical slabs entirely outside the cut are copied directly, charging their leaf count
+in one checked batch rather than rebuilding their bands/runs. Frontier profiles still coalesce;
+this reduces work without pretending the flat candidate copy is independent of page size.
+Binary group/skip searches have separately bounded logarithmic cost. Already-normalized band/slab
+prefixes cannot shrink through an unrelated later profile: equality is checked before appending,
+so there is no unlimited deferred prefix or uncounted speculative tree expansion.
 
-Material volumes sum exactly to 256³ units. The density-weighted mass numerator retains the
-fraction in kg / 256³ for a metre page. It must be summed across a fragment before rounding: a
-finest wood cell is nonzero mass, about 38.7 mg. The legacy body format stores whole kilograms and
-cannot consume this core without an explicit mass/inertia unit migration.
+Maximum accepted leaf payload rises from 65,536 to 114,688 bytes because each leaf has explicit
+rectangular bounds. Combined edit vector payload capacity is at most 232,960 bytes. Old source
+readers, final Arc copy, encoded buffers and allocator metadata are additional: these are per-page
+contracts, **not** a total process-memory guarantee. Vector reservation is fallible; standard Arc
+allocation still follows the process allocator's OOM policy. Profile scratch starts small and
+grows within bounds. Aggregate residency, staged transactions and retained snapshots still need
+a global budget before integration.
 
-## Boundary surfaces
+Material volumes sum exactly to 256³. Density-weighted mass stays as an exact kg / 256³ numerator
+for a metre page. A finest wood cell is about 38.7 mg, not zero mass. The current whole-kilogram
+body/inertia formats must migrate before they can represent these fragments faithfully.
 
-The extractor emits a square only from an occupied leaf toward known empty space. It recursively
-subdivides a face when the opposing region has finer occupancy, including across all six page
-boundaries. Materials sharing an occupied interface do not emit internal sheets. Exact dyadic
-planes preserve coverage between coarse and fine pages; tests compare rasterized square coverage
-against an independent dense occupancy oracle and check a one-finest-cell neighbor hole in every
-signed direction. All six neighbor volumes are mandatory; an explicit air volume means known
-empty space, never an absent/unloaded chunk.
+## Queries, visible boundaries and real air gaps
 
-These boundary squares can still contain T-junctions. They are not yet a conforming triangle
-manifold, a smooth photoreal fracture surface, or a replacement collision mesh. Output and visit
-budget failures discard the whole candidate; they do not return a partial/invisible wall.
+Point lookup selects canonical Z/Y groups and then the containing X interval. Rectangular queries
+skip nonintersecting groups by binary search; surface extraction does not rescan every page leaf
+for every face. It emits only intersections between this page's solid face and a neighboring air
+run, on the exact shared integer plane. Different occupied materials never emit internal sheets.
+All six known neighbor pages are mandatory; air means known empty space, not an unloaded chunk.
 
-A full depth-four solid/air checkerboard neighbor tests refusal *inside* recursive subdivision in
-all six directions, followed by successful regeneration with unchanged source/neighbor bytes.
+The result is a set of rectangles, not necessarily squares. Exact coverage does not eliminate
+T-junctions or constitute a conforming, smooth photoreal triangle manifold. Collision uses the
+volumetric meaning, not an unvalidated cosmetic mesh.
 
-## Standalone codec, not a network upgrade
+`overlaps_solid_bounded` is the interval-skipping, early-exit box query with a caller-selected
+work cap (maximum three steps per possible page leaf). Exhaustion is an error, never a fake clear
+path or solid fallback. The original `overlaps_solid` convenience scan stays explicitly marked
+as unsuitable for hot physics loops; it is not the budgeted consumer API.
 
-The `DFVL` v1 stream has a nine-byte magic/version/count header and three bytes per leaf:
-depth, material and integrity. Morton offsets are implicit in the complete aligned partition.
-Decode rejects oversized input before allocating, as well as bad counts/depth/material, nonzero
-air integrity, misalignment, incomplete/overlong partitions, reducible siblings and trailing bytes.
-Accepted bytes are already canonical; decode does not silently normalize malformed input.
+`trace_segment` adds a physical geometry query: endpoints are integer micrometres local to the
+metre page, bounded to +/-128 m. The planes remain exact rational micrometres
+(`local_unit * 1_000_000 / 256`), rather than rounding both geometry and endpoints to a coarser
+grid. Clipping and parameter ordering use integer/i128 arithmetic. It returns ordered,
+positive-length material chords, including exact entry/exit parameters and true air gaps.
+A tangent or endpoint-only touch has no thickness. A parallel ray on a minimum face belongs to
+the box; one on its maximum face does not. Sorting has no allocation and an independent
+768-hit cap; a page-crossing line can cross at most 766 finest-grid cell intervals.
 
-There is no world location, transaction number, pre/post hash, authentication or fragmentation in
-this stream. Do not put it directly into a gameplay datagram: the existing 1,200-byte MTU ceiling,
-delta v6 and snapshot v2 are unchanged. World transactions must eventually validate/install all
-affected pages and significant bodies atomically under global snapshot/retention/egress budgets.
+The query is deliberately not a weapon policy, energy solver, lag compensation or damage
+transaction. It must eventually be consumed by the same authoritative fine state as character
+collision, cover and structural support, not substituted for the current coarse ray in isolation.
 
-## Known adverse case and promotion gates
+## Strict standalone DFVL v2
 
-An off-grid cut `[1, 2, 3)..[27, 38, 49)` into a uniform solid already exceeds the 8,192-leaf bound.
-Its many finest-resolution surfaces are expensive even though its volume is modest. A regression
-and benchmark intentionally preserve that refusal; the cap was not raised to make the case pass.
-This is evidence that this representation alone is **not ready for arbitrary gameplay damage**.
-Before promotion, compare bounded local bricks, coarser damage precision, or analytic cut geometry
-with equivalent occupancy/cover guarantees. A server must not hide overload by making a wall
-silently invulnerable or by accepting a visual-only hole.
+A nine-byte header carries magic/version/leaf count. Each eight-byte record contains three
+little-endian upper bounds followed by material/integrity. Lower bounds follow from the complete
+nested partition. Decode checks page completion, positive extents, consistent band/slab ends,
+canonical X/Y/Z profiles, materials, original air-integrity byte, exact length and trailing data
+before constructing accepted state. It does not normalize malformed input. The material-accounting
+match is exhaustive so new enum variants cannot silently index past the table.
 
-Required integration work remains:
+DFVL v1 is explicitly rejected. It was the preceding isolated experiment, not the world's
+snapshot schema; source searches find this module only in its own tests and geometry benchmarks.
+No user backups or private saves were scanned. The larger v2 per-record/maximum byte contract is
+intentional and documented; existing world delta v6, snapshot v2, four-MiB snapshot guard and
+1,200-byte gameplay MTU are unchanged. Neither DFVL format contains authority, world coordinates,
+sequencing, before/after fingerprints or framing. Do not send this stream directly as a datagram.
+The new deterministic fingerprint domain identifies the new canonical representation; it remains
+a divergence witness, not authentication.
 
-1. Choose a measured geometry representation that handles sustained arbitrary cuts, with explicit
-   per-world/page-replacement memory and work budgets. Keep the current uniform world fast path.
-2. Add refined state to World COW observations, fingerprints and versioned atomic delta/snapshot
-   repair. Validate old/new pages before swapping; bound simultaneous reader/snapshot retention.
-3. Share a single deterministic coordinate transform and refined occupancy with projectile rays,
-   character/body collision and cover. Use separate macro/fine ray budgets and an independent
-   grazing/boundary oracle. Integer energy needs sufficient precision for tiny material chords.
-4. Build partial-face connectivity and multiple components within a page; migrate significant
-   body mass, inertia and geometry. A coarse occupied neighbor is not evidence of a fine support.
-5. Integrate budgeted asynchronous meshing, conforming/smooth boundaries and neighbor invalidation;
-   inspect native moving-camera holes, cuts, silhouettes and collision correspondence.
-6. Prove two-client damage/late-join/repair and sustained physics/network/memory/GPU behavior before
-   enabling the representation in the industrial scene. Preserve the full game acceptance contract.
+## Comparison and adverse cases
 
-Sparse uniform tiles and local refinement are established principles; the
-[OpenVDB overview](https://www.openvdb.org/documentation/doxygen/overview.html) informs this design
-direction, not an assertion that this custom leaf stream implements OpenVDB or is the fastest choice.
+Both versions were tested using identical fixed geometry sequences and their original unchanged
+8,192-leaf/65,536-edit-work caps. The old release library was retained before rebuilding. The stress
+driver was compiled against it and against the new library using Rust 1.97.1, optimization level 3,
+fat LTO and panic abort. Baseline identities:
 
-## Reproducible checks
+- old simple benchmark SHA-256: `0368430fe2ec37a8dd37e0d87565fc86dd719eaefdf081c3b3d099086754f457`;
+- old release rlib SHA-256: `60b4ef45f2ecbc024d0870fe3447550718116bfc511ce8aebddd3168a30aa57f`;
+- common stress source SHA-256: `f4d88eeef7f2c6bec99524934b323c5db91e9683b19ac5bdc22ad3ee0bb254cd`.
+
+| Identical case | Cube octree | Rectangular runs |
+| --- | --- | --- |
+| One finest empty cell | 57 leaves / 180 bytes | 7 leaves / 65 bytes |
+| Thin 2×2×32-unit bore | 127 leaves / 390 bytes | 6 leaves / 57 bytes |
+| Aligned 128³-unit breach | 36 leaves / 117 bytes | 6 leaves / 57 bytes |
+| Off-grid box above | LeafBudget refusal | complete, 7 leaves / 65 bytes |
+| Sphere r16, all six axis orders | complete, 6,462 leaves | complete, 1,369 leaves |
+| Sphere r32, all six axis orders | incomplete | complete, 5,757 leaves |
+| Sphere r64 | incomplete | incomplete, 1,345–4,590 of 12,853 row edits accepted |
+| Diagonal slab | incomplete | incomplete, 4,648–5,363 of 16,384 row edits accepted |
+| Seeded 1,000 small cubes, continuing after refusals | 36 accepted, 964 refused | 402–418 accepted, remainder refused |
+
+Sphere radius is in finest local units: r32 is 12.5 cm and r64 is 25 cm. Complete sphere results
+are symmetric; the order of intermediate carving still changes transient work/fragmentation.
+For incomplete cases, the accepted prefix is **not** the intended final shape. Failed attempts
+leave their source unchanged; the stress harness reports incomplete output rather than hiding it.
+The six permutations exercise both orientation and traversal-order effects, not a claim of an
+axis-agnostic encoding.
+
+Measured sphere-r32 construction used 3,209 sequential row edits and roughly 0.225–0.364 seconds
+in the initial local comparison. That is not a 60-Hz explosion operation. Large curved cuts,
+diagonals, high accumulated damage and bounded atomic region staging remain promotion blockers.
+The representation is substantially more useful for fine thin/offset damage, not a universal
+solution to arbitrary geometry. A hybrid brick/analytic boundary representation or an explicitly
+validated physical precision policy may still be needed; a hidden invulnerable fallback is not
+acceptable.
+
+## Reproduce and continue toward the playable world
 
 ```bash
 cargo test --lib volume::
 cargo run --release --bin volume-benchmark -- --iterations 500
+cargo run --release --bin volume-stress-benchmark
 ```
 
-The benchmark resets the same solid before each sample. It reports first/p50/p95/p99/max timings
-for edit, boundary extraction and codec round trip, plus exact leaves, bytes, geometry, visits and
-vector capacities. The off-grid case measures an expected atomic refusal, not successful damage.
-It does not measure a whole server tick, network, GPU, retained world memory, allocator counts or
-combat latency; do not promote its microseconds as a game performance claim.
+The simple benchmark resets its source each iteration and reports first/p50/p95/p99/max plus
+work/geometry/capacity counters. The old off-grid refusal is now a required successful case.
+The stress benchmark has fixed bounded inputs, no arguments, reports every incomplete case,
+checks exact carved volume for disjoint rows, checks codec round trips and verifies source
+fingerprints on refusals. Its timings are one construction per shape/orientation, not statistical
+whole-game latency. Neither program establishes global allocation counts, world retention,
+bandwidth, GPU budgets, cross-OS determinism or photorealism.
 
-## Independent review disposition
+Next gates remain explicit:
 
-Claude's bounded no-tool analysis and final review informed the local resource bounds and added
-coverage. Codex checked the findings against `material.rs`, rather than accepting hypotheses about
-code absent from the review context:
+1. Choose/validate large-cut geometry and atomic regional staging under global memory/work limits;
+   do not implement explosions as thousands of unbudgeted synchronous micro-edits.
+2. Integrate refined state into World COW observations, fingerprints and versioned atomic
+   world/body transactions, snapshot repair and late join, retaining the uniform fast path.
+3. Use a shared physical transform/occupancy for bullets, character and body collision, with
+   precise integer penetration work and server-only damage decisions. The new segment primitive
+   supplies one piece, not the completed integration.
+4. Implement partial-face support connectivity and multiple components per page; migrate body
+   mass/inertia, meaningful fragment geometry and progressive failure.
+5. Integrate budgeted worker meshes and conforming/smooth boundaries; inspect native moving-camera
+   holes, collision correspondence and layered fractures in the industrial scene.
+6. Prove two-client damage/build/repair and sustained physics/network/GPU behavior before enabling
+   the field in ordinary gameplay. The full game acceptance contract is unchanged.
 
-- `Voxel::is_solid()` depends on material, not integrity; non-air strength zero remains occupied.
-  A new exhaustive test tries all 256 material identifiers with zero, one and maximum integrity,
-  requiring identical accepted state from decode and local edits.
-- `Voxel::from_wire()` already normalizes air. Comparing that returned voxel with its canonical
-  version would incorrectly accept nonzero air integrity from the wire. The parser deliberately
-  retains its check against the original byte.
-- Material identifiers are currently exactly 0..7. An exhaustive material-to-accounting-slot
-  match now additionally forces a compile-time decision when adding an enum variant, rather than
-  letting a new discriminant silently index beyond the eight-slot table.
-- Recursive surface-budget failures gained a complete, valid checkerboard fixture. A suggested
-  stream of only 8,192 depth-eight leaves cannot cover a complete page and would test parser
-  rejection instead of surface recursion, so it was not used.
-- Arc OOM limitations, non-conforming surface topology and off-grid complexity remain explicit
-  promotion blockers, not claimed fixes or hidden gameplay fallbacks.
+## Independent review and additional guards
 
-The review was advisory, not proof of test execution; Codex runs the actual full validation matrix.
-Its submitted code preceded these small hardening/tests; there was no repeated agent-review loop.
+Claude's bounded no-tool analysis led to the common old/new stress driver and six-axis curved,
+diagonal and accumulated-damage evidence. Its initial estimate that radius 32 would already fail
+was not borne out; radius 64 and heavy accumulation do fail, so the underlying concern remains.
+Normalization order and candidate buffering were confirmed in code, not changed to follow an
+ambiguous description of outer traversal order.
 
-## Local validation, 2026-09-06
+The final external review covered complete current runtime sources, full segment tests and selected
+codec tests, not the entire game or every test/benchmark source. Codex subsequently added max-size
+ray and six-neighbor surface tests, explicit Voxel-contract tests, the bounded overlap query and
+direct copies of unaffected slabs. There was no repeated reviewer loop. Those final edits receive
+the same complete local validation; the external review is not represented as covering a later diff.
 
-Measured in the implementing working tree based on `68ab538`, with Rust 1.97.1, release fat LTO,
-Linux 7.2.2-1-cachyos, Intel i7-13700H and the existing desktop power/clock configuration (not pinned).
-No other benchmark or compiler was intentionally run concurrently. Each case has 500 reset samples;
-"first" is the first iteration, not a cold-boot/cache-flushed measurement.
+The initial recorded stress refusals were leaf-cap exhaustion, not evidence of the hypothesized
+work-budget refusal. Unaffected-slab copying addresses measured full-page processing cost without
+raising limits. A worst-case 8,192-leaf all-material page now exercises diagonal and 128-run axial
+segment queries; an 8,192-leaf solid/air checkerboard with six equally detailed neighbors exercises
+exact acceptance of 24,576 surface rectangles and refusal one below that output cap.
 
-| Isolated case | First ms | p50 ms | p95 ms | p99 ms | Max ms | Leaves / bytes / quads |
-| --- | --- | --- | --- | --- | --- | --- |
-| One finest empty cell | 0.01924 | 0.01405 | 0.01495 | 0.01572 | 0.01924 | 57 / 180 / 54 |
-| 2×2×32-unit bore | 0.03300 | 0.03091 | 0.03276 | 0.03392 | 0.03931 | 127 / 390 / 112 |
-| Aligned 128³-unit breach | 0.00661 | 0.00536 | 0.00557 | 0.00657 | 0.00978 | 36 / 117 / 76 |
-| Off-grid cut, refused | 0.09747 | 0.08022 | 0.08228 | 0.08647 | 0.09747 | no accepted output |
+## Final local validation, 2026-09-06
 
-Edit visits for the accepted cases are 65 / 145 / 41; surface visits are 472 / 954 / 184. Leaf
-scratch capacities are 512 / 1,024 / 512 bytes; surface capacities are 768 / 1,536 / 1,536 bytes.
-A separate completed run measured 12,544 KiB child-process peak RSS through Python's standard
-`resource.getrusage(RUSAGE_CHILDREN)` after directly launching the benchmark. This includes process
-and launch costs, not just leaf payload; it is not full-game memory, peak transactional allocator
-tracking, or proof under near-cap world retention. The unavailable `/usr/bin/time` was not treated
-as a successful measurement and did not require a package installation.
+The implementing working tree is based on `8fd7231`. Hardware/toolchain: Intel i7-13700H,
+RTX 4050 Laptop, NVIDIA 610.57.04, Linux 7.2.2-1-cachyos, Rust 1.97.1, release fat LTO. Desktop
+power/frequency policy was unchanged and not pinned. The benchmarks ran sequentially after
+compilation, without another intentionally concurrent benchmark. First iteration is not a
+cold-boot/cache-flushed measurement.
 
-Final source passed strict all-target Clippy and formatting; all-target tests passed 418 ordinary
-tests in each of debug/release. All six normally ignored real-Vulkan checks then passed explicitly
-in each profile. Fifteen new volume tests and one benchmark argument test account for the new
-coverage. The 22 offline tooling tests, targeted network/secure/OIDC checks and the four required
-destruction (500 events), structure (100 iterations), physics (1,024 bodies/300 ticks), snapshot
-(20 iterations) benchmarks also passed. Graphify's updated local code index reported no stale
-files or dangling endpoints; it is not a substitute for these source/test checks.
+Final 500-reset-sample microbenchmarks (edit + surface + codec, milliseconds):
 
-Both five-second native range and industrial-breach smokes finished successfully on the RTX 4050
-Laptop, NVIDIA 610.57.04, Vulkan, 1440×900, 4× MSAA. The industrial smoke retained 96,113 solids,
-132 chunks and 50,723 mesh faces after the existing coarse breach. Its measured frame CPU
-p50/p95/p99 was 16.655/16.843/17.061 ms; total GPU was 2.712/4.527/7.859 ms with no discarded
-timestamp samples. Presentation pacing is included in the current CPU window, and there is no
-sustained multiplayer combat or fine-volume rendering in this smoke. These are non-regression
-checks, not photorealism, a 32-player tick budget or a cross-OS performance certification.
+| Case | First | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- | --- |
+| Finest cell | 0.00488 | 0.00131 | 0.00135 | 0.00137 | 0.00488 |
+| Thin bore | 0.00203 | 0.00110 | 0.00114 | 0.00120 | 0.00283 |
+| Aligned breach | 0.00138 | 0.00111 | 0.00114 | 0.00115 | 0.00138 |
+| Formerly refused off-grid box | 0.00199 | 0.00130 | 0.00136 | 0.00140 | 0.05900 |
+
+The maxima are retained, including scheduling/allocation jitter; these are not game FPS or tick
+measurements. Unaffected-slab copying reduced the complete r32 construction range to
+90.722–326.908 ms across the six orders, with identical 5,757-leaf geometry. The seeded cube
+sequence now takes 23.390–24.767 ms total, preserving the same 402–418 accepted attempts and
+explicit remaining refusals. Its maximum single edit is 0.086–0.110 ms across the six runs.
+
+A separate 500-iteration child-process resource check reports 12,624 KiB peak RSS, including
+launch/process overhead, not just page payload. User-space `perf stat` on 10,000 reset iterations
+reports 49.77 ms task-clock, 240,410,413 cpu_core cycles and 888,149,495 cpu_core instructions.
+cpu_atom counters were not counted in that run; this is not coverage of both CPU core types,
+kernel work or the rest of the host. No profiler rights, sysctls or hardware settings changed.
+
+Final source passed `cargo fmt --check`, strict all-target Clippy, 428 ordinary tests in each of
+debug/release, then all six normally ignored real-Vulkan tests explicitly in each profile. The
+24 volume/segment tests include independent non-dyadic occupancy/surface/ray oracles and max-size
+budgets. Targeted network/secure/OIDC checks, 22 offline tooling tests, all four required legacy
+benchmarks and both volume benchmarks completed; stress refusals remain reported as above, not
+counted as successful shapes. Updated Graphify reported no stale files or dangling endpoints.
+
+Both five-second native range and industrial-breach smokes exited successfully. Industrial:
+1440×900, 4× MSAA, 96,113 coarse solids, 132 chunks, 50,723 faces, CPU frame-window
+p50/p95/p99 16.648/16.879/33.279 ms, GPU total 2.787/4.542/4.602 ms, zero discarded timestamp
+samples. CPU includes presentation pacing. There is still no fine-volume rendering or sustained
+multiplayer combat in this smoke; it is a non-regression check, not the final visual/performance gate.

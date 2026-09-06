@@ -5,7 +5,7 @@ use destructible_fps::{
         FineMeshLimits, MAX_FINE_MESH_CHUNKS,
         finishes::SurfaceFinishes,
         fixture::{
-            STAGE_NAMES, industrial_inspection_world, industrial_patch_positions, inspection_world,
+            STAGE_NAMES, industrial_patch_positions, industrial_reference_world, inspection_world,
         },
         hybrid_dirty_chunks,
     },
@@ -91,7 +91,7 @@ impl Scene {
         let fingerprints = std::array::from_fn(|i| worlds[i].fingerprint());
         let finishes = if kind == WorldKind::Industrial {
             Some(Arc::new(
-                destructible_fps::mesh::fine::fixture::industrial_surface_finishes(&worlds[0])
+                destructible_fps::mesh::fine::fixture::reference_surface_finishes(&worlds[0])
                     .map_err(|e| e.to_string())?,
             ))
         } else {
@@ -389,7 +389,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|i| {
             match kind {
                 WorldKind::Inspection => inspection_world(i),
-                WorldKind::Industrial => industrial_inspection_world(i),
+                WorldKind::Industrial => industrial_reference_world(i),
             }
             .map(Arc::new)
         })

@@ -50,6 +50,12 @@ The [full-resolution haze experiment](occluded-haze.md) was rejected after nativ
 GPU measurement: its scene-wide visual benefit did not justify the measured cost. The runtime
 was restored; the next milestone prioritizes a cohesive reference scene over isolated corrections.
 
+The [reference-scene foundation](reference-scene.md) adds supported broken storeys, continuous
+grounded collapse masses and an irregular physical soil edge. Its native inspection also exposed
+and reproduced a floating-marker raster defect missed by the earlier compute-only material probe.
+The correction preserves a flat cut classification while retaining the continuous wall-depth
+gradient. This does not remove the remaining stepped geometry or close the photorealistic gate.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after

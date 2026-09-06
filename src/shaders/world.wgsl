@@ -69,6 +69,7 @@ struct VertexOutput {
     @location(11) fracture_depth: f32,
     @location(12) material_normal: vec3<f32>,
     @location(13) normal_transform_z: vec3<f32>,
+    @location(14) @interpolate(flat) authored_cut_core: u32,
 };
 
 struct BodyInstanceInput {
@@ -127,6 +128,9 @@ fn fill_vertex_output(
     output.normal_transform_z = transform[2];
     output.damage = input.damage;
     output.fracture_depth = input.fracture_depth;
+    // Classify the discrete marker before perspective interpolation. Keep the separate
+    // continuous fracture-depth varying for the coarse renderer's layered wall gradient.
+    output.authored_cut_core = select(0u, 1u, explicit_cut_core(input.fracture_depth, input.material));
     return output;
 }
 
@@ -432,7 +436,7 @@ fn sample_material(
     let frame = projection_frame(dominant_axis(local_normal), local_normal);
     let uv = projection_uv(input.material_position, frame);
     let footprint = max(length(position_dx), length(position_dy));
-    if explicit_cut_core(input.fracture_depth, material) {
+    if input.authored_cut_core != 0u {
         return sample_cut_core(material, input.material_position, local_normal, footprint);
     }
     let detail_visibility = 1.0 - smoothstep(0.008, 0.085, footprint);

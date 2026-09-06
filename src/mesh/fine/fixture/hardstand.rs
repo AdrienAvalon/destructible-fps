@@ -8,6 +8,74 @@ use crate::world::geometry::MAX_GEOMETRY_CHANGES;
 const SOIL_TOP: u16 = 224;
 const MAX_CELLS: usize = 566;
 
+// A buried forecourt edge, authored in metric lattice coordinates. Broad asymmetric tongues
+// tie the collapse apron to the old paving; this replaces physical slab material, not its tint.
+const RECLAIM_EDGE: [(i32, i32); 8] = [
+    (-24 * 256, 24 * 256),
+    (-22 * 256, 26 * 256),
+    (-19 * 256, 25 * 256),
+    (-17 * 256, 27 * 256 + 128),
+    (-15 * 256, 26 * 256),
+    (-12 * 256, 28 * 256 + 128),
+    (-9 * 256, 24 * 256 + 128),
+    (-6 * 256, 23 * 256),
+];
+
+fn reclaim_edge(x: i32) -> Option<i32> {
+    RECLAIM_EDGE.windows(2).find_map(|pair| {
+        let [(x0, z0), (x1, z1)] = [pair[0], pair[1]];
+        (x0 <= x && x < x1).then(|| z0 + (z1 - z0) * (x - x0) / (x1 - x0))
+    })
+}
+
+pub(super) fn reclaim(source: &RefinedWorld) -> Result<RefinedWorld, Box<dyn Error>> {
+    let mut changes = Vec::new();
+    for x in -24..-6 {
+        for z in 22..29 {
+            let expected = pavement(x, z)?;
+            let mut volume = expected.volume().ok_or("missing paved source")?.clone();
+            // Eight columns per metre only at the material boundary; canonicalization merges
+            // the fully reclaimed interior back into ordinary soil cells.
+            for u in (0_u16..256).step_by(32) {
+                let edge = reclaim_edge(x * 256 + i32::from(u) + 16).ok_or("reclaim domain")?;
+                let end = u16::try_from((edge - z * 256).clamp(0, 256))?;
+                if end > 0 {
+                    volume = volume
+                        .replace_box(
+                            LocalBox::new([u, SOIL_TOP, 0], [u + 32, 256, end])?,
+                            Voxel::new(Material::Soil),
+                            VolumeLimits::default(),
+                        )?
+                        .0;
+                }
+            }
+            let after = GeometryCell::refined(volume);
+            if expected == after {
+                continue;
+            }
+            let position = IVec3::new(x, 0, z);
+            if source.cell(position) != expected
+                || source.cell(IVec3::new(x, 1, z)) != GeometryCell::AIR
+            {
+                return Err(
+                    format!("reclaimed apron refuses unexpected source at {position:?}").into(),
+                );
+            }
+            changes.push(GeometryChange {
+                position,
+                before: expected,
+                after,
+            });
+        }
+    }
+    let mut state = GeometryState::new(source.clone(), 1)?;
+    for batch in changes.chunks(MAX_GEOMETRY_CHANGES) {
+        let tx = state.prepare(source.tick(), batch.to_vec())?;
+        state.apply(&tx)?;
+    }
+    Ok(state.world().clone())
+}
+
 fn footprint(x: i32, z: i32) -> bool {
     ((-24..=12).contains(&x) && (22..=34).contains(&z))
         || ((-8..=8).contains(&x) && (17..=21).contains(&z))

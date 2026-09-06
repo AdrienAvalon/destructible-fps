@@ -2,7 +2,7 @@
 use super::{FineMeshError, WorkMeter};
 use crate::{
     IVec3, Material,
-    volume::surface::Face,
+    volume::surface::{Face, SurfaceQuad},
     world::{
         geometry::{GeometryCell, RefinedWorld},
         query::StaticGeometry,
@@ -24,12 +24,16 @@ pub enum FinishPolicy {
     /// Preserve only a specific original side plane (local 1/256 m coordinate, 0..=256).
     /// Other steps with the same face orientation are broken material, not original skin.
     CutTopAndSidesAtPlane(Face, u16),
+    /// Broken aggregate containing brick, concrete and optional stone. All exposed masonry
+    /// faces are cut core; stone retains its original appearance and physical material.
+    BrokenMasonry,
 }
 
 impl FinishPolicy {
     fn key(self) -> Result<[u8; 3], FineMeshError> {
         match self {
             Self::CutTop => Ok([0, 0, 0]),
+            Self::BrokenMasonry => Ok([16, 0, 0]),
             Self::CutTopAndSides(face) if face.axis() != 1 => Ok([
                 1 + u8::try_from(face.index()).map_err(|_| FineMeshError::SurfaceFinish)?,
                 0,
@@ -52,7 +56,10 @@ impl FinishPolicy {
     }
 
     pub(super) const fn work(self) -> usize {
-        if matches!(self, Self::CutTopAndSidesAtPlane(_, _)) {
+        if matches!(
+            self,
+            Self::CutTopAndSidesAtPlane(_, _) | Self::BrokenMasonry
+        ) {
             8
         } else {
             4
@@ -61,6 +68,7 @@ impl FinishPolicy {
 
     pub(super) fn marks(self, face: Face, origin: [u16; 3], normal_y: f32) -> bool {
         let cut_side = match self {
+            Self::BrokenMasonry => return true,
             Self::CutTop => false,
             Self::CutTopAndSides(intact) => face != intact,
             Self::CutTopAndSidesAtPlane(intact, coordinate) => {
@@ -68,6 +76,12 @@ impl FinishPolicy {
             }
         };
         normal_y > 0.5 || (face.axis() != 1 && cut_side)
+    }
+
+    pub(super) fn marks_surface(self, quad: SurfaceQuad, normal_y: f32) -> bool {
+        (self != Self::BrokenMasonry
+            || matches!(quad.voxel().material, Material::Brick | Material::Concrete))
+            && self.marks(quad.face(), quad.origin(), normal_y)
     }
 }
 
@@ -95,7 +109,8 @@ impl SurfaceFinishes {
 
     /// Bind sorted, unique, explicitly authored finish policies to exact immutable source pages.
     /// # Errors
-    /// Rejects invalid policies and the same source/size violations as `cut_tops`.
+    /// Rejects invalid policies and the same source/size violations as `cut_tops`, except
+    /// `BrokenMasonry` explicitly permits mixed brick/concrete/stone with some masonry.
     pub fn with_policies(
         world: &RefinedWorld,
         policies: &[(IVec3, FinishPolicy)],
@@ -119,16 +134,22 @@ impl SurfaceFinishes {
                 return Err(FineMeshError::SurfaceFinish);
             }
             let mut material = None;
+            let mut has_masonry = false;
             for leaf in volume.leaves().iter().filter(|l| l.voxel().is_solid()) {
                 let m = leaf.voxel().material;
-                if ![Material::Brick, Material::Concrete].contains(&m)
-                    || material.is_some_and(|old| old != m)
-                {
+                let masonry = matches!(m, Material::Brick | Material::Concrete);
+                let supported = if policy == FinishPolicy::BrokenMasonry {
+                    masonry || m == Material::Stone
+                } else {
+                    masonry && material.is_none_or(|old| old == m)
+                };
+                if !supported {
                     return Err(FineMeshError::SurfaceFinish);
                 }
+                has_masonry |= masonry;
                 material = Some(m);
             }
-            if material.is_none() {
+            if !has_masonry {
                 return Err(FineMeshError::SurfaceFinish);
             }
             // A reproducibility/stale-result key, not authentication or a physical world hash.
@@ -189,6 +210,38 @@ impl SurfaceFinishes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finish_keys_are_unique_for_every_valid_orientation_and_plane() {
+        let mut keys = std::collections::BTreeSet::from([
+            FinishPolicy::CutTop.key().unwrap(),
+            FinishPolicy::BrokenMasonry.key().unwrap(),
+        ]);
+        assert_eq!(keys.len(), 2);
+        for face in Face::ALL {
+            if face.axis() == 1 {
+                assert!(FinishPolicy::CutTopAndSides(face).key().is_err());
+                assert!(FinishPolicy::CutTopAndSidesAtPlane(face, 0).key().is_err());
+                continue;
+            }
+            assert!(keys.insert(FinishPolicy::CutTopAndSides(face).key().unwrap()));
+            for plane in 0..=256 {
+                assert!(
+                    keys.insert(
+                        FinishPolicy::CutTopAndSidesAtPlane(face, plane)
+                            .key()
+                            .unwrap()
+                    )
+                );
+            }
+            assert!(
+                FinishPolicy::CutTopAndSidesAtPlane(face, 257)
+                    .key()
+                    .is_err()
+            );
+        }
+        assert_eq!(keys.len(), 2 + 4 * (1 + 257));
+    }
 
     #[test]
     fn terrace_risers_remain_core_even_on_the_preserved_vertical_side() {

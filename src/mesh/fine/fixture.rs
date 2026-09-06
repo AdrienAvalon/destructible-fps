@@ -7,6 +7,8 @@ use crate::{
 use std::error::Error;
 
 mod bay;
+mod collapse_apron;
+mod cross_section;
 mod hardstand;
 mod roof;
 mod ruins;
@@ -49,6 +51,47 @@ pub fn industrial_inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn
     let world = hardstand::install(&world)?;
     let world = bay::install(&world, stage)?;
     ruins::bay_debris(&world)
+}
+
+/// Coherent ruined-bay scene: actual storeys, grounded collapse apron and reclaimed paving.
+/// The older material fixture remains available as a frozen regression baseline.
+/// # Errors
+/// Refuses invalid stages, source conflicts or exceeded authoring/geometry budgets.
+pub fn industrial_reference_world(stage: usize) -> Result<RefinedWorld, Box<dyn Error>> {
+    let world = install_wall(
+        &crate::WorldPreset::Industrial.build(),
+        stage,
+        IVec3::new(-17, 1, 15),
+        true,
+    )?;
+    let world = windows::install(&world)?;
+    let world = roof::install(&world)?;
+    let world = hardstand::install(&world)?;
+    let world = bay::install(&world, stage)?;
+    let world = hardstand::reclaim(&world)?;
+    let world = cross_section::install(&world)?;
+    collapse_apron::install(&world)
+}
+
+/// Immutable cut appearance for the reference scene, independent of physical material IDs.
+/// # Errors
+/// Refuses stale or oversized finish sources.
+pub fn reference_surface_finishes(
+    world: &RefinedWorld,
+) -> Result<super::finishes::SurfaceFinishes, super::FineMeshError> {
+    use super::finishes::{FinishPolicy, SurfaceFinishes};
+    let mut policies: Vec<_> = bay::cut_top_cells(world)
+        .into_iter()
+        .map(|cell| (cell, FinishPolicy::CutTop))
+        .collect();
+    policies.extend(
+        collapse_apron::cut_cells(world)
+            .map_err(|_| super::FineMeshError::SurfaceFinish)?
+            .into_iter()
+            .map(|cell| (cell, FinishPolicy::BrokenMasonry)),
+    );
+    policies.sort_unstable_by_key(|entry| entry.0);
+    SurfaceFinishes::with_policies(world, &policies)
 }
 
 /// Builds thin layered masonry with exact air cuts and a surrounding concrete inspection pad.

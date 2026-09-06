@@ -55,6 +55,13 @@ increment. The full-resolution haze candidate was subsequently rejected on nativ
 evidence; runtime was restored, as recorded in [the experiment report](occluded-haze.md).
 Keep the existing prototype as a technical baseline, not as visual acceptance.
 
+The [ruined-factory reference scene](reference-scene.md) now has supported broken storeys, grounded
+collapse masses and an irregular physical soil/paving edge, separately from the frozen legacy
+fixture. Initial native inspection still fails the visual gate: the rubble reads as stepped ramps.
+The next geometry proof must establish an oblique broken slab with coherent rendering and physical
+queries, then asymmetric multi-scale accumulation. Do not polish the axis-aligned steps indefinitely
+or substitute a shader-normal adjustment for a real silhouette change.
+
 The next scene must combine layered industrial architecture (slabs, columns, reveals and broken
 material thickness), supported multi-scale rubble, coherent terrain transitions and vegetation,
 and believable outdoor/interior illumination. Reuse verified scans and tools; choose new tools only

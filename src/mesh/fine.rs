@@ -280,13 +280,12 @@ impl<G: StaticGeometry> Builder<'_, G> {
             if let Some(policy) = finish_policy {
                 self.charge(policy.work())?;
             }
-            let finish = if finish_policy
-                .is_some_and(|policy| policy.marks(quad.face(), quad.origin(), normal[1]))
-            {
-                finishes::CUT_CORE_MARKER
-            } else {
-                -1.0
-            };
+            let finish =
+                if finish_policy.is_some_and(|policy| policy.marks_surface(quad, normal[1])) {
+                    finishes::CUT_CORE_MARKER
+                } else {
+                    -1.0
+                };
             let first = self.vertex(mesh, center, normal, quad.voxel(), finish)?;
             let boundary =
                 u32::try_from(mesh.vertices.len()).map_err(|_| FineMeshError::OutputBudget)?;

@@ -6,6 +6,13 @@ facade caps and records its intentional source-layout changes and new scene fing
 The later [fragment-face policies](fragment-face-finishes.md) add explicit retained sides and
 version the appearance key without changing those physical scene fingerprints.
 
+**Later correction:** the [reference-scene raster regression](reference-scene.md) proved that
+identical -2 markers at all three vertices do not ensure bit-identical perspective-interpolated
+fragment values. The original exact floating comparison could therefore restore the exterior scan
+on some cut pixels. Classification now happens at the vertex and uses a separate flat integer
+varying; the continuous coarse depth is preserved. The earlier compute helper and still-image
+checks below did not prove this interpolation boundary correct.
+
 ## Separate appearance from material integrity
 
 The twenty authored industrial rubble pieces no longer need a fictitious integrity reduction to

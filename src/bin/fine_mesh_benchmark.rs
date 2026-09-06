@@ -4,9 +4,9 @@ use destructible_fps::{
     mesh::fine::{
         FineMeshBatch, FineMeshLimits, FineMeshReport,
         finishes::SurfaceFinishes,
-        fixture::industrial_surface_finishes,
+        fixture::reference_surface_finishes,
         fixture::{
-            STAGE_NAMES, industrial_inspection_world, industrial_patch_positions, inspection_world,
+            STAGE_NAMES, industrial_patch_positions, industrial_reference_world, inspection_world,
         },
         hybrid_dirty_chunks, mesh_fine_chunks, mesh_hybrid_chunks_with_finishes,
     },
@@ -40,12 +40,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     for (stage, name) in STAGE_NAMES.iter().enumerate() {
         let world = if industrial {
-            industrial_inspection_world(stage)?
+            industrial_reference_world(stage)?
         } else {
             inspection_world(stage)?
         };
         let finishes = if industrial {
-            Some(industrial_surface_finishes(&world)?)
+            Some(reference_surface_finishes(&world)?)
         } else {
             None
         };

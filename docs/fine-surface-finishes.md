@@ -1,5 +1,9 @@
 # Explicit render-only cut finishes
 
+This receipt describes the original twenty-piece rollout. The subsequent
+[bay profile revision](industrial-bay-profile.md) extends the same bounded registry to authored
+facade caps and records its intentional source-layout changes and new scene fingerprints.
+
 ## Separate appearance from material integrity
 
 The twenty authored industrial rubble pieces no longer need a fictitious integrity reduction to

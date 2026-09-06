@@ -16,7 +16,7 @@ mod windows;
 
 pub const STAGE_NAMES: [&str; 4] = ["intact", "shallow chip", "through bore", "breach"];
 
-/// Explicit authored finishes for the industrial rubble, separate from physical world state.
+/// Explicit authored finishes for industrial cut surfaces, separate from physical world state.
 /// # Errors
 /// Refuses missing, unsupported or oversized source pages.
 pub fn industrial_surface_finishes(
@@ -47,7 +47,7 @@ pub fn industrial_inspection_world(stage: usize) -> Result<RefinedWorld, Box<dyn
     let world = windows::install(&world)?;
     let world = roof::install(&world)?;
     let world = hardstand::install(&world)?;
-    let world = bay::install(&world)?;
+    let world = bay::install(&world, stage)?;
     ruins::bay_debris(&world)
 }
 

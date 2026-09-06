@@ -37,6 +37,9 @@ integrity, removing exterior brick tiling from those authored cut surfaces witho
 The [soil tiling increment](soil-tiling.md) reduces the scan's repeating ground pattern using
 bounded translation-only blending, retaining the physical texture scale and collision source.
 
+The [asymmetric bay revision](industrial-bay-profile.md) replaces the straight V profile with
+chipped shoulders and removes the thin bridge over the passage in actual collision geometry.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after

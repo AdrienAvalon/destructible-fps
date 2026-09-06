@@ -173,6 +173,7 @@ pub(super) fn surface_finishes(
         .chain(bay_shards().iter())
         .map(|s| s.cell)
         .collect();
+    positions.extend(super::bay::cut_top_cells(source));
     positions.sort_unstable();
     super::super::finishes::SurfaceFinishes::cut_tops(source, &positions)
 }

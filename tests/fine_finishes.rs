@@ -15,10 +15,10 @@ use destructible_fps::{
 #[test]
 fn authored_finishes_change_only_markers_and_never_mix_inside_triangles() {
     let fingerprints = [
-        0x13ea_35e9_1e7c_18f3_b1e8_5803_4ead_fd4f_u128,
-        0x6c14_778b_f8bb_e433_f22a_51bc_6f33_f99c,
-        0xa66a_9093_2378_a4f7_de10_cabe_2b4d_5589,
-        0x8843_24bc_6211_2f2f_5263_f6a3_ee73_59f6,
+        0x1a62_9069_c0f3_ed58_0cc1_33f9_83ac_8b69_u128,
+        0x659c_d20b_2634_1198_4f03_3a46_a232_8fba,
+        0xafe2_3513_fdf7_515c_6339_a144_e64c_23af,
+        0x018e_8048_9b45_91b3_cf8f_2c89_dd90_aec9,
     ];
     let first = industrial_inspection_world(0).unwrap();
     let finishes = industrial_surface_finishes(&first).unwrap();
@@ -29,7 +29,7 @@ fn authored_finishes_change_only_markers_and_never_mix_inside_triangles() {
         assert_eq!(
             world.fingerprint(),
             fingerprint,
-            "physical source stays at pre-finish commit"
+            "finishes preserve the authored asymmetric bay source revision"
         );
         assert_eq!(
             finishes.fingerprint(),

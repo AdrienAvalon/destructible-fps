@@ -233,6 +233,63 @@ fn surface_gradient_normal(normal: vec3<f32>, slope: vec3<f32>) -> vec3<f32> {
     return normalize(normal + tangent_slope * 0.75);
 }
 
+// Baked-looking surface condition, not simulated water or an extra geometry/cover layer.
+// Object-local coordinates keep it attached to moving bodies and continuous across static chunks.
+// No camera/time input; the footprint only fades the smaller-scale variation at distance.
+fn weather_hash(cell: vec2<i32>) -> f32 {
+    // Integer lattice hashing avoids cancellation/FMA-dependent lattice values in float hashes.
+    var value = bitcast<u32>(cell.x) * 0x9e3779b9u ^ bitcast<u32>(cell.y) * 0x85ebca6bu;
+    value = (value ^ (value >> 16u)) * 0x7feb352du;
+    value = (value ^ (value >> 15u)) * 0x846ca68bu;
+    return f32((value ^ (value >> 16u)) >> 8u) / 16777216.0;
+}
+
+fn weather_noise(position: vec2<f32>) -> f32 {
+    let cell = vec2<i32>(floor(position));
+    let fraction = fract(position);
+    let curve = fraction * fraction * (vec2<f32>(3.0) - 2.0 * fraction);
+    return mix(
+        mix(weather_hash(cell), weather_hash(cell + vec2<i32>(1, 0)), curve.x),
+        mix(weather_hash(cell + vec2<i32>(0, 1)), weather_hash(cell + vec2<i32>(1, 1)), curve.x),
+        curve.y,
+    );
+}
+
+fn weather_scanned(
+    source: SurfaceSample,
+    material: u32,
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    footprint: f32,
+) -> SurfaceSample {
+    var surface = source;
+    if material == 1u {
+        let broad = weather_noise(position.xz * 0.16 + vec2<f32>(3.7, -8.2));
+        let detail = weather_noise(position.xz * 0.73 + vec2<f32>(-7.1, 11.3));
+        let detail_weight = 1.0 - smoothstep(0.15, 0.75, footprint);
+        let condition = broad + (detail - 0.5) * 0.22 * detail_weight;
+        // Damp soil remains rough: no flat puddles/reflections painted onto uneven geometry.
+        let damp = smoothstep(0.38, 0.67, condition) * smoothstep(0.15, 0.85, normal.y);
+        let mineral = weather_noise(position.xz * 0.31 + vec2<f32>(19.2, 4.8));
+        let dry_tint = mix(vec3<f32>(0.78, 0.74, 0.68), vec3<f32>(1.12, 1.04, 0.88), mineral);
+        surface.albedo = source.albedo * mix(dry_tint, vec3<f32>(0.34, 0.36, 0.35), damp);
+        surface.roughness = mix(max(source.roughness, 0.82), max(source.roughness * 0.62, 0.48), damp);
+    } else if material == 4u || material == 5u {
+        // Elongated discoloration in the original wall frame; no fictitious ground-contact band.
+        let vertical = 1.0 - normal.y * normal.y;
+        let broad = weather_noise(position.xz * 0.24 + vec2<f32>(position.y * 0.11, 6.7));
+        let streak = weather_noise(position.xz * 1.1 + vec2<f32>(position.y * 0.035, -3.2));
+        let detail_weight = 1.0 - smoothstep(0.12, 0.6, footprint);
+        let stain = smoothstep(0.32, 0.74, broad + (streak - 0.5) * 0.38 * detail_weight) * vertical;
+        surface.albedo = source.albedo * mix(vec3<f32>(1.04, 1.02, 0.98), vec3<f32>(0.48, 0.51, 0.48), stain);
+        surface.roughness = mix(source.roughness, max(source.roughness, 0.92), stain);
+    } else {
+        return source;
+    }
+    surface.albedo = clamp(surface.albedo, vec3<f32>(0.0), vec3<f32>(1.0));
+    return surface;
+}
+
 fn sample_scanned(
     input: VertexOutput,
     position_dx: vec3<f32>,
@@ -271,7 +328,8 @@ fn sample_scanned(
     surface.roughness = color.a;
     surface.metallic = metalness;
     surface.local_normal = surface_gradient_normal(local_normal, slope);
-    return surface;
+    return weather_scanned(surface, input.material, input.material_position, local_normal,
+        max(length(position_dx), length(position_dy)));
 }
 
 fn sample_material(

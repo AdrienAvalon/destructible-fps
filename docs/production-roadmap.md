@@ -42,6 +42,10 @@ decoration, disappearing support or inconsistent shadow after the corresponding 
 Do not obtain realism by adding indestructible gameplay cover or colliders unrelated to visible
 material. Fine weapon activation stays explicitly pending while this visual-first slice advances.
 
+The user reconfirmed the ruined-factory image as the target, with the ambition to surpass it.
+[`industrial-visuals.md`](industrial-visuals.md) separates that visual acceptance from intermediate
+material-condition work and keeps the outstanding geometric/composition requirements explicit.
+
 ## Non-negotiable budgets
 
 | Domain | Shipping target | Promotion evidence |

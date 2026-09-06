@@ -4,7 +4,7 @@
 use destructible_fps::{environment::EnvironmentLibrary, render::create_environment};
 use glam::{Mat4, Vec3, Vec4};
 
-const OUTPUT_BYTES: u64 = 43 * 16;
+const OUTPUT_BYTES: u64 = (43 + 512 * 8) * 16;
 const WORLD_SHADER: &str = concat!(
     include_str!("../src/shaders/color.wgsl"),
     include_str!("../src/shaders/world.wgsl")
@@ -51,6 +51,41 @@ fn validate_material_projection() {
     results[41] = vec4<f32>(textureSampleLevel(environment_specular, environment_sampler,
         vec3<f32>(1.0, 0.0, 0.0), f32(textureNumLevels(environment_specular) - 1u)).rgb, 0.0);
     results[42] = vec4<f32>(fog_radiance(vec3<f32>(1.0, 0.0, 0.0)), 0.0);
+    for (var index = 0u; index < 512u; index = index + 1u) {
+        let materials = array<u32, 8>(1u, 1u, 4u, 5u, 2u, 3u, 6u, 7u);
+        let material = materials[index % 8u];
+        let n = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), index % 8u == 1u
+            || material == 4u || material == 5u);
+        let p = vec3<f32>(f32(i32(index / 8u) - 32) * 16.0, 2.4, 15.8);
+        var source: SurfaceSample;
+        source.albedo = vec3<f32>(0.3, 0.2, 0.1);
+        source.roughness = 0.7;
+        source.metallic = 0.123;
+        source.local_normal = normalize(vec3<f32>(0.1, 1.0, 0.2));
+        let near = weather_scanned(source, material, p, n, 0.01);
+        let left = weather_scanned(source, material, p - vec3<f32>(0.0001, 0.0, 0.0), n, 0.01);
+        let right = weather_scanned(source, material, p + vec3<f32>(0.0001, 0.0, 0.0), n, 0.01);
+        let far = weather_scanned(source, material, p, n, 10.0);
+        let offset = 43u + index * 8u;
+        results[offset] = vec4<f32>(near.albedo, near.roughness);
+        results[offset + 1u] = vec4<f32>(left.albedo - right.albedo, left.roughness - right.roughness);
+        results[offset + 2u] = vec4<f32>(near.local_normal - source.local_normal, near.metallic - source.metallic);
+        results[offset + 3u] = vec4<f32>(far.albedo, far.roughness);
+        let horizontal = weather_scanned(source, material, p, vec3<f32>(0.0, 1.0, 0.0), 0.01);
+        results[offset + 4u] = vec4<f32>(horizontal.albedo, horizontal.roughness);
+        for (var axis = 1u; axis < 3u; axis = axis + 1u) {
+            var seam = vec3<f32>(2.4, 2.4, 2.4);
+            seam[axis] = p.x;
+            var epsilon = vec3<f32>(0.0);
+            epsilon[axis] = 0.0001;
+            let lower = weather_scanned(source, material, seam - epsilon, n, 0.01);
+            let upper = weather_scanned(source, material, seam + epsilon, n, 0.01);
+            results[offset + 4u + axis] = vec4<f32>(lower.albedo - upper.albedo, lower.roughness - upper.roughness);
+        }
+        source.albedo = vec3<f32>(1.06);
+        let bright = weather_scanned(source, material, p, n, 0.01);
+        results[offset + 7u] = vec4<f32>(bright.albedo, bright.roughness);
+    }
 }
 ";
 
@@ -190,6 +225,7 @@ fn production_shader_preserves_signed_projection_and_transformed_normals() {
     let (device, queue) = pollster::block_on(gpu());
     let values = execute_shader(&device, &queue);
     validate_environment(&values);
+    validate_weathering(&values);
     let normals = [
         Vec3::X,
         Vec3::NEG_X,
@@ -224,6 +260,70 @@ fn production_shader_preserves_signed_projection_and_transformed_normals() {
             .transform_vector3(curved)
             .normalize()
             .extend(0.0),
+    );
+}
+
+fn validate_weathering(values: &[[f32; 4]]) {
+    let unchanged = Vec4::new(0.3, 0.2, 0.1, 0.7);
+    let mut soil_range = (f32::MAX, f32::MIN);
+    let mut wall_range = (f32::MAX, f32::MIN);
+    for index in 0..512 {
+        let material = [1, 1, 4, 5, 2, 3, 6, 7][index % 8];
+        let offset = 43 + index * 8;
+        for sample in [values[offset], values[offset + 3]] {
+            assert!(sample.iter().all(|v| v.is_finite()));
+            for (value, source) in sample[..3].iter().zip([0.3, 0.2, 0.1]) {
+                assert!(*value >= source * 0.33 && *value <= source * 1.13);
+            }
+            assert!((0.48..=0.93).contains(&sample[3]));
+        }
+        assert!(
+            values[offset + 1].iter().all(|v| v.abs() < 0.001),
+            "seam {index}"
+        );
+        assert_vector(values[offset + 2], Vec4::ZERO);
+        for delta in [values[offset + 5], values[offset + 6]] {
+            assert!(
+                delta.iter().all(|v| v.abs() < 0.001),
+                "other-axis seam {index}: {delta:?}"
+            );
+        }
+        if matches!(material, 1 | 4 | 5) {
+            assert!(
+                values[offset + 7]
+                    .iter()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            );
+        } else {
+            assert_vector(values[offset + 7], Vec4::new(1.06, 1.06, 1.06, 0.7));
+        }
+        match material {
+            1 if index % 8 == 0 => {
+                soil_range.0 = soil_range.0.min(values[offset][0]);
+                soil_range.1 = soil_range.1.max(values[offset][0]);
+            }
+            1 => assert!(
+                (values[offset][3] - 0.82).abs() < 1e-5,
+                "vertical soil cannot look damp"
+            ),
+            4 | 5 => {
+                wall_range.0 = wall_range.0.min(values[offset][0]);
+                wall_range.1 = wall_range.1.max(values[offset][0]);
+                assert_vector(values[offset + 4], Vec4::new(0.312, 0.204, 0.098, 0.7));
+            }
+            _ => {
+                assert_vector(values[offset], unchanged);
+                assert_vector(values[offset + 3], unchanged);
+            }
+        }
+    }
+    assert!(
+        soil_range.1 - soil_range.0 > 0.1,
+        "terrain variation disappeared"
+    );
+    assert!(
+        wall_range.1 - wall_range.0 > 0.1,
+        "wall variation disappeared"
     );
 }
 

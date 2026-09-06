@@ -290,6 +290,73 @@ fn weather_scanned(
     return surface;
 }
 
+struct SoilBlend {
+    sites: array<vec2<i32>, 3>,
+    weights: vec3<f32>,
+};
+
+// Equilateral lattice, translated copies only: the physical scan scale and tangent frame stay fixed.
+// Inspired by stochastic tiling/hex blending; no histogram-preservation claim.
+fn soil_blend(uv: vec2<f32>) -> SoilBlend {
+    let grid = vec2<f32>(uv.x - uv.y * 0.577350269, uv.y * 1.154700538);
+    let cell = vec2<i32>(floor(grid));
+    let f = fract(grid);
+    var blend: SoilBlend;
+    blend.sites[1] = cell + vec2<i32>(1, 0);
+    blend.sites[2] = cell + vec2<i32>(0, 1);
+    if f.x + f.y <= 1.0 {
+        blend.sites[0] = cell;
+        blend.weights = vec3<f32>(1.0 - f.x - f.y, f.x, f.y);
+    } else {
+        blend.sites[0] = cell + vec2<i32>(1, 1);
+        blend.weights = vec3<f32>(f.x + f.y - 1.0, 1.0 - f.y, 1.0 - f.x);
+    }
+    // Sharpen without overshoot or normalization singularities. Shared edges retain shared sites.
+    let square = max(blend.weights, vec3<f32>(0.0)) * max(blend.weights, vec3<f32>(0.0));
+    let fourth = square * square;
+    blend.weights = fourth / dot(fourth, vec3<f32>(1.0));
+    return blend;
+}
+
+fn soil_offset(site: vec2<i32>) -> vec2<f32> {
+    return vec2<f32>(weather_hash(site), weather_hash(site ^ vec2<i32>(0x529a, 0x1b73)));
+}
+
+struct ScanPlane {
+    color: vec4<f32>,
+    slope: vec2<f32>,
+    metallic: f32,
+};
+
+fn scan_plane(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>) -> ScanPlane {
+    var plane: ScanPlane;
+    plane.color = textureSampleGrad(material_color, material_sampler, uv, layer, dx, dy);
+    let packed = textureSampleGrad(material_normal, material_sampler, uv, layer, dx, dy);
+    let normal = packed.xyz * 2.0 - vec3<f32>(1.0);
+    plane.slope = normal.xy / max(normal.z, 0.35);
+    plane.metallic = packed.w;
+    return plane;
+}
+
+fn scanned_plane(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>) -> ScanPlane {
+    if layer != 0 {
+        return scan_plane(uv, layer, dx, dy);
+    }
+    let blend = soil_blend(uv);
+    var plane: ScanPlane;
+    plane.color = vec4<f32>(0.0);
+    plane.slope = vec2<f32>(0.0);
+    plane.metallic = 0.0;
+    for (var i = 0u; i < 3u; i = i + 1u) {
+        // Translation has identity derivative. Never differentiate the hashed site coordinates.
+        let sample = scan_plane(uv + soil_offset(blend.sites[i]), layer, dx, dy);
+        plane.color = plane.color + sample.color * blend.weights[i];
+        plane.slope = plane.slope + sample.slope * blend.weights[i];
+        plane.metallic = plane.metallic + sample.metallic * blend.weights[i];
+    }
+    return plane;
+}
+
 fn sample_scanned(
     input: VertexOutput,
     position_dx: vec3<f32>,
@@ -311,14 +378,11 @@ fn sample_scanned(
             // All derivatives originate at the uniform fragment entry point, before branching.
             let dx = projection_uv(position_dx, frame) * tile_scale;
             let dy = projection_uv(position_dy, frame) * tile_scale;
-            let base = textureSampleGrad(material_color, material_sampler, uv, layer, dx, dy);
-            let packed_normal = textureSampleGrad(material_normal, material_sampler, uv, layer, dx, dy);
-            let tangent_normal = packed_normal.xyz * 2.0 - vec3<f32>(1.0);
-            let axis_slope = (frame.tangent * tangent_normal.x + frame.bitangent * tangent_normal.y)
-                / max(tangent_normal.z, 0.35);
+            let plane = scanned_plane(uv, layer, dx, dy);
+            let axis_slope = frame.tangent * plane.slope.x + frame.bitangent * plane.slope.y;
             slope = slope + axis_slope * weights[axis];
-            color = color + base * weights[axis];
-            metalness = metalness + packed_normal.w * weights[axis];
+            color = color + plane.color * weights[axis];
+            metalness = metalness + plane.metallic * weights[axis];
         }
     }
     var surface: SurfaceSample;

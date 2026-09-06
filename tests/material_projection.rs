@@ -4,7 +4,10 @@
 use destructible_fps::{environment::EnvironmentLibrary, render::create_environment};
 use glam::{Mat4, Vec3, Vec4};
 
-const OUTPUT_BYTES: u64 = (43 + 512 * 8 + 128 * 5) * 16;
+#[path = "material_projection/soil.rs"]
+mod soil;
+
+const OUTPUT_BYTES: u64 = (43 + 512 * 8 + 128 * 5 + soil::SAMPLES * soil::STRIDE + 40 * 4) * 16;
 const WORLD_SHADER: &str = concat!(
     include_str!("../src/shaders/color.wgsl"),
     include_str!("../src/shaders/world.wgsl")
@@ -14,6 +17,8 @@ const HARNESS: &str = r"
 
 @compute @workgroup_size(1)
 fn validate_material_projection() {
+    validate_soil();
+    validate_soil_projection();
     for (var index = 0u; index < 6u; index = index + 1u) {
         let axis = index / 2u;
         var normal = vec3<f32>(0.0);
@@ -131,13 +136,21 @@ async fn gpu() -> (wgpu::Device, wgpu::Queue) {
         .expect("Vulkan device")
 }
 
+fn shader_source() -> String {
+    format!(
+        "{WORLD_SHADER}\n{HARNESS}\n{}\n{}",
+        soil::HARNESS,
+        soil::REFERENCE
+    )
+}
+
 fn execute_shader(device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<[f32; 4]> {
-    let source = format!("{WORLD_SHADER}\n{HARNESS}");
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("production material shader with compute assertions"),
-        source: wgpu::ShaderSource::Wgsl(source.into()),
+        source: wgpu::ShaderSource::Wgsl(shader_source().into()),
     });
     let (environment_layout, environment_group) = create_environment(device, queue).unwrap();
+    let (soil_layout, soil_group) = soil::bindings(device, queue);
     let output_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -165,7 +178,7 @@ fn execute_shader(device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<[f32; 4]> {
         bind_group_layouts: &[
             Some(&output_layout),
             Some(&empty_layout),
-            Some(&empty_layout),
+            Some(&soil_layout),
             Some(&environment_layout),
         ],
         immediate_size: 0,
@@ -204,7 +217,7 @@ fn execute_shader(device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<[f32; 4]> {
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bindings, &[]);
         pass.set_bind_group(1, &empty, &[]);
-        pass.set_bind_group(2, &empty, &[]);
+        pass.set_bind_group(2, &soil_group, &[]);
         pass.set_bind_group(3, &environment_group, &[]);
         pass.dispatch_workgroups(1, 1, 1);
     }
@@ -245,6 +258,7 @@ fn production_shader_preserves_signed_projection_and_transformed_normals() {
     validate_environment(&values);
     validate_weathering(&values);
     validate_cut_cores(&values);
+    soil::validate(&values);
     let normals = [
         Vec3::X,
         Vec3::NEG_X,

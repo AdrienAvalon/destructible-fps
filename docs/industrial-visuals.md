@@ -34,6 +34,9 @@ steel frame, exposes the interior and adds grounded shards with exact regional c
 [Explicit cut finishes](fine-surface-finishes.md) separate rubble-top appearance from physical
 integrity, removing exterior brick tiling from those authored cut surfaces without geometry changes.
 
+The [soil tiling increment](soil-tiling.md) reduces the scan's repeating ground pattern using
+bounded translation-only blending, retaining the physical texture scale and collision source.
+
 ## First material-condition increment
 
 `weather_scanned` in the production world shader adds continuous multiscale surface condition after
@@ -45,7 +48,7 @@ object when it rotates. No ground-height assumption paints a false contact band 
 
 The condition changes albedo and perceptual roughness only; damp soil stays at least 0.48 roughness.
 It adds no texture samples, textures, vertices, collider, shadow caster, material ID or world state.
-The retained scan grain still tiles: macro variation reduces uniformity but is not stochastic
+At that increment the retained scan grain still tiled: macro variation reduces uniformity but is not stochastic
 texture de-tiling or geometric detail. Darkening intentionally changes reflectance; the altered
 surface is not a newly calibrated scan. Light/exposure and the source asset packs are unchanged.
 

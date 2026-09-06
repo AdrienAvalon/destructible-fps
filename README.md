@@ -6,6 +6,13 @@ performance foundations instead of presenting a scripted visual demo as if it we
 
 ## First playable demo
 
+The new [industrial workshop](docs/industrial-world.md) is playable with
+`cargo run --release --bin playable-demo -- --world industrial`: concrete-framed hall, open
+clerestory, recessed brick infill, connected workshop/service volumes and a blast-detachable canopy.
+It is authoritative destructible geometry, still at the coarse one-metre cell scale. Select the
+same preset only on a dedicated server; multiplayer clients receive its map by snapshot and mesh
+it asynchronously. `--world range` preserves the original benchmark scene and compatibility default.
+
 The Linux demo now combines the authoritative core with a real-time first-person client:
 
 - compact 16³ voxel chunks (2 bytes per voxel);

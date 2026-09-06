@@ -2,7 +2,7 @@
 
 use destructible_fps::{
     DemoSession, FireMode, FixedMicrometers3, IVec3, MAX_SERVER_PEERS, MICROMETERS_PER_VOXEL,
-    Material, ReplicatedPlayerState, World, chunk_position,
+    Material, ReplicatedPlayerState, World, WorldPreset, chunk_position,
     mesh_scheduler::{
         CompletedMeshJob, MAX_BODIES_PER_MESH_JOB, MAX_BODY_VOXELS_PER_MESH_JOB,
         MAX_CHUNKS_PER_MESH_JOB, MeshScheduler,
@@ -138,6 +138,7 @@ struct Game {
     last_action: String,
     showcase_view: Option<ShowcaseView>,
     mesh_scheduler: MeshScheduler,
+    world_preset: WorldPreset,
     mesh_snapshot: Arc<World>,
     mesh_phase: MeshPhase,
     pending_mesh_chunks: HashSet<IVec3>,
@@ -155,6 +156,7 @@ impl Game {
         showcase_view: Option<ShowcaseView>,
         structural_lab: bool,
         msaa: u32,
+        world_preset: WorldPreset,
     ) -> Result<Self, String> {
         let showcase = showcase_view.is_some();
         let mut session = if structural_lab {
@@ -163,29 +165,10 @@ impl Game {
                 .with_structural_simulation(&config)
                 .map_err(|error| error.to_string())?
         } else {
-            DemoSession::default()
+            DemoSession::new(world_preset.build())
         };
-        let last_action = if showcase {
-            let detached = session
-                .fire(Vec3::new(0.5, 1.5, 40.0), -Vec3::Z, FireMode::Rifle)
-                .map_err(|error| format!("preparation showcase structure: {error}"))?
-                .ok_or_else(|| "preparation showcase: le support n a pas ete atteint".to_owned())?;
-            let breach = session
-                .fire(Vec3::new(0.5, 3.1, 40.0), -Vec3::Z, FireMode::Explosive)
-                .map_err(|error| format!("preparation showcase: {error}"))?
-                .ok_or_else(|| "preparation showcase: la facade n a pas ete atteinte".to_owned())?;
-            if detached.spawned_body_ids.is_empty() {
-                return Err("preparation showcase: aucun corps detache".to_owned());
-            }
-            format!(
-                "showcase: {} voxels detaches, {} voxels de facade fractures, {} datagrammes",
-                detached.report.detached_voxels,
-                breach.report.fractured_voxels,
-                detached.datagrams + breach.datagrams
-            )
-        } else {
-            "pret".to_owned()
-        };
+        let last_action = prepare_showcase(&mut session, world_preset, showcase_view)?;
+        println!("Carte: {world_preset:?}; {last_action}");
         let mesh_snapshot = Arc::new(session.world().clone());
         let pending_mesh_chunks = mesh_snapshot
             .chunk_positions()
@@ -242,6 +225,7 @@ impl Game {
             fixed_step_index: 0,
             last_action,
             showcase_view,
+            world_preset,
             mesh_scheduler: MeshScheduler::new(),
             mesh_snapshot,
             mesh_phase: MeshPhase::InitialStreaming,
@@ -497,6 +481,20 @@ impl Game {
         true
     }
 
+    fn camera(&self, elapsed_seconds: f32) -> (Vec3, Vec3) {
+        match self.showcase_view {
+            Some(view) if self.world_preset == WorldPreset::Industrial => {
+                industrial_camera(view, elapsed_seconds)
+            }
+            Some(ShowcaseView::Orbit | ShowcaseView::LightingStress | ShowcaseView::Intact) => {
+                showcase_camera(elapsed_seconds)
+            }
+            Some(ShowcaseView::Interior) => unreachable!("CLI rejects range interior view"),
+            Some(ShowcaseView::BreachCloseup) => breach_closeup_camera(elapsed_seconds),
+            None => (self.player.camera_position(), self.player.view_direction()),
+        }
+    }
+
     fn advance_simulation(&mut self, frame_interval: Duration) {
         self.accumulator += frame_interval.as_secs_f32().min(0.1);
         let input = self.movement_input();
@@ -562,13 +560,7 @@ impl Game {
             println!("LAB charge automatique a {elapsed_seconds:.3} secondes");
             self.fire_at(Vec3::new(1.5, 4.5, 12.0), -Vec3::Z, FireMode::TestCharge);
         }
-        let (camera_position, view_direction) = match self.showcase_view {
-            Some(ShowcaseView::Orbit | ShowcaseView::LightingStress) => {
-                showcase_camera(elapsed_seconds)
-            }
-            Some(ShowcaseView::BreachCloseup) => breach_closeup_camera(elapsed_seconds),
-            None => (self.player.camera_position(), self.player.view_direction()),
-        };
+        let (camera_position, view_direction) = self.camera(elapsed_seconds);
         self.pump_meshing(camera_position);
         match self
             .renderer
@@ -747,6 +739,7 @@ struct App {
     failure: Option<String>,
     structural_lab: bool,
     msaa: u32,
+    world_preset: WorldPreset,
 }
 
 impl ApplicationHandler for App {
@@ -769,6 +762,7 @@ impl ApplicationHandler for App {
             self.showcase_view,
             self.structural_lab,
             self.msaa,
+            self.world_preset,
         ) {
             Ok(game) => self.game = Some(game),
             Err(error) => {
@@ -895,6 +889,7 @@ struct LaunchOptions {
     showcase_view: Option<ShowcaseView>,
     structural_lab: bool,
     msaa: u32,
+    world_preset: WorldPreset,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -902,6 +897,8 @@ enum ShowcaseView {
     Orbit,
     BreachCloseup,
     LightingStress,
+    Intact,
+    Interior,
 }
 
 fn launch_options() -> Result<LaunchOptions, Box<dyn Error>> {
@@ -912,14 +909,25 @@ fn launch_options_from(
     arguments: impl IntoIterator<Item = String>,
 ) -> Result<LaunchOptions, Box<dyn Error>> {
     let mut arguments = arguments.into_iter();
+    let mut world_selected = false;
     let mut options = LaunchOptions {
         exit_after: None,
         showcase_view: None,
         structural_lab: false,
         msaa: 4,
+        world_preset: WorldPreset::default(),
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "--world" => {
+                if world_selected {
+                    return Err("--world ne peut apparaitre qu une fois".into());
+                }
+                options.world_preset = arguments.next().ok_or("--world exige un nom")?.parse()?;
+                world_selected = true;
+            }
+            "--showcase-intact" => options.showcase_view = Some(ShowcaseView::Intact),
+            "--showcase-interior" => options.showcase_view = Some(ShowcaseView::Interior),
             "--msaa" => {
                 options.msaa = arguments.next().ok_or("--msaa exige 1 ou 4")?.parse()?;
                 if !matches!(options.msaa, 1 | 4) {
@@ -943,10 +951,76 @@ fn launch_options_from(
             _ => return Err(format!("argument inconnu: {argument}").into()),
         }
     }
-    if options.structural_lab && options.showcase_view.is_some() {
-        return Err("--structural-lab est incompatible avec --showcase".into());
+    if options.structural_lab && (options.showcase_view.is_some() || world_selected) {
+        return Err("--structural-lab est incompatible avec --world et --showcase".into());
+    }
+    if options.showcase_view == Some(ShowcaseView::Interior)
+        && options.world_preset != WorldPreset::Industrial
+    {
+        return Err("--showcase-interior exige --world industrial".into());
     }
     Ok(options)
+}
+
+fn prepare_showcase(
+    session: &mut DemoSession,
+    world: WorldPreset,
+    view: Option<ShowcaseView>,
+) -> Result<String, String> {
+    if matches!(
+        view,
+        None | Some(ShowcaseView::Intact | ShowcaseView::Interior)
+    ) {
+        return Ok("pret, carte intacte".to_owned());
+    }
+    if world == WorldPreset::Industrial {
+        let shot = session
+            .fire(Vec3::new(-13.5, 3.1, 32.0), -Vec3::Z, FireMode::Explosive)
+            .map_err(|error| error.to_string())?
+            .ok_or("facade industrielle non atteinte")?;
+        if shot.target != IVec3::new(-14, 3, 15) || shot.report.fractured_voxels == 0 {
+            return Err("breche industrielle non validee".to_owned());
+        }
+        return Ok(format!(
+            "breche industrielle autoritaire: {} voxels fractures, {} datagrammes",
+            shot.report.fractured_voxels, shot.datagrams
+        ));
+    }
+    let detached = session
+        .fire(Vec3::new(0.5, 1.5, 40.0), -Vec3::Z, FireMode::Rifle)
+        .map_err(|error| format!("preparation showcase structure: {error}"))?
+        .ok_or("preparation showcase: support non atteint")?;
+    let breach = session
+        .fire(Vec3::new(0.5, 3.1, 40.0), -Vec3::Z, FireMode::Explosive)
+        .map_err(|error| format!("preparation showcase: {error}"))?
+        .ok_or("preparation showcase: facade non atteinte")?;
+    if detached.spawned_body_ids.is_empty() {
+        return Err("preparation showcase: aucun corps detache".to_owned());
+    }
+    Ok(format!(
+        "showcase: {} voxels detaches, {} voxels de facade fractures, {} datagrammes",
+        detached.report.detached_voxels,
+        breach.report.fractured_voxels,
+        detached.datagrams + breach.datagrams
+    ))
+}
+
+fn industrial_camera(view: ShowcaseView, elapsed: f32) -> (Vec3, Vec3) {
+    let (position, target) = match view {
+        ShowcaseView::BreachCloseup => (Vec3::new(-17.5, 4.2, 26.0), Vec3::new(-12.0, 5.0, 15.0)),
+        ShowcaseView::Interior => (Vec3::new(1.5, 2.65, 11.0), Vec3::new(-6.0, 8.0, -10.0)),
+        ShowcaseView::LightingStress => {
+            let angle = elapsed.mul_add(0.105, -0.55);
+            (
+                Vec3::new(angle.sin() * 51.0, 10.0, angle.cos() * 51.0),
+                Vec3::new(-4.0, 7.0, 0.0),
+            )
+        }
+        ShowcaseView::Orbit | ShowcaseView::Intact => {
+            (Vec3::new(-34.0, 6.0, 46.0), Vec3::new(-3.0, 8.0, 0.0))
+        }
+    };
+    (position, (target - position).normalize())
 }
 
 fn showcase_camera(elapsed_seconds: f32) -> (Vec3, Vec3) {
@@ -1011,6 +1085,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         failure: None,
         structural_lab: options.structural_lab,
         msaa: options.msaa,
+        world_preset: options.world_preset,
     };
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.failure {
@@ -1022,6 +1097,53 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_selection_and_authored_views_are_strict_and_lab_is_exclusive() {
+        let parse =
+            |args: &[&str]| launch_options_from(args.iter().map(|value| (*value).to_owned()));
+        assert_eq!(parse(&[]).unwrap().world_preset, WorldPreset::Range);
+        assert_eq!(
+            parse(&["--world", "industrial"]).unwrap().world_preset,
+            WorldPreset::Industrial
+        );
+        assert!(parse(&["--world", "industrial", "--showcase-interior"]).is_ok());
+        for args in [
+            vec!["--world"],
+            vec!["--world", "../map"],
+            vec!["--world", "industrial", "--world", "range"],
+            vec!["--world", "range", "--structural-lab"],
+            vec!["--showcase-intact", "--structural-lab"],
+            vec!["--showcase-interior"],
+        ] {
+            assert!(parse(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn industrial_intact_views_do_not_damage_the_map_but_breach_crosses_authority() {
+        for view in [
+            None,
+            Some(ShowcaseView::Intact),
+            Some(ShowcaseView::Interior),
+        ] {
+            let mut session = DemoSession::new(WorldPreset::Industrial.build());
+            let before = session.world().fingerprint();
+            prepare_showcase(&mut session, WorldPreset::Industrial, view).unwrap();
+            assert_eq!(session.world().fingerprint(), before);
+            assert!(session.bodies().is_empty());
+        }
+        let mut session = DemoSession::new(WorldPreset::Industrial.build());
+        let before = session.world().fingerprint();
+        prepare_showcase(
+            &mut session,
+            WorldPreset::Industrial,
+            Some(ShowcaseView::BreachCloseup),
+        )
+        .unwrap();
+        assert_ne!(session.world().fingerprint(), before);
+        assert!(!session.world().voxel(IVec3::new(-14, 3, 15)).is_solid());
+    }
 
     #[test]
     fn msaa_cli_is_explicit_and_bounded() {

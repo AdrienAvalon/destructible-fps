@@ -11,6 +11,7 @@ pub mod elasticity;
 pub mod environment;
 pub mod generator;
 pub mod host_attestation;
+pub mod industrial;
 pub mod material;
 pub mod material_library;
 pub mod mesh;
@@ -56,7 +57,7 @@ pub use deployment_policy::{
     MAX_LAN_POLICY_LIFETIME_SECONDS,
 };
 pub use destruction::{DestructionReport, Explosion};
-pub use generator::demo_world;
+pub use generator::{WorldPreset, demo_world};
 pub use host_attestation::{
     LanHostAttestation, LanHostAttestationError, MAX_HOST_INTERFACE_RECORDS,
     attest_lan_policy_on_current_host,

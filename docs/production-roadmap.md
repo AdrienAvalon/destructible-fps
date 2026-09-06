@@ -311,6 +311,13 @@ are resolved, and launch/rollback ownership is documented.
 
 The immediate priority is the playable visual/destruction experience requested by the user:
 
+The first authored industrial layout is now playable with `--world industrial`, including actual
+material geometry, intact/breach/interior inspection views, tested canopy separation and server-only
+map selection. Initial/replacement snapshot meshes use the bounded worker and reject late jobs from
+old map generations; resynchronization retains input history. This advances the layout/loading
+foundation of VIS-01 and SYNC-01, not photorealism, calibrated collapse or the performance release gate.
+See [`industrial-world.md`](industrial-world.md) and the dated performance evidence.
+
 1. validate the delivered scanned PBR material slice, bounded offline cooking and stable surface
    projection against moving runtime views; follow with material blending and GPU compression;
    compare actual intact/breached images and frame distributions (VIS-01, TOOLS-01, PERF-01);

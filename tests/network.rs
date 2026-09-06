@@ -890,8 +890,17 @@ fn retained_delta_repairs_a_deliberate_process_client_gap() {
 
 #[test]
 fn missing_retained_delta_falls_back_to_a_process_snapshot() {
+    process_map_snapshot_with_missing_fragment("range");
+}
+
+#[test]
+fn industrial_map_replaces_a_different_client_map_via_repaired_process_snapshot() {
+    process_map_snapshot_with_missing_fragment("industrial");
+}
+
+fn process_map_snapshot_with_missing_fragment(world: &str) {
     let (mut child, server_address) =
-        spawn_ready_ephemeral_server(300, Some("--exit-after-catchups"));
+        spawn_ready_world_server(300, Some("--exit-after-catchups"), world);
     let socket = client_socket();
     let session = handshake(&socket, server_address, 0x5555, &mut child);
     socket
@@ -963,14 +972,30 @@ fn missing_retained_delta_falls_back_to_a_process_snapshot() {
     assert!(dropped_snapshot_frame);
     assert!(requested_missing_fragments);
     let snapshot_id = snapshot.snapshot_id();
-    let mut replica = ClientReplica::new(World::default());
+    let opposite = if world == "range" {
+        destructible_fps::WorldPreset::Industrial
+    } else {
+        destructible_fps::WorldPreset::Range
+    };
+    let mut replica = ClientReplica::new(opposite.build());
+    assert_ne!(
+        replica.world().fingerprint(),
+        snapshot.world().fingerprint()
+    );
     snapshot
         .install_into(&mut replica)
         .expect("atomic process snapshot install");
     socket
         .send_to(&encode_snapshot_ack(session, snapshot_id), server_address)
         .expect("acknowledge installed process snapshot");
-    assert_eq!(replica.world().fingerprint(), demo_world().fingerprint());
+    assert_eq!(
+        replica.world().fingerprint(),
+        world
+            .parse::<destructible_fps::WorldPreset>()
+            .unwrap()
+            .build()
+            .fingerprint()
+    );
     assert_eq!(replica.next_body_id(), 1);
 
     let status = wait_for_child_exit(&mut child, Duration::from_secs(2));
@@ -1563,12 +1588,21 @@ fn spawn_ready_ephemeral_server(
     max_ticks: u64,
     exit_flag: Option<&str>,
 ) -> (ChildGuard, SocketAddr) {
+    spawn_ready_world_server(max_ticks, exit_flag, "range")
+}
+
+fn spawn_ready_world_server(
+    max_ticks: u64,
+    exit_flag: Option<&str>,
+    world: &str,
+) -> (ChildGuard, SocketAddr) {
     // A released reservation is not ownership: concurrent client/proxy binds can take that port
     // before the child. Let the child own an ephemeral socket and announce its actual address.
     let mut command = Command::new(env!("CARGO_BIN_EXE_dedicated-server"));
     command
         .args(["--bind", "127.0.0.1:0", "--max-ticks"])
-        .arg(max_ticks.to_string());
+        .arg(max_ticks.to_string())
+        .args(["--world", world]);
     if let Some(flag) = exit_flag {
         command.args([flag, "1"]);
     }

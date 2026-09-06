@@ -2,7 +2,7 @@ use destructible_fps::{
     OidcRefreshController, SERVER_PHYSICS_HZ, SecureAuthorityLaunchConfig,
     SecureAuthorityLaunchError, SecureDedicatedServer, SecureNetworkExposure,
     SecureNetworkTickReport, SecureTlsConfigUpdater, TlsIdentityRefreshController,
-    TlsIdentityRefreshOutcome, demo_world,
+    TlsIdentityRefreshOutcome, WorldPreset,
 };
 use std::{
     error::Error,
@@ -21,6 +21,7 @@ use tokio::{
 
 struct Options {
     config: PathBuf,
+    world_preset: WorldPreset,
 }
 
 #[derive(Default)]
@@ -75,7 +76,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .certificate_safety_deadline()
         .ok_or("TLS safety state unavailable")?;
     let exposure = launch.exposure();
-    let mut server = launch.start(demo_world())?;
+    let mut server = launch.start(options.world_preset.build())?;
     let refresh_tasks = spawn_refresh_tasks(
         &server,
         oidc_refresh.as_ref(),
@@ -352,7 +353,13 @@ impl Totals {
 }
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
-    let mut arguments = std::env::args_os().skip(1);
+    parse_options_from(std::env::args_os().skip(1))
+}
+
+fn parse_options_from(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Options, Box<dyn Error>> {
+    let mut arguments = arguments.into_iter();
     if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--config")) {
         return Err("usage: secure-dedicated-server --config <json-file>".into());
     }
@@ -360,10 +367,23 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         .next()
         .map(PathBuf::from)
         .ok_or("--config requires a file")?;
+    let world_preset = match arguments.next() {
+        None => WorldPreset::default(),
+        Some(flag) if flag == "--world" => arguments
+            .next()
+            .ok_or("--world requires a name")?
+            .to_str()
+            .ok_or("invalid world name")?
+            .parse()?,
+        Some(_) => return Err("unexpected extra arguments".into()),
+    };
     if arguments.next().is_some() {
         return Err("unexpected extra arguments".into());
     }
-    Ok(Options { config })
+    Ok(Options {
+        config,
+        world_preset,
+    })
 }
 
 #[cfg(test)]
@@ -371,10 +391,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_config_path_is_accepted() {
+    fn secure_world_cli_preserves_file_backed_config_and_rejects_extra_arguments() {
+        let parse = |args: &[&str]| parse_options_from(args.iter().map(std::ffi::OsString::from));
         assert_eq!(
-            std::mem::size_of::<Options>(),
-            std::mem::size_of::<PathBuf>()
+            parse(&["--config", "fixture.json"]).unwrap().world_preset,
+            WorldPreset::Range
         );
+        let industrial = parse(&["--config", "fixture.json", "--world", "industrial"]).unwrap();
+        assert_eq!(industrial.world_preset, WorldPreset::Industrial);
+        assert_eq!(industrial.config, PathBuf::from("fixture.json"));
+        for args in [
+            vec!["--config", "fixture.json", "--world"],
+            vec!["--config", "fixture.json", "--world", "../map"],
+            vec!["--config", "fixture.json", "--world", "industrial", "extra"],
+            vec!["--world", "industrial"],
+        ] {
+            assert!(parse(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn credential_valued_or_unknown_cli_options_are_rejected() {
+        for args in [
+            vec!["--token", "dummy-non-secret"],
+            vec!["--config", "fixture.json", "--token", "dummy-non-secret"],
+            vec![
+                "--config",
+                "fixture.json",
+                "--world",
+                "industrial",
+                "--password",
+                "dummy-non-secret",
+            ],
+        ] {
+            assert!(parse_options_from(args.into_iter().map(std::ffi::OsString::from)).is_err());
+        }
     }
 }

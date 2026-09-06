@@ -43,11 +43,19 @@ From the repository root, with the Linux desktop session active:
 ```bash
 cargo build --locked --release --bin playable-demo
 python tools/tooling_smoke.py renderdoc
+python tools/tooling_smoke.py renderdoc --world industrial
 python tools/tooling_smoke.py blender
 python tools/tooling_smoke.py tracy
 python -m unittest discover -s tools -p 'test_*.py'
 shellcheck tools/tracy_viewer.sh
 ```
+
+RenderDoc accepts only the fixed `range` (default) and `industrial` scenes. The launcher rejects
+paths, arbitrary names and `--world` on other tools; the capture helper maps the name to a literal
+game argument list. The industrial breach capture/replay on 2026-09-06 passed with Vulkan,
+220 draw calls, 14 textures and a 321,519,596-byte capture. Its inspected thumbnail is real runtime
+output, not the generated visual target. These instrumented timings are excluded from performance
+comparisons; the existing capture, namespace, timeout and retention limits are unchanged.
 
 Each run creates a private, unique directory under ignored `target/tooling/`, prints its location
 and requires an explicit JSON success artifact. Exit code alone, missing display, unsupported GPU,

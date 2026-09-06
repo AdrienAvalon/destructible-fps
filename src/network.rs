@@ -1515,6 +1515,46 @@ impl Default for OrderedDeltaInbox {
 mod tests {
     use super::*;
 
+    #[test]
+    fn all_actual_spawn_slots_can_walk_into_the_industrial_hall_without_jumping() {
+        let world = crate::industrial::industrial_world();
+        for slot in 0..u8::try_from(MAX_SERVER_PEERS).unwrap() {
+            let mut player = player_for_spawn_slot(slot);
+            let initial = player.state().position_um;
+            assert!(player.is_clear_of_static_world(&world));
+            for input_sequence in 1..=720 {
+                let pos = player.state().position_um;
+                let (x, z) = if pos.x.abs() > 100_000 {
+                    (i16::try_from(-pos.x.signum()).unwrap() * 1000, 0)
+                } else if pos.z > 5 * MICROMETERS_PER_VOXEL {
+                    (0, -1000)
+                } else {
+                    (0, 0)
+                };
+                player
+                    .accept_input(PlayerInputCommand {
+                        input_sequence,
+                        movement_x_per_mille: x,
+                        movement_z_per_mille: z,
+                        jump: false,
+                        sprint: false,
+                    })
+                    .unwrap();
+                let _ = player.step(&world);
+                assert!(player.is_clear_of_static_world(&world));
+            }
+            let final_position = player.state().position_um;
+            assert_ne!(final_position, initial);
+            assert!(
+                final_position.x.abs() < 20 * MICROMETERS_PER_VOXEL
+                    && final_position.z > -15 * MICROMETERS_PER_VOXEL
+                    && final_position.z < 10 * MICROMETERS_PER_VOXEL,
+                "spawn {slot} cannot reach the hall"
+            );
+            assert_eq!(player.state().position_um.y, MICROMETERS_PER_VOXEL);
+        }
+    }
+
     const TEST_COMMAND: ExplosionCommand = ExplosionCommand {
         command_id: 1,
         center: crate::IVec3::new(0, 0, 0),

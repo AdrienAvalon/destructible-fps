@@ -1,6 +1,35 @@
 use crate::material::{Material, Voxel};
 use crate::world::{IVec3, World};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorldPreset {
+    #[default]
+    Range,
+    Industrial,
+}
+
+impl std::str::FromStr for WorldPreset {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "range" => Ok(Self::Range),
+            "industrial" => Ok(Self::Industrial),
+            _ => Err("--world accepts exactly range or industrial"),
+        }
+    }
+}
+
+impl WorldPreset {
+    #[must_use]
+    pub fn build(self) -> World {
+        match self {
+            Self::Range => demo_world(),
+            Self::Industrial => crate::industrial::industrial_world(),
+        }
+    }
+}
+
 /// Generates a deterministic test range with terrain and a multi-material building.
 #[must_use]
 pub fn demo_world() -> World {

@@ -91,10 +91,19 @@ def tracy_inner(output):
             client.wait()
 
 
-def main():
+def parse_options(arguments=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tool", choices=("renderdoc", "blender", "tracy"))
-    options = parser.parse_args()
+    parser.add_argument("--world", choices=("range", "industrial"))
+    options = parser.parse_args(arguments)
+    if options.world is not None and options.tool != "renderdoc":
+        parser.error("--world applies only to the RenderDoc game capture")
+    options.world = options.world or "range"
+    return options
+
+
+def main():
+    options = parse_options()
     base = ROOT / "target/tooling"
     base.mkdir(parents=True, exist_ok=True)
     # Keep captures for examination; refuse uncontrolled accumulation, do not delete user evidence.
@@ -108,6 +117,7 @@ def main():
         "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY", "LANG", "LC_ALL",
     ) if key in os.environ}
     env.update({"PATH": "/usr/bin:/bin", "FPS_TOOL_OUTPUT": str(output), "FPS_TOOL_ROOT": str(ROOT),
+                "FPS_TOOL_WORLD": options.world,
                 "XDG_CACHE_HOME": str(output / "cache"), "XDG_DATA_HOME": str(output / "data"),
                 "XDG_CONFIG_HOME": str(output / "config"), "OMP_NUM_THREADS": "4"})
     config = output / "data/qrenderdoc/UI.config"

@@ -2302,6 +2302,24 @@ mod tests {
         );
         assert_eq!(client.bodies().len(), 1);
         assert_eq!(client.next_body_id(), 2);
+        assert_invalid_replacement_preserves_client(client);
+    }
+
+    fn assert_invalid_replacement_preserves_client(mut client: ClientReplica) {
+        let before_world = client.world().fingerprint();
+        let before_bodies = client.bodies().clone();
+        let before_states = client.body_states().clone();
+        let before_body_fingerprint = client.body_fingerprint();
+        assert_eq!(
+            client.install_snapshot(World::default(), BTreeMap::new(), &BTreeMap::new(), 0, 9),
+            Err(ReplicationError::InvalidSnapshotHighWaterMark(0))
+        );
+        assert_eq!(client.world().fingerprint(), before_world);
+        assert_eq!(client.bodies(), &before_bodies);
+        assert_eq!(client.body_states(), &before_states);
+        assert_eq!(client.body_fingerprint(), before_body_fingerprint);
+        assert_eq!(client.next_body_id(), 2);
+        assert_eq!(client.expected_sequence, 7);
     }
 
     #[test]

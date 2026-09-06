@@ -6,11 +6,24 @@ import subprocess
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
+import io
 
-from tooling_smoke import ROOT, isolated_command, run_bounded
+from tooling_smoke import ROOT, isolated_command, run_bounded, parse_options
 
 
 class ToolingTests(unittest.TestCase):
+    def test_capture_world_is_whitelisted_and_only_applies_to_renderdoc(self):
+        self.assertEqual(parse_options(["renderdoc"]).world, "range")
+        for world in ("range", "industrial"):
+            self.assertEqual(parse_options(["renderdoc", "--world", world]).world, world)
+        for args in (["renderdoc", "--world"], ["renderdoc", "--world", "../map"],
+                     ["renderdoc", "--world", "industrial; false"],
+                     ["blender", "--world", "industrial"], ["tracy", "--world", "range"]):
+            with self.subTest(arguments=args), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                parse_options(args)
+            self.assertEqual(error.exception.code, 2)
+
     def test_namespace_has_no_external_interface(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

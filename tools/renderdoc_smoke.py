@@ -16,6 +16,12 @@ control = None
 capture = None
 replay = None
 try:
+    world = os.environ.get("FPS_TOOL_WORLD", "range")
+    # Fixed reviewed argument strings: no arbitrary environment text reaches ExecuteAndInject.
+    arguments = {
+        "range": "--world range --showcase-closeup --smoke-seconds 8",
+        "industrial": "--world industrial --showcase-closeup --smoke-seconds 8",
+    }[world]
     # qrenderdoc has already initialized replay. No global hook or remote replay server.
     options = rd.CaptureOptions()
     options.allowVSync = True
@@ -23,7 +29,7 @@ try:
     options.hookIntoChildren = False
     launched = rd.ExecuteAndInject(
         str(root / "target/release/playable-demo"), str(root),
-        "--showcase-closeup --smoke-seconds 8", [], str(output / "breach"), options, False,
+        arguments, [], str(output / "breach"), options, False,
     )
     if launched.result != rd.ResultCode.Succeeded:
         raise RuntimeError(str(launched.result))
@@ -66,7 +72,7 @@ try:
     thumbnail = capture.GetThumbnail(rd.FileType.PNG, 1024)
     (output / "breach-thumbnail.png").write_bytes(bytes(thumbnail.data))
     (output / "renderdoc-result.json").write_text(json.dumps({
-        "version": rd.GetVersionString(), "capture": filename.name,
+        "version": rd.GetVersionString(), "capture": filename.name, "world": world,
         "bytes": filename.stat().st_size, "drawcalls": draws,
         "textures": len(replay.GetTextures()), "api": "Vulkan",
         "scope": "instrumented capture and replay, not a release performance benchmark",

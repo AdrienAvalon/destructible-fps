@@ -333,6 +333,50 @@ mod tests {
     }
 
     #[test]
+    fn replacing_world_preserves_pending_inputs_and_does_not_reuse_sequences() {
+        let original = floor_world();
+        let replacement = World::default();
+        let mut server = AuthoritativePlayer::default();
+        let mut prediction = ClientPrediction::new(1, replicated(7, server.state())).unwrap();
+        for input_sequence in 1..=6 {
+            let input = PlayerInputCommand {
+                input_sequence,
+                movement_x_per_mille: 1_000,
+                ..PlayerInputCommand::default()
+            };
+            prediction.predict(input, &original).unwrap();
+            if input_sequence <= 3 {
+                server.accept_input(input).unwrap();
+                let _ = server.step(&original);
+            }
+        }
+        let report = prediction
+            .reconcile(4, replicated(7, server.state()), &replacement)
+            .unwrap();
+        assert_eq!(report.acknowledged_inputs, 3);
+        assert_eq!(report.replayed_inputs, 3);
+        // Delayed commands 4..6 reach the authority after the snapshot boundary. Command 7 must
+        // be new, not a replay of an already produced input based on the older acknowledgement.
+        for input_sequence in 4..=7 {
+            let input = PlayerInputCommand {
+                input_sequence,
+                movement_x_per_mille: 1_000,
+                ..PlayerInputCommand::default()
+            };
+            server.accept_input(input).unwrap();
+            let _ = server.step(&replacement);
+            if input_sequence == 7 {
+                prediction.predict(input, &replacement).unwrap();
+            }
+        }
+        assert_eq!(prediction.state(), server.state());
+        prediction
+            .reconcile(8, replicated(7, server.state()), &replacement)
+            .unwrap();
+        assert_eq!(prediction.pending_inputs(), 0);
+    }
+
+    #[test]
     fn invalid_reconciliation_is_atomic() {
         let world = floor_world();
         let server = AuthoritativePlayer::default();

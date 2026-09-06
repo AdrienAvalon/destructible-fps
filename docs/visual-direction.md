@@ -25,6 +25,13 @@ Generation prompt (built-in image generation):
 
 ## Delivered foundation
 
+The explicit `--world industrial` preset now replaces the single-box composition with a framed
+hall, recessed brick infill, open windows, roof monitor, lower annex, service tower and independent
+loading canopy. Intact, breach and interior cameras inspect the same authoritative material world
+used by collision and multiplayer snapshots; see [`industrial-world.md`](industrial-world.md).
+This is layout foundation only: one-metre sections, repetitive surfaces, coarse visibility bands
+and missing interior bounce remain plainly visible. The concept is still not achieved.
+
 - stable material identity crosses CPU meshing into the GPU without changing voxel, physics or wire
   formats;
 - five CC0 Poly Haven scans supply brick, concrete, stone, soil and wood albedo/roughness/GL normals

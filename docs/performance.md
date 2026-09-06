@@ -3,6 +3,128 @@
 Performance observations are point-in-time results tied to a command, scene, build, resolution, and
 machine. They are not portable guarantees or substitutes for the later platform matrix.
 
+## 2026-09-06 — authored industrial world and asynchronous map replacement
+
+Source: parent `6e7df1d` plus this world/client/tooling increment. The new explicit `industrial`
+preset is ordinary authoritative material state, not a cosmetic building mesh. The compatibility
+`range` generator body/helpers are unchanged. All three authority/standalone CLIs strictly select
+the preset; multiplayer starts empty and receives it from the authority. See
+[`industrial-world.md`](industrial-world.md) for commands, geometry, scale and validation limits.
+
+Hardware rechecked: i7-13700H, RTX 4050 Laptop, NVIDIA 610.57.04, Linux 7.2.2-1-cachyos,
+Rust 1.97.1, release Vulkan, 1,440×900. Measurements below ran serially after compilation,
+functional network checks and instrumented capture had ended. The desktop remained active and GPU
+clocks were not locked. Each launch is a fresh process; the second sustained run is a warm repeat,
+not a controlled cold/warm OS-cache experiment. No cache clearing or driver/host change was performed.
+
+### Actual views, sustained lighting and memory
+
+The intact map has 96,321 solids, 132 chunks and 50,767 generated faces. Its real front-infill blast
+fractures 208 cells in four application datagrams, leaving 96,113 solids and 50,723 faces. The wide
+intact, close breach and interior views are fixed twelve-second inspections. The thirty-second
+lighting view orbits the breached scene with sixteen moving synthetic casters and no ongoing
+destruction: its geometry does not get cheaper with time, but it is not a sixteen-player simulation.
+All runs streamed every chunk and ended successfully with zero lost GPU samples.
+
+Values are p50 / p95 / p99 milliseconds. CPU frame wall includes acquisition/presentation waits,
+not just active CPU execution. The bounded 16,384-sample window retained each complete run.
+
+| Scene | CPU / GPU samples | CPU frame wall | GPU total | GPU maximum |
+| --- | ---: | --- | --- | ---: |
+| Intact wide, 4× | 3,496 / 3,494 | 2.078 / 11.593 / 14.319 | 1.261 / 1.487 / 1.510 | 1.767 |
+| Front breach, 4× | 2,529 / 2,527 | 2.890 / 11.087 / 14.093 | 1.916 / 2.135 / 2.294 | 3.001 |
+| Interior, 4× | 2,912 / 2,910 | 2.542 / 11.504 / 16.102 | 1.620 / 1.654 / 1.664 | 2.499 |
+| Moving casters, first 4× | 6,475 / 6,473 | 3.391 / 9.926 / 13.247 | 1.973 / 2.144 / 2.449 | 2.489 |
+| Moving casters, warm 4× | 6,397 / 6,395 | 3.343 / 10.052 / 13.093 | 1.953 / 2.402 / 2.520 | 2.552 |
+| Front breach, 1× | 2,806 / 2,804 | 2.601 / 11.345 / 14.137 | 1.690 / 1.774 / 1.817 | 2.630 |
+
+| GPU stages, same scene order | Sun depth | Sky refresh only | HDR scene/resolve | Display/HUD |
+| --- | --- | --- | --- | --- |
+| Intact wide | 0.075 / 0.088 / 0.090 | 0.456 / 0.602 / 0.602 | 1.141 / 1.345 / 1.366 | 0.026 / 0.031 / 0.032 |
+| Front breach 4× | 0.082 / 0.085 / 0.091 | 0.480 / 0.844 / 0.844 | 1.788 / 1.904 / 2.147 | 0.026 / 0.028 / 0.032 |
+| Interior | 0.078 / 0.079 / 0.080 | 0.498 / 0.874 / 0.874 | 1.496 / 1.528 / 1.537 | 0.026 / 0.027 / 0.027 |
+| Moving casters first | 0.075 / 0.078 / 0.089 | 0.633 / 0.672 / 0.805 | 1.215 / 1.393 / 1.503 | 0.026 / 0.026 / 0.032 |
+| Moving casters warm | 0.075 / 0.085 / 0.091 | 0.633 / 0.768 / 0.824 | 1.205 / 1.497 / 1.559 | 0.026 / 0.030 / 0.032 |
+| Front breach 1× | 0.086 / 0.088 / 0.089 | 0.479 / 0.841 / 0.841 | 1.424 / 1.500 / 1.541 | 0.029 / 0.030 / 0.031 |
+
+Fixed views each have ten sky refreshes; their per-frame sky p99 is 0.000–0.005 ms and is not
+the cost of a refresh. Moving casters refresh every frame with no cache hits; two readbacks remain
+pending at normal exit. Final visible world draws are 112 / 85 / 65 / 105 / 105 / 85 respectively,
+with 133 sun draws. Moving-caster sky work is 1,688 depth draws on its final frame. Initial streaming
+takes 71.4 / 74.9 / 69.5 / 65.7 / 79.2 / 72.5 ms, including scheduling and upload, not network join.
+
+An additional successful eight-second 4× breach process peaked at 264,208 KiB RSS (258.0 MiB),
+measured by `resource.getrusage(RUSAGE_CHILDREN)` in a fresh Python launcher. This is whole-process
+resident memory, not an allocation count or total device memory. HDR targets are 72,576,000 bytes
+at 4× and 15,552,000 at 1×; sky depth is 67,108,864, material textures 55,924,040 and environment
+textures 3,452,912 bytes, excluding other meshes, driver resources and swapchain storage.
+
+### CPU regression fixtures and synchronization
+
+The required legacy benchmarks also passed serially, with their original seeds/scenes unchanged.
+They do not measure industrial-map worst-case collapse, decoding or a full server tick.
+
+| Fixture | Samples | p50 / p95 / p99 ms | Maximum ms |
+| --- | ---: | --- | ---: |
+| Destruction + encode/replica loopback | 500 | 0.012 / 0.231 / 0.387 | not reported |
+| 8,192-cell slab analysis | 100 | 2.503 / 2.595 / 2.674 | not reported |
+| Slab promotion | 100 | 1.642 / 1.751 / 1.811 | not reported |
+| Slab combined | 100 | 4.143 / 4.339 / 4.543 | 4.559 |
+| 1,024-body stacking tick | 300 | 0.521 / 1.129 / 1.145 | 1.176 |
+| Range snapshot encode | 20 | 5.242 / 5.596 / 6.341 | 6.341 |
+| Snapshot reassemble/decode | 20 | 6.234 / 6.458 / 6.844 | 6.844 |
+| Snapshot validate/install | 20 | 0.365 / 0.385 / 0.391 | 0.391 |
+| Snapshot total | 20 | 11.883 / 12.427 / 13.571 | 13.571 |
+
+Destruction retained exact replicas after 29,631 changes, 908 frames and 0.567 MiB; its scene gets
+cheaper as it is destroyed. Stacking settled all bodies with 768 maximum broad-phase pairs.
+The range snapshot remained 1,181 frames / 1.351 MiB. The separate required normal five-second
+Vulkan smoke passed: 98,394 solids, 128 chunks, 48,736 faces; CPU wall p50/p95/p99
+2.894 / 16.601 / 16.817 ms and GPU 1.659 / 2.107 / 2.125 ms, maximum 3.006 ms.
+
+Industrial snapshots were independently round-tripped with complete canonical cells/body states
+at both MTUs. Intact wire size is 1,396,802 bytes / 1,270 frames at 1,100 bytes, and 1,392,660 bytes /
+1,161 frames at 1,200. After four actual canopy-support blasts and 180 physics steps, the late-join
+snapshot remains bounded and both reversed-fragment replicas match throughout the falling motion.
+
+Two sixteen-second graphical QUIC/TLS clients began with zero local chunks, installed the same
+industrial fingerprint `b0907f09211a134f7584c7d7d8011c6d`, then each deliberately requested another
+snapshot after producing input 41/42. Both reached map epoch 2, reconciled on that world and passed
+the check for at least sixty subsequently acknowledged inputs. Each applied two later world deltas
+and completed two current-generation mesh jobs with drained mesh queues. The impaired client repaired
+the deliberately lost delta once (33 ms RTT sample, 100 ms RTO); both had zero transport-queue drops
+and three predicted inputs awaiting acknowledgement at exit. The authority ran 1,800 ticks, admitted
+two sessions and applied two commands with zero malformed/session-rejected datagrams, protocol
+rejections or queue drops. Short-lived TLS/OIDC fixture files were removed after successful exit.
+This loopback exercise is not WAN bandwidth, correction-rate or hostile-load evidence.
+
+### Review and remaining gates
+
+All 378 ordinary Rust tests pass in each debug/release profile; the six separately ignored real-GPU
+checks pass explicitly in both profiles. Strict all-target Clippy, formatting, named network and
+secure suites, OIDC tests and all 22 Python tooling tests pass. Claude provided one analysis and a
+pre-final code review; its confirmed test gaps drove stronger map/spawn, late-mesh decision,
+populated atomic rejection and preserved-input-history checks. Its concern about pre-snapshot
+delta reception was disproved by the existing ready gate; counters now reset per installed map.
+Final local validation covers those follow-ups and the later RenderDoc scene-selector patch; that
+tooling patch and these performance tables were not part of Claude's reviewed source context.
+
+Intact, breach and interior screenshots were captured from only the owned game window and inspected.
+RenderDoc 1.45 also captured/replayed the industrial breach: Vulkan, 220 draws, 14 textures,
+321,519,596 bytes. Its thumbnail shows actual engine output; capture timings are excluded above.
+Local logs/screens remain under `/tmp/fps-industrial-VuR27L`; the capture is in ignored
+`target/tooling/renderdoc-o4y70k5r`. Retained tooling evidence now exceeds the 2 GiB preflight
+threshold, so a later capture must archive selected old runs explicitly; no limit was raised and
+no prior capture was deleted. No tool, driver, dependency, privilege or infrastructure service was
+installed/changed in this increment, and no network exposure was added.
+
+The scene remains visibly coarse and **not photorealistic**: metre-scale sections, repeated ground
+materials, hard sky-visibility bands and missing interior bounce are unresolved. Whole-server
+industrial tick p95/p99, worst-case destruction spikes, allocation counts, controlled cold starts,
+32-player sustained bandwidth/corrections, cross-OS execution, fine collision/fracture geometry and
+calibrated weapon/load response remain unmeasured or undelivered. These timings therefore do not
+promote the final performance, realism or release gates.
+
 ## 2026-09-06 — linear HDR frame, spatial MSAA and bounded resize
 
 Source: parent `e4ef8fe` plus this HDR/display increment. World and sky retain linear RGBA16Float
@@ -107,8 +229,9 @@ The final two-client graphical QUIC/TLS test mixed 1× and 4× at 1,280×800. Bo
 clients saw one remote player and two world deltas; deliberate first-delta loss on the 1× client
 required one successful repair. Transport drops were zero. The finite loopback server completed
 1,500 ticks, admitted two sessions and accepted two commands with zero malformed input, admission
-failure, protocol rejection or queue drop. At client exit three predicted inputs and one/two mesh
-jobs remained pending; this is not a proof that every asynchronous queue drained. Existing core
+failure, protocol rejection or queue drop. At client exit three predicted inputs remained pending;
+the one/two `jobs_mesh` values count completed jobs, not queued jobs. The smoke requires the mesh
+queues to be drained. Existing core
 fingerprint/process tests separately prove convergence. All six ephemeral credential/config files
 and their empty private directory were removed after the run; no active service was touched.
 

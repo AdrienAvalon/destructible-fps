@@ -982,6 +982,13 @@ impl Renderer {
         self.refresh_stats();
     }
 
+    /// Invalidates a replaced map without rebuilding geometry on the network receive path.
+    pub fn clear_world_meshes(&mut self) {
+        self.chunks.clear();
+        self.player_instances.clear();
+        self.clear_body_meshes();
+    }
+
     pub fn update_body_transforms(&mut self, states: &BTreeMap<BodyId, RigidBodyState>) {
         let scale = MICROMETERS_PER_VOXEL as f32;
         for (&body_id, state) in states {

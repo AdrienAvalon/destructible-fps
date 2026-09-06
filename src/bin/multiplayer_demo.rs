@@ -11,11 +11,10 @@ use destructible_fps::{
     OrderedDeltaInbox, PlayerInputCommand, PlayerInterpolationBuffer, PlayerInterpolationError,
     PlayerStateReceiveError, SecureClientConnection, SecureClientLaunchConfig, SecureDatagramInbox,
     ServerControlMessage, SnapshotAssembler, decode_frame, decode_player_state_packet,
-    decode_server_control, demo_world, dirty_chunks, encode_build_request, encode_client_hello,
+    decode_server_control, dirty_chunks, encode_build_request, encode_client_hello,
     encode_explosion_request, encode_player_input, encode_repair_request, encode_snapshot_ack,
     encode_snapshot_fragments_request, encode_snapshot_request, is_delta_datagram,
     is_player_state_datagram, is_snapshot_datagram,
-    mesh::{mesh_body, mesh_chunk},
     mesh_scheduler::{
         CompletedMeshJob, MAX_BODIES_PER_MESH_JOB, MAX_BODY_VOXELS_PER_MESH_JOB,
         MAX_CHUNKS_PER_MESH_JOB, MeshScheduler,
@@ -57,7 +56,35 @@ enum SnapshotPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MeshWorkerPhase {
     Idle,
-    InFlight,
+    InFlight { world_epoch: u64 },
+}
+
+impl MeshWorkerPhase {
+    const fn complete(&mut self, current: u64, fingerprint_matches: bool) -> MeshCompletion {
+        let same_epoch = matches!(*self, Self::InFlight { world_epoch } if world_epoch == current);
+        *self = Self::Idle;
+        if !same_epoch {
+            MeshCompletion::Discard
+        } else if fingerprint_matches {
+            MeshCompletion::Upload
+        } else {
+            MeshCompletion::Requeue
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MeshCompletion {
+    Discard,
+    Upload,
+    Requeue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SmokeResnapshot {
+    Disabled,
+    Pending,
+    Requested { input_sequence: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,7 +285,7 @@ struct MultiplayerGame {
     last_snapshot_request_at: Option<Instant>,
     last_snapshot_progress_at: Option<Instant>,
     last_snapshot_repair_at: Option<Instant>,
-    pristine_world_fingerprint: u128,
+    mesh_epoch: u64,
     transport: GameTransport,
     session_id: Option<u64>,
     prediction: Option<ClientPrediction>,
@@ -279,6 +306,8 @@ struct MultiplayerGame {
     maximum_horizontal_displacement_um: u64,
     applied_world_deltas: u64,
     smoke_actions_sent: u8,
+    smoke_resnapshot: SmokeResnapshot,
+    last_authoritative_input_sequence: u64,
 }
 
 impl MultiplayerGame {
@@ -287,19 +316,15 @@ impl MultiplayerGame {
         transport_options: &TransportOptions,
         smoke_motion: bool,
         smoke_drop_first_delta: bool,
+        smoke_resnapshot: bool,
         msaa: u32,
     ) -> Result<Self, String> {
         let transport = GameTransport::connect(transport_options)?;
         let session_id = transport.session_id();
         let transport_description = transport.description()?;
-        let world = demo_world();
-        let meshes = world
-            .chunk_positions()
-            .into_iter()
-            .map(|chunk| (chunk, mesh_chunk(&world, chunk)))
-            .collect();
-        let mut renderer = pollster::block_on(Renderer::with_msaa(Arc::clone(&window), msaa))?;
-        renderer.upload_chunk_meshes(meshes);
+        // No guessed local map: the admitted authority supplies the initial world.
+        let world = destructible_fps::World::default();
+        let renderer = pollster::block_on(Renderer::with_msaa(Arc::clone(&window), msaa))?;
         let now = Instant::now();
         println!(
             "Client multijoueur {transport_description}; {} chunks charges",
@@ -311,7 +336,7 @@ impl MultiplayerGame {
         let mut game = Self {
             window,
             renderer,
-            pristine_world_fingerprint: world.fingerprint(),
+            mesh_epoch: 0,
             mesh_snapshot: Arc::new(world.clone()),
             replica: ClientReplica::new(world),
             delta_inbox: OrderedDeltaInbox::default(),
@@ -357,6 +382,12 @@ impl MultiplayerGame {
             maximum_horizontal_displacement_um: 0,
             applied_world_deltas: 0,
             smoke_actions_sent: 0,
+            smoke_resnapshot: if smoke_resnapshot {
+                SmokeResnapshot::Pending
+            } else {
+                SmokeResnapshot::Disabled
+            },
+            last_authoritative_input_sequence: 0,
         };
         if let Some(session_id) = session_id {
             game.request_snapshot(session_id)?;
@@ -393,12 +424,20 @@ impl MultiplayerGame {
                 self.maximum_horizontal_displacement_um
             ));
         }
-        if self.applied_world_deltas == 0
-            && self.replica.world().fingerprint() == self.pristine_world_fingerprint
-        {
+        if self.applied_world_deltas == 0 {
             return Err(
-                "smoke multijoueur sans destruction repliquee ni snapshot modifie".to_owned(),
+                "smoke multijoueur sans delta applique apres le dernier snapshot".to_owned(),
             );
+        }
+        match self.smoke_resnapshot {
+            SmokeResnapshot::Disabled => {}
+            SmokeResnapshot::Requested { input_sequence }
+                if self.mesh_epoch >= 2
+                    && self
+                        .last_authoritative_input_sequence
+                        .saturating_sub(input_sequence)
+                        >= 60 => {}
+            _ => return Err("smoke sans reprise autoritaire apres le second snapshot".to_owned()),
         }
         if self.smoke_actions_sent < 2 {
             return Err("smoke termine avant les deux actions autoritaires".to_owned());
@@ -418,7 +457,7 @@ impl MultiplayerGame {
             && (self.completed_mesh_jobs == 0
                 || !self.pending_mesh_chunks.is_empty()
                 || !self.pending_body_ids.is_empty()
-                || self.mesh_worker_phase == MeshWorkerPhase::InFlight)
+                || matches!(self.mesh_worker_phase, MeshWorkerPhase::InFlight { .. }))
         {
             return Err("smoke termine avant la presentation du delta replique".to_owned());
         }
@@ -519,6 +558,7 @@ impl MultiplayerGame {
             .send(encode_snapshot_request(session_id))
             .map_err(|error| format!("demande de snapshot: {error}"))?;
         self.last_snapshot_request_at = Some(Instant::now());
+        self.snapshot_phase = SnapshotPhase::Awaiting;
         "synchronisation initiale du monde".clone_into(&mut self.last_status);
         Ok(())
     }
@@ -583,34 +623,38 @@ impl MultiplayerGame {
         };
         let snapshot_id = snapshot.snapshot_id();
         let next_sequence = snapshot.next_sequence();
-        let mut chunk_positions = self
-            .replica
-            .world()
-            .chunk_positions()
-            .into_iter()
-            .collect::<HashSet<_>>();
+        let chunk_positions = snapshot.world().chunk_positions();
+        if chunk_positions.len() > MAX_PENDING_NETWORK_MESH_CHUNKS {
+            return Err("snapshot hors budget de maillage client".to_owned());
+        }
+        let next_epoch = self
+            .mesh_epoch
+            .checked_add(1)
+            .ok_or("generation de carte epuisee")?;
         snapshot
             .install_into(&mut self.replica)
             .map_err(|error| format!("installation du snapshot refusee: {error}"))?;
         self.delta_inbox = OrderedDeltaInbox::new(next_sequence);
         self.delta_gap_since = None;
         self.delta_repair_timer.clear_probe();
-        chunk_positions.extend(self.replica.world().chunk_positions());
-        let mut chunk_positions = chunk_positions.into_iter().collect::<Vec<_>>();
-        chunk_positions.sort_unstable_by_key(|chunk| (chunk.x, chunk.y, chunk.z));
-        let chunk_meshes = chunk_positions
-            .into_iter()
-            .map(|chunk| (chunk, mesh_chunk(self.replica.world(), chunk)))
-            .collect();
-        self.renderer.upload_chunk_meshes(chunk_meshes);
-        self.renderer.clear_body_meshes();
-        let body_meshes = self.replica.bodies().values().map(mesh_body).collect();
-        self.renderer.upload_body_meshes(body_meshes)?;
-        self.renderer
-            .update_body_transforms(self.replica.body_states());
+        self.mesh_epoch = next_epoch;
+        self.renderer.clear_world_meshes();
+        // Preserve unacknowledged inputs and their high-water mark across a repair. Recreating
+        // prediction from an older acknowledgement could reuse sequences still in flight.
+        self.interpolation = PlayerInterpolationBuffer::default();
+        self.latest_state_received_at = None;
+        self.visual_correction = Vec3::ZERO;
+        self.applied_world_deltas = 0;
+        self.completed_mesh_jobs = 0;
         self.mesh_snapshot = Arc::new(self.replica.world().clone());
-        self.pending_mesh_chunks.clear();
-        self.pending_body_ids.clear();
+        self.pending_mesh_chunks = chunk_positions.into_iter().collect();
+        self.pending_body_ids = self.replica.bodies().keys().copied().collect();
+        println!(
+            "SNAPSHOT id={snapshot_id} epoch={next_epoch} fingerprint={:032x} solids={} chunks={} mesh=queued",
+            self.replica.world().fingerprint(),
+            self.replica.world().stats().solid_voxels,
+            self.pending_mesh_chunks.len()
+        );
         self.transport
             .send(encode_snapshot_ack(session_id, snapshot_id))
             .map_err(|error| format!("acquittement du snapshot: {error}"))?;
@@ -701,21 +745,29 @@ impl MultiplayerGame {
                 world_fingerprint,
                 meshes,
             })) => {
-                self.mesh_worker_phase = MeshWorkerPhase::Idle;
-                if world_fingerprint == self.replica.world().fingerprint() {
-                    self.renderer.upload_chunk_meshes(meshes);
-                    self.completed_mesh_jobs = self.completed_mesh_jobs.saturating_add(1);
-                } else {
-                    self.pending_mesh_chunks
-                        .extend(meshes.into_iter().map(|(chunk, _mesh)| chunk));
+                match self.mesh_worker_phase.complete(
+                    self.mesh_epoch,
+                    world_fingerprint == self.replica.world().fingerprint(),
+                ) {
+                    // Replacement snapshots already queue their complete geometry.
+                    MeshCompletion::Discard => {}
+                    MeshCompletion::Upload => {
+                        self.renderer.upload_chunk_meshes(meshes);
+                        self.completed_mesh_jobs = self.completed_mesh_jobs.saturating_add(1);
+                    }
+                    MeshCompletion::Requeue => self
+                        .pending_mesh_chunks
+                        .extend(meshes.into_iter().map(|(chunk, _mesh)| chunk)),
                 }
             }
             Ok(Some(CompletedMeshJob::Bodies(meshes))) => {
-                self.mesh_worker_phase = MeshWorkerPhase::Idle;
-                self.renderer.upload_body_meshes(meshes)?;
-                self.renderer
-                    .update_body_transforms(self.replica.body_states());
-                self.completed_mesh_jobs = self.completed_mesh_jobs.saturating_add(1);
+                if self.mesh_worker_phase.complete(self.mesh_epoch, true) == MeshCompletion::Upload
+                {
+                    self.renderer.upload_body_meshes(meshes)?;
+                    self.renderer
+                        .update_body_transforms(self.replica.body_states());
+                    self.completed_mesh_jobs = self.completed_mesh_jobs.saturating_add(1);
+                }
             }
             Ok(None) => {}
             Err(error) => return Err(format!("worker de remeshing arrete: {error}")),
@@ -726,7 +778,7 @@ impl MultiplayerGame {
                 self.pending_mesh_chunks.len()
             ));
         }
-        if self.mesh_worker_phase == MeshWorkerPhase::InFlight {
+        if matches!(self.mesh_worker_phase, MeshWorkerPhase::InFlight { .. }) {
             return Ok(());
         }
         if self.queue_body_mesh_job()? {
@@ -771,7 +823,9 @@ impl MultiplayerGame {
         for body_id in body_ids {
             self.pending_body_ids.remove(&body_id);
         }
-        self.mesh_worker_phase = MeshWorkerPhase::InFlight;
+        self.mesh_worker_phase = MeshWorkerPhase::InFlight {
+            world_epoch: self.mesh_epoch,
+        };
         Ok(true)
     }
 
@@ -793,7 +847,9 @@ impl MultiplayerGame {
         for chunk in chunks {
             self.pending_mesh_chunks.remove(&chunk);
         }
-        self.mesh_worker_phase = MeshWorkerPhase::InFlight;
+        self.mesh_worker_phase = MeshWorkerPhase::InFlight {
+            world_epoch: self.mesh_epoch,
+        };
         Ok(())
     }
 
@@ -823,10 +879,13 @@ impl MultiplayerGame {
     }
 
     fn receive_player_state(&mut self, payload: &[u8]) -> Result<(), String> {
+        if !self.snapshot_ready() {
+            return Ok(());
+        }
         let packet = decode_player_state_packet(payload)
             .map_err(|error| format!("etat joueur invalide: {error}"))?;
         match self.interpolation.push(payload) {
-            Ok(_report) => self.latest_state_received_at = Some(Instant::now()),
+            Ok(_report) => {}
             Err(PlayerInterpolationError::Receive(PlayerStateReceiveError::StaleServerTick {
                 ..
             })) => return Ok(()),
@@ -886,11 +945,16 @@ impl MultiplayerGame {
         } else {
             self.visual_correction = Vec3::ZERO;
         }
+        self.latest_state_received_at = Some(Instant::now());
+        self.last_authoritative_input_sequence = authoritative.last_input_sequence;
         self.sync_local_view();
         Ok(())
     }
 
     fn fixed_tick(&mut self) -> Result<(), String> {
+        if !self.snapshot_ready() || self.latest_state_received_at.is_none() {
+            return Ok(());
+        }
         let Some(session_id) = self.session_id else {
             return Ok(());
         };
@@ -1022,6 +1086,24 @@ impl MultiplayerGame {
         Ok(())
     }
 
+    fn send_smoke_resnapshot(&mut self) -> Result<(), String> {
+        if self.smoke_resnapshot != SmokeResnapshot::Pending
+            || self.started.elapsed() < Duration::from_secs(2)
+            || !self.snapshot_ready()
+            || self.last_authoritative_input_sequence == 0
+        {
+            return Ok(());
+        }
+        let Some(session_id) = self.session_id else {
+            return Ok(());
+        };
+        let input_sequence = self.next_input_sequence - 1;
+        self.request_snapshot(session_id)?;
+        self.smoke_resnapshot = SmokeResnapshot::Requested { input_sequence };
+        println!("RESNAPSHOT requested_after_input={input_sequence}");
+        Ok(())
+    }
+
     fn sync_local_view(&mut self) {
         let Some(prediction) = &self.prediction else {
             return;
@@ -1086,6 +1168,7 @@ impl MultiplayerGame {
         }
         self.smooth_visual_correction(frame_seconds);
         self.pump_meshing()?;
+        self.send_smoke_resnapshot()?;
         self.send_smoke_action()?;
         self.update_remote_players()?;
         match self.renderer.render(
@@ -1194,6 +1277,7 @@ struct App {
     transport: TransportOptions,
     exit_after: Option<Duration>,
     smoke_drop_first_delta: bool,
+    smoke_resnapshot: bool,
     msaa: u32,
     failure: Option<String>,
 }
@@ -1217,6 +1301,7 @@ impl ApplicationHandler for App {
             &self.transport,
             self.exit_after.is_some(),
             self.smoke_drop_first_delta,
+            self.smoke_resnapshot,
             self.msaa,
         ) {
             Ok(game) => self.game = Some(game),
@@ -1322,6 +1407,7 @@ struct Options {
     transport: TransportOptions,
     exit_after: Option<Duration>,
     smoke_drop_first_delta: bool,
+    smoke_resnapshot: bool,
     msaa: u32,
 }
 
@@ -1342,6 +1428,7 @@ where
     let mut secure_credential = None;
     let mut exit_after = None;
     let mut smoke_drop_first_delta = false;
+    let mut smoke_resnapshot = false;
     let mut msaa = 4;
     let mut arguments = arguments.into_iter().map(Into::into);
     while let Some(argument) = arguments.next() {
@@ -1394,6 +1481,7 @@ where
                 exit_after = Some(Duration::from_secs_f64(seconds));
             }
             "--smoke-drop-first-delta" => smoke_drop_first_delta = true,
+            "--smoke-resnapshot" => smoke_resnapshot = true,
             _ => return Err(format!("argument inconnu: {argument}").into()),
         }
     }
@@ -1421,13 +1509,14 @@ where
                 .into(),
         );
     };
-    if smoke_drop_first_delta && exit_after.is_none() {
-        return Err("--smoke-drop-first-delta exige --smoke-seconds".into());
+    if (smoke_drop_first_delta || smoke_resnapshot) && exit_after.is_none() {
+        return Err("les scenarios de reparation exigent --smoke-seconds".into());
     }
     Ok(Options {
         transport,
         exit_after,
         smoke_drop_first_delta,
+        smoke_resnapshot,
         msaa,
     })
 }
@@ -1441,6 +1530,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         transport: options.transport,
         exit_after: options.exit_after,
         smoke_drop_first_delta: options.smoke_drop_first_delta,
+        smoke_resnapshot: options.smoke_resnapshot,
         msaa: options.msaa,
         failure: None,
     };
@@ -1454,6 +1544,37 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mesh_completion_from_replaced_world_is_never_current_even_with_reused_body_ids() {
+        for fingerprint_matches in [false, true] {
+            let mut phase = MeshWorkerPhase::InFlight { world_epoch: 7 };
+            assert_eq!(
+                phase.complete(8, fingerprint_matches),
+                MeshCompletion::Discard
+            );
+            assert_eq!(phase, MeshWorkerPhase::Idle);
+            // The released slot can accept replacement-map work, even with the same body IDs.
+            phase = MeshWorkerPhase::InFlight { world_epoch: 8 };
+            assert_eq!(phase.complete(8, true), MeshCompletion::Upload);
+            assert_eq!(phase, MeshWorkerPhase::Idle);
+        }
+        let mut phase = MeshWorkerPhase::InFlight { world_epoch: 8 };
+        assert_eq!(phase.complete(8, false), MeshCompletion::Requeue);
+        assert_eq!(phase, MeshWorkerPhase::Idle);
+        assert_eq!(phase.complete(8, true), MeshCompletion::Discard);
+    }
+
+    #[test]
+    fn explicit_resnapshot_requires_a_bounded_smoke() {
+        assert!(options_from(["--smoke-resnapshot"]).is_err());
+        assert!(
+            options_from(["--smoke-resnapshot", "--smoke-seconds", "8"])
+                .unwrap()
+                .smoke_resnapshot
+        );
+        assert!(!options_from(Vec::<String>::new()).unwrap().smoke_resnapshot);
+    }
 
     #[test]
     fn msaa_cli_is_explicit_and_bounded() {

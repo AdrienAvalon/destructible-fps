@@ -1,5 +1,5 @@
 use destructible_fps::{
-    AuthorityCore, DedicatedServer, SERVER_PHYSICS_HZ, demo_world, structural_lab::structural_lab,
+    AuthorityCore, DedicatedServer, SERVER_PHYSICS_HZ, WorldPreset, structural_lab::structural_lab,
 };
 use std::{
     error::Error,
@@ -19,6 +19,7 @@ struct Options {
     exit_after_snapshots: Option<usize>,
     exit_after_catchups: Option<usize>,
     structural_lab: bool,
+    world_preset: WorldPreset,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -28,7 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let core = AuthorityCore::new(world, 1200)?.with_structural_simulation(&config)?;
         DedicatedServer::bind_core(options.bind, core)?
     } else {
-        DedicatedServer::bind(options.bind, demo_world())?
+        DedicatedServer::bind(options.bind, options.world_preset.build())?
     };
     println!("READY {}", server.local_addr()?);
     io::stdout().flush()?;
@@ -89,6 +90,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
+    parse_options_from(std::env::args().skip(1))
+}
+
+fn parse_options_from(
+    arguments: impl IntoIterator<Item = String>,
+) -> Result<Options, Box<dyn Error>> {
     let mut bind = DEFAULT_BIND.parse::<SocketAddr>()?;
     let mut max_ticks = u64::MAX;
     let mut exit_after_commands = None;
@@ -96,9 +103,18 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut exit_after_snapshots = None;
     let mut exit_after_catchups = None;
     let mut structural_lab = false;
-    let mut arguments = std::env::args().skip(1);
+    let mut world_preset = WorldPreset::default();
+    let mut world_selected = false;
+    let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "--world" => {
+                if world_selected {
+                    return Err("duplicate --world".into());
+                }
+                world_preset = arguments.next().ok_or("--world requires a name")?.parse()?;
+                world_selected = true;
+            }
             "--structural-lab" => structural_lab = true,
             "--bind" => {
                 bind = arguments
@@ -147,6 +163,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             _ => return Err(format!("unknown argument: {argument}").into()),
         }
     }
+    if structural_lab && world_selected {
+        return Err("--structural-lab conflicts with --world".into());
+    }
     if !bind.ip().is_loopback() {
         return Err("this unauthenticated milestone only permits an explicit loopback bind".into());
     }
@@ -173,12 +192,32 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         exit_after_snapshots,
         exit_after_catchups,
         structural_lab,
+        world_preset,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_cli_does_not_accept_paths_or_silently_override_the_lab() {
+        let parse =
+            |args: &[&str]| parse_options_from(args.iter().map(|value| (*value).to_owned()));
+        assert_eq!(parse(&[]).unwrap().world_preset, WorldPreset::Range);
+        assert_eq!(
+            parse(&["--world", "industrial"]).unwrap().world_preset,
+            WorldPreset::Industrial
+        );
+        for args in [
+            vec!["--world"],
+            vec!["--world", "../map"],
+            vec!["--world", "range", "--structural-lab"],
+            vec!["--world", "industrial", "--world", "range"],
+        ] {
+            assert!(parse(&args).is_err());
+        }
+    }
 
     #[test]
     fn default_bind_is_loopback() {

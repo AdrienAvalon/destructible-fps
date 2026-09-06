@@ -94,22 +94,13 @@ impl RefinedVolume {
         end_um: [i32; 3],
         limits: RayLimits,
     ) -> Result<SegmentTrace, VolumeError> {
-        if start_um == end_um
-            || start_um
-                .into_iter()
-                .chain(end_um)
-                .any(|v| !(-MAX_SEGMENT_COORDINATE_UM..=MAX_SEGMENT_COORDINATE_UM).contains(&v))
-        {
-            return Err(VolumeError::InvalidSegment);
-        }
+        let (start, direction) = segment(start_um, end_um)?;
         if !(1..=MAX_RAY_HITS).contains(&limits.hits)
             || !(1..=MAX_RAY_VISITS).contains(&limits.visits)
         {
             return Err(VolumeError::InvalidLimits);
         }
-        let start = start_um.map(|v| i64::from(v) * i64::from(VOLUME_EDGE));
         let end = end_um.map(|v| i64::from(v) * i64::from(VOLUME_EDGE));
-        let direction = std::array::from_fn(|axis| end[axis] - start[axis]);
         let query = LocalBox::new(
             std::array::from_fn(|axis| local_index(start[axis].min(end[axis]))),
             std::array::from_fn(|axis| local_index(start[axis].max(end[axis])) + 1),
@@ -135,6 +126,42 @@ impl RefinedVolume {
             visits: work.visited,
         })
     }
+}
+
+/// Allocation-free uniform fast path with exactly the refined page's half-open semantics.
+pub(crate) fn trace_uniform_segment(
+    voxel: crate::Voxel,
+    start_um: [i32; 3],
+    end_um: [i32; 3],
+) -> Result<Option<MaterialChord>, VolumeError> {
+    let (start, direction) = segment(start_um, end_um)?;
+    Ok(if voxel.is_solid() {
+        intersect(LocalBox::FULL, start, direction).map(|(entry, exit)| MaterialChord {
+            leaf: VolumeLeaf {
+                bounds: LocalBox::FULL,
+                voxel,
+            },
+            entry,
+            exit,
+        })
+    } else {
+        None
+    })
+}
+
+fn segment(start: [i32; 3], end: [i32; 3]) -> Result<([i64; 3], [i64; 3]), VolumeError> {
+    if start == end
+        || start
+            .into_iter()
+            .chain(end)
+            .any(|v| !(-MAX_SEGMENT_COORDINATE_UM..=MAX_SEGMENT_COORDINATE_UM).contains(&v))
+    {
+        return Err(VolumeError::InvalidSegment);
+    }
+    let start = start.map(|v| i64::from(v) * i64::from(VOLUME_EDGE));
+    let direction =
+        std::array::from_fn(|axis| i64::from(end[axis]) * i64::from(VOLUME_EDGE) - start[axis]);
+    Ok((start, direction))
 }
 
 fn local_index(scaled_um: i64) -> u16 {

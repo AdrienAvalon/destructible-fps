@@ -14,6 +14,8 @@ use destructible_fps::{
     world::geometry::RefinedWorld,
 };
 
+#[path = "fine_geometry_demo/probe.rs"]
+mod probe;
 #[path = "fine_geometry_demo/stream.rs"]
 mod stream;
 use stream::Stream;
@@ -48,6 +50,7 @@ struct Scene {
     kind: WorldKind,
     desired: usize,
     presented: [usize; 4],
+    probed: [bool; 4],
     started: Instant,
     smoke: Option<Duration>,
     smoke_complete: bool,
@@ -88,6 +91,7 @@ impl Scene {
             kind,
             desired: 0,
             presented: [0; 4],
+            probed: [false; 4],
             started: Instant::now(),
             smoke,
             smoke_complete: false,
@@ -111,6 +115,9 @@ impl Scene {
                 self.renderer.upload_chunk_meshes(delivery.meshes);
             }
             if let Some((stage, report, elapsed)) = delivery.complete {
+                // Probe the same immutable snapshot whose complete meshes were just installed.
+                probe::verify_stage(self.kind, &self.worlds[stage], stage)?;
+                self.probed[stage] = true;
                 let world_fingerprint = self.worlds[stage].fingerprint();
                 println!(
                     "FINE_STAGE world={:?} stage={stage} name={} fingerprint={world_fingerprint:032x} quads={} vertices={} triangles={} work={} cached_lines={} stage_latency_ms={:.3}",
@@ -124,7 +131,7 @@ impl Scene {
                     elapsed.as_secs_f64() * 1000.0
                 );
                 self.mesh.record_ms(elapsed.as_secs_f64() * 1000.0);
-                self.window.set_title(&format!("Fine geometry {:?} | {} | arrows: orbit/stage, W/S: zoom | authored inspection, not weapon simulation", self.kind, STAGE_NAMES[stage]));
+                self.window.set_title(&format!("Fine geometry {:?} | {} | arrows: orbit/stage, W/S: zoom, P: material probe | authored inspection, not weapon simulation", self.kind, STAGE_NAMES[stage]));
             }
         }
         if self.smoke.is_some()
@@ -146,22 +153,11 @@ impl Scene {
             };
             result.map_err(|e| e.to_string())?;
         }
-        let (focus, facing, elevation) = if self.kind == WorldKind::Industrial {
-            (Vec3::new(-15.0, 2.4, 15.8), 1.0, 1.3)
-        } else {
-            (Vec3::new(2.0, 1.4, 0.1), -1.0, 0.5)
-        };
-        let camera = focus
-            + Vec3::new(
-                self.yaw.sin() * self.distance,
-                elevation,
-                facing * self.yaw.cos() * self.distance,
-            );
-        match self.renderer.render(
-            camera,
-            (focus - camera).normalize(),
-            self.started.elapsed().as_secs_f32(),
-        ) {
+        let (camera, direction) = self.camera();
+        match self
+            .renderer
+            .render(camera, direction, self.started.elapsed().as_secs_f32())
+        {
             RenderOutcome::Presented => {
                 if let Some(stage) = self.stream.displayed {
                     self.presented[stage] += 1;
@@ -178,9 +174,27 @@ impl Scene {
         self.finish_smoke(event_loop)
     }
 
+    fn camera(&self) -> (Vec3, Vec3) {
+        let (focus, facing, elevation) = if self.kind == WorldKind::Industrial {
+            (Vec3::new(-15.0, 2.4, 15.8), 1.0, 1.3)
+        } else {
+            (Vec3::new(2.0, 1.4, 0.1), -1.0, 0.5)
+        };
+        let camera = focus
+            + Vec3::new(
+                self.yaw.sin() * self.distance,
+                elevation,
+                facing * self.yaw.cos() * self.distance,
+            );
+        (camera, (focus - camera).normalize())
+    }
+
     fn finish_smoke(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         if self.smoke.is_some_and(|d| self.started.elapsed() >= d) {
-            if !self.stream.idle() || self.presented.iter().any(|n| *n < 35) {
+            if !self.stream.idle()
+                || self.presented.iter().any(|n| *n < 35)
+                || self.probed.iter().any(|p| !p)
+            {
                 return Err(format!(
                     "incomplete fine render smoke: {:?}",
                     self.presented
@@ -263,6 +277,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => s.renderer.resize(size),
             WindowEvent::RedrawRequested => s.frame(event_loop),
             WindowEvent::KeyboardInput { event, .. } => {
+                let mut result = Ok(());
                 if event.state == ElementState::Pressed
                     && let PhysicalKey::Code(key) = event.physical_key
                 {
@@ -280,10 +295,17 @@ impl ApplicationHandler for App {
                         KeyCode::ArrowDown => s.yaw -= 0.1,
                         KeyCode::KeyW => s.distance = (s.distance - 0.25).max(1.0),
                         KeyCode::KeyS => s.distance = (s.distance + 0.25).min(12.0),
+                        KeyCode::KeyP if !event.repeat && s.stream.idle() => {
+                            if let Some(stage) = s.stream.displayed {
+                                let (origin, direction) = s.camera();
+                                result = probe::camera(&s.worlds[stage], origin, direction)
+                                    .map(|summary| s.window.set_title(&summary));
+                            }
+                        }
                         _ => {}
                     }
                 }
-                Ok(())
+                result
             }
             _ => Ok(()),
         };

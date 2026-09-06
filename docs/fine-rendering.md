@@ -19,7 +19,12 @@ python tools/tooling_smoke.py renderdoc --world fine-inspection
 python tools/tooling_smoke.py renderdoc --world fine-industrial
 ```
 
-Left/right arrows choose a state; up/down orbit; W/S zoom; Escape closes the viewer. There is no
+Left/right arrows choose a state; up/down orbit; W/S zoom; P probes the camera's exact static
+material ray; Escape closes the viewer. The probe displays first material/distance and fictional
+remaining penetration work, without firing, carving or changing ammunition. Each complete stage
+also checks its open/closed centre and remaining rim against both fine rays and static overlap;
+smoke completion requires these checks on the displayed snapshots. See [fine ballistics](fine-ballistics.md).
+There is no
 first-person collision controller in this inspection camera. The mesh and exact static collision
 queries consume the same fine volume, but player movement through this graphical scene is not
 validated by this viewer. The smoke requires all four states to be actually presented at least 35

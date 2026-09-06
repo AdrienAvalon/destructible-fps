@@ -13,6 +13,8 @@ use crate::{
 };
 use core::fmt;
 
+pub mod ray;
+
 pub const SCALED_PER_MICROMETER: i64 = VOLUME_EDGE as i64;
 const CELL_SCALED: i64 = MICROMETERS_PER_VOXEL * SCALED_PER_MICROMETER;
 const MINIMUM_SCALED: i64 = i32::MIN as i64 * CELL_SCALED;
@@ -31,15 +33,22 @@ mod sealed {
 /// Only exact engine-owned storage implementations may satisfy physical queries.
 pub trait StaticGeometry: sealed::Sealed {
     fn geometry_cell(&self, position: IVec3) -> GeometryCell;
+    fn geometry_fingerprint(&self) -> u128;
 }
 impl StaticGeometry for World {
     fn geometry_cell(&self, position: IVec3) -> GeometryCell {
         GeometryCell::uniform(self.voxel(position))
     }
+    fn geometry_fingerprint(&self) -> u128 {
+        self.fingerprint()
+    }
 }
 impl StaticGeometry for RefinedWorld {
     fn geometry_cell(&self, position: IVec3) -> GeometryCell {
         self.cell(position)
+    }
+    fn geometry_fingerprint(&self) -> u128 {
+        self.fingerprint()
     }
 }
 

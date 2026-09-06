@@ -111,6 +111,18 @@ impl FixedRay {
         self.length
     }
 
+    /// Outward integer bound of the same canonical segment, for conservative material work.
+    /// Does not change the inward-rounded endpoint or the legacy traversal distance convention.
+    #[must_use]
+    pub fn length_ceil_um(&self) -> u64 {
+        let squared: u128 = self
+            .delta
+            .iter()
+            .map(|&v| i128::from(v).pow(2).cast_unsigned())
+            .sum();
+        self.length + u64::from(squared != u128::from(self.length).pow(2))
+    }
+
     /// Positive-volume intervals plus zero-length conservative edge/corner cover contacts.
     /// # Errors
     /// Returns an explicit budget error rather than a partial ray when the visit cap is exhausted.

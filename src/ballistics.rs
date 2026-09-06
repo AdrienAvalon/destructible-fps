@@ -3,6 +3,7 @@
 //! Resistance/energy values are fictional game units, not calibrated real-world ballistics.
 //! One integrity value still represents a whole metre-scale cell; sub-cell cavities remain work.
 
+pub mod fine;
 pub mod ray;
 pub mod state_wire;
 

@@ -1,0 +1,214 @@
+{
+  "schema": "avalon-native-video-v1",
+  "recorded_on": "2026-09-10",
+  "engine_version": "5.8.2",
+  "platform": "Linux x86_64, Vulkan",
+  "world": "/Game/Playtests/MarbleWalk_v1/World",
+  "content_origin": "3D world generated using World Labs / Marble API, rendered in Unreal with Cesium for Unreal",
+  "capture": {
+    "source": "owned floating PIE game window on isolated X11 display",
+    "window_size": [
+      1606,
+      940
+    ],
+    "crop_xywh": [
+      3,
+      35,
+      1600,
+      900
+    ],
+    "source_recording_seconds": 38,
+    "source_master_sha256": "8505fda5f2910e7c3ca4c12d3be17f047cfa4d882e19f35860bbd9bc5a9a6dfd",
+    "editing": "First 32 seconds retained; viewport crop, scale to 1280x720 and H.264 encoding. No cuts, speed changes, frame interpolation, audio, synthetic views or scene edits.",
+    "input": "Bounded XTEST keyboard and relative mouse events directed to the isolated game window",
+    "operator_receipt_sha256": "b42ea724e6277b0c1b939ed23d12693d35a6b1795d637b75d4ce3781c8a22f1d",
+    "native_session_receipt_sha256": "e0d380266a961449349bc57fd39c8c900d9e9ca51666a4310543bd5818ff86e6"
+  },
+  "video": {
+    "file": "2026-09-10-marble-walk.mp4",
+    "bytes": 5093556,
+    "sha256": "82d308a37c508a82217d7b2374674249d02c82353c5361bcab6d6dbffcdb1150",
+    "duration_seconds": 32,
+    "width": 1280,
+    "height": 720,
+    "frame_rate": "30/1",
+    "frames": 960,
+    "codec": "h264",
+    "pixel_format": "yuv420p",
+    "audio": false,
+    "faststart": true
+  },
+  "preview": {
+    "file": "2026-09-10-marble-walk-preview.gif",
+    "bytes": 1536835,
+    "sha256": "d9c48968d20610da696a1fdb9132b875578900fa14aa619a3713a420162316fe",
+    "source_interval_seconds": [
+      12,
+      16
+    ],
+    "duration_seconds": 4.01,
+    "width": 480,
+    "height": 270,
+    "frame_rate": 8,
+    "palette_colors": 64,
+    "loop": true,
+    "frame_rate_kind": "nominal; GIF frame delays quantized to centiseconds"
+  },
+  "observed": {
+    "horizontal_walk_metres": 6.298,
+    "jump_and_landing_observed": true,
+    "return_to_start_observed": true,
+    "cpu_splats_loaded": 4320000,
+    "gpu_frame_rate_measured": false,
+    "keyboard_input_scope": "Only this bounded automated sequence; not every physical keyboard, prolonged movement or focus-loss condition."
+  },
+  "events": [
+    {
+      "seconds_after_encoder_launch": 4.462,
+      "action": "pan_right",
+      "pawn_cm": [
+        0.0,
+        0.0,
+        87.79591631893159
+      ],
+      "camera_yaw_deg": 104.39499986171721,
+      "moving_on_ground": true,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 8.285,
+      "action": "pan_left",
+      "pawn_cm": [
+        0.0,
+        0.0,
+        87.79591631893159
+      ],
+      "camera_yaw_deg": 79.53132146596907,
+      "moving_on_ground": true,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 10.705,
+      "action": "facing_start",
+      "pawn_cm": [
+        0.0,
+        0.0,
+        87.79591631893159
+      ],
+      "camera_yaw_deg": 91.62089252471922,
+      "moving_on_ground": true,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 13.213,
+      "action": "walk_1",
+      "pawn_cm": [
+        -6.329034902071227,
+        161.37572724575682,
+        91.03717214242346
+      ],
+      "camera_yaw_deg": 92.2459464073181,
+      "moving_on_ground": true,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 14.707,
+      "action": "walk_2",
+      "pawn_cm": [
+        -12.515511659893104,
+        319.11655208395746,
+        93.43102081312867
+      ],
+      "camera_yaw_deg": 92.2459464073181,
+      "moving_on_ground": true,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 16.198,
+      "action": "walk_3",
+      "pawn_cm": [
+        -18.585061757740036,
+        473.87601798199813,
+        95.91090619433737
+      ],
+      "camera_yaw_deg": 92.2459464073181,
+      "moving_on_ground": true,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 17.735,
+      "action": "walk_4",
+      "pawn_cm": [
+        -24.679684223887275,
+        629.2747711854252,
+        103.09383724860757
+      ],
+      "camera_yaw_deg": 92.2459464073181,
+      "moving_on_ground": true,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 19.09,
+      "action": "jump",
+      "pawn_cm": [
+        -24.679684223887275,
+        629.2747711854252,
+        188.92831429511932
+      ],
+      "camera_yaw_deg": 92.2459464073181,
+      "moving_on_ground": false,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 20.419,
+      "action": "landing",
+      "pawn_cm": [
+        -24.679684223887275,
+        629.2747711854252,
+        103.06714664291361
+      ],
+      "camera_yaw_deg": 92.2459464073181,
+      "moving_on_ground": true,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 26.334,
+      "action": "close_look",
+      "pawn_cm": [
+        -24.679684223887275,
+        629.2747711854252,
+        103.06714664291361
+      ],
+      "camera_yaw_deg": 91.50684627890588,
+      "moving_on_ground": true,
+      "reset_count": 2
+    },
+    {
+      "seconds_after_encoder_launch": 28.108,
+      "action": "return_to_start",
+      "pawn_cm": [
+        0.0,
+        0.0,
+        87.79591631893159
+      ],
+      "camera_yaw_deg": 89.99999999999999,
+      "moving_on_ground": true,
+      "reset_count": 3
+    }
+  ],
+  "session_closed": {
+    "phase": "complete",
+    "error": null,
+    "receipt_persisted": true,
+    "end_reason": "owned_stop_requested",
+    "pie_running": false,
+    "dirty_maps": 0,
+    "dirty_content": 0
+  },
+  "preserved_files": 1598,
+  "limitations": [
+    "No destruction or multiplayer demonstrated",
+    "Close-range reconstruction and complete collision coverage remain unfinished",
+    "30 fps is the encoded capture cadence, not a measured engine performance result"
+  ]
+}

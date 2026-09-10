@@ -7,7 +7,7 @@
 Une usine en ruine, des matériaux qui devront réagir aux impacts, un état du monde partagé entre les joueurs.
 Le développement se concentre aujourd'hui sur la visite en première personne et la qualité de l'environnement.
 
-[Captures Unreal](#captures-unreal) · [État du projet](#état-du-projet) · [Essayer le projet](#essayer-le-projet) · [Suite](#prochaines-étapes)
+[Vidéo](#vidéo) · [Captures Unreal](#captures-unreal) · [État du projet](#état-du-projet) · [Essayer le projet](#essayer-le-projet) · [Suite](#prochaines-étapes)
 
 ![Moteur](https://img.shields.io/badge/moteur-Unreal%20Engine%205.8.2-313131)
 ![Jalon](https://img.shields.io/badge/jalon-visite%20FPS%20locale-8b7cf6)
@@ -42,6 +42,20 @@ Le jalon actuel est une **visite technique locale**, avec un rendu encore imparf
 Les fonctionnalités de destruction du prototype Rust ne sont pas présentées comme déjà portées dans Unreal.
 Le [point d'avancement et les preuves de capture](docs/checkpoints/2026-09-10-unreal-presentation.md)
 précisent les essais réalisés et les limites de cette publication.
+
+## Vidéo
+
+[![Aperçu animé de la marche dans Marble Walk, capturée nativement dans Unreal Engine.](docs/videos/2026-09-10-marble-walk-preview.gif)](docs/videos/2026-09-10-marble-walk.mp4)
+
+[**Voir la visite — 32 s · 720p · MP4**](docs/videos/2026-09-10-marble-walk.mp4)
+
+Enregistrée le **10 septembre 2026** dans le GameViewport Unreal sous Linux, cette vidéo
+silencieuse montre un panoramique, une marche d'environ **6,3 m**, un saut avec réception
+et le retour au départ. L'aperçu animé ci-dessus reprend quatre secondes de cette même session.
+
+Le détail proche reste imparfait : il s'agit d'une visite de prototype, sans destruction ni
+multijoueur. Les [preuves de cette session](docs/checkpoints/2026-09-10-unreal-video.md)
+précisent le parcours, la capture et les limites de validation.
 
 ## Captures Unreal
 

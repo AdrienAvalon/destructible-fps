@@ -2,10 +2,14 @@
 
 ## Scope and intent
 
-This repository builds a specialized, high-performance engine for a photorealistic multiplayer FPS
-with persistent material-aware destruction. Prefer a narrow engine that serves this game over a
-general editor or framework. A visually attractive demo is not evidence that the multiplayer or
-simulation architecture works.
+Unreal Engine 5.8.2 is the production direction since 2026-09-07 for the photorealistic multiplayer
+FPS with persistent material-aware destruction. Read the current README and
+`docs/checkpoints/2026-09-10-unreal-presentation.md` before resuming. This published snapshot contains
+the Unreal presentation and native captures; the migration sources remain in the local development
+checkout and are not yet included here. Preserve the Rust prototype as a technical reference and
+regression corpus; do not expand its renderer by default. The Rust-specific rules and commands below
+apply to that preserved code, not to an assumed Unreal port. A visually attractive demo is not
+evidence that multiplayer or structural destruction works.
 
 ## Resuming work
 

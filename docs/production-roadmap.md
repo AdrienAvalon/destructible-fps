@@ -1,5 +1,7 @@
 # Production roadmap
 
+**Direction actuelle : Unreal Engine 5.8.2.** La [feuille de route du README](../README.md#prochaines-étapes) et le [point Unreal](checkpoints/2026-09-10-unreal-presentation.md) décrivent le jalon courant. Cette page conserve les étapes détaillées du prototype Rust et les exigences de référence ; leurs implémentations ne sont pas réputées portées dans Unreal.
+
 ## Product contract
 
 The destination is a photorealistic native multiplayer FPS with construction and weapon-dependent,

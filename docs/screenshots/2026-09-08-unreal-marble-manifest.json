@@ -1,0 +1,65 @@
+{
+  "schema": "avalon-native-screenshot-publication-v1",
+  "published_on": "2026-09-10",
+  "engine_version": "5.8.2",
+  "platform": "Linux x86_64",
+  "scene_origin": "3D environment generated using World Labs / Marble API; rendered natively with Cesium for Unreal",
+  "source_worktree": {
+    "head": "b1031e36300a657b2b4cda90e61a0829250f47b6",
+    "uncommitted_changes": true,
+    "note": "HEAD alone does not identify the compiled Unreal working tree. Selected source fingerprints below are not a complete build attestation.",
+    "selected_sources": {
+      "unreal/Content/Python/build_marble_walk.py": "aba4dbb1ea2b0f94ea5ed113360a2f0b58a40204877205c8c057c7901e18be15",
+      "unreal/Content/Python/marble_walk_session.py": "841bcf09188d4911aed834ecec574e349ec25e99288d850e5a22f990ef203808",
+      "unreal/Source/DestructibleFPS/MarbleWalkCharacter.cpp": "e91ffa7c5076d4595e83ade6686e9d947959ac65096a20554f5393cf3e571e12",
+      "unreal/Source/DestructibleFPS/MarbleWalkCharacter.h": "7dddcbd2682dc30c46ab455bbbf33215524ccf11099827e4506aa0b7d45fb5c7",
+      "unreal/Source/DestructibleFPS/MarbleWalkGameMode.cpp": "ad37fc26a8c16346e00de0e539d74dfaa975bcee31a4ecdeb20af25355a1c73c",
+      "unreal/Source/DestructibleFPS/MarbleWalkGameMode.h": "7d2432c3a01258c5c2e64b2a3570f22bc51b1e61c635e75851fb6a15e66b42b4",
+      "unreal/Source/DestructibleFPS/MarbleWalkHUD.cpp": "525458953f2a12239333d35c1d852ec183e803874609d217ebc377d39eb1c889",
+      "unreal/Source/DestructibleFPS/MarbleWalkHUD.h": "5ab009dcf27b2c06c548c94f672bf1e336169bf8895175b0dc6ad49dfa7cb5a2"
+    }
+  },
+  "images": [
+    {
+      "file": "2026-09-08-unreal-marble-overview.png",
+      "captured_on": "2026-09-08",
+      "viewport_kind": "editor_viewport_game_view",
+      "width": 1014,
+      "height": 550,
+      "sha256": "c30be0e445bc7ba32b231937be6063415cb912f6086adaefe1e3800dc7d35d38",
+      "source_session": "courtyard-editor-jrrit445",
+      "source_file": "source-origin.png",
+      "source_receipt_sha256": "b04f4a4e6e047f386661ae9e9a6256332d439151b0ff6c42cbed1768f9e18c13",
+      "pixel_changes": "none"
+    },
+    {
+      "file": "2026-09-08-unreal-marble-walk.png",
+      "captured_on": "2026-09-08",
+      "viewport_kind": "game_viewport_pie",
+      "width": 1600,
+      "height": 902,
+      "sha256": "292fc2d09d3fcfc16422e8a3075d82b7bf357e8d473b5e71169606cbeb26acd6",
+      "source_session": "marble-walk-session-lf8x19ea",
+      "source_file": "game-00.png",
+      "source_receipt_sha256": "bbcde5c3cdf4687d42774bf0af3e5deb2426077ebfa4f143afca27fb83228415",
+      "pixel_changes": "none"
+    },
+    {
+      "file": "2026-09-08-unreal-marble-walk-close.png",
+      "captured_on": "2026-09-08",
+      "viewport_kind": "game_viewport_pie",
+      "width": 1600,
+      "height": 902,
+      "sha256": "9560ea748d12dd86e0c278b88542c69f4787afd6aa297a3b28fbbcc4152c4379",
+      "source_session": "marble-walk-session-3tdqc1ng",
+      "source_file": "game-00.png",
+      "source_receipt_sha256": "0d023576be15ef3eceb90e920d74e7f685506310876a66b030db43d9d066d1f7",
+      "pixel_changes": "none"
+    }
+  ],
+  "rights_reference": {
+    "url": "https://docs.worldlabs.ai/terms-of-service",
+    "section": "3.3(d)",
+    "checked_on": "2026-09-10"
+  }
+}

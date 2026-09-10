@@ -1,5 +1,9 @@
 # Reprendre le projet Destructible FPS
 
+**Direction actuelle : Unreal Engine 5.8.2.** Lire le [point public Unreal du 10 septembre](docs/checkpoints/2026-09-10-unreal-presentation.md) et les [captures natives du 8 septembre](README.md#captures-unreal). La présentation et les captures sont publiées ; les sources de migration restent en cours de consolidation locale.
+
+Le contenu ci-dessous conserve le point de reprise historique Rust du 6 septembre. Ses priorités de moteur et de rendu ne remplacent pas la direction Unreal actuelle.
+
 Point de reprise du 6 septembre 2026. Ce fichier est l'entrée humaine et agent du projet ; il ne
 dépend ni du contexte d'une conversation, ni d'une mémoire privée, ni d'un dossier `/tmp`.
 Les sources, tests et reçus versionnés priment sur un résumé. Lire aussi [AGENTS.md](AGENTS.md).
